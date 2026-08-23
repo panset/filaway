@@ -29,6 +29,8 @@ struct SidebarView: View {
     @State private var prompt: NamePrompt?
     @State private var promptText = ""
     @State private var dropTarget: String?
+    /// One-frame-ahead disclosure state — see ``expansion(of:)``.
+    @State private var expansionOverlay: [String: Bool] = [:]
 
     var body: some View {
         List(selection: selectionBinding) {
@@ -269,10 +271,25 @@ struct SidebarView: View {
         )
     }
 
+    /// The disclosure state of one folder (FR-1.5).
+    ///
+    /// Two stores, on purpose (M4-06). `expansionOverlay` is view-local `@State`
+    /// so the triangle turns in the same frame as the click; the model write —
+    /// which publishes, and therefore reloads the `List` — is pushed to the next
+    /// run-loop turn. AppKit is inside `NSOutlineView`'s expand/collapse
+    /// delegate when this setter runs, and reloading the table it is still
+    /// walking is exactly the "reentrant operation in its NSTableView delegate"
+    /// warning that has been in the launch log since M1.
     private func expansion(of path: String) -> Binding<Bool> {
         Binding(
-            get: { model.expandedFolders.contains(path) },
-            set: { model.toggleFolder(path, expanded: $0) }
+            get: { expansionOverlay[path] ?? model.expandedFolders.contains(path) },
+            set: { expanded in
+                expansionOverlay[path] = expanded
+                DispatchQueue.main.async {
+                    model.toggleFolder(path, expanded: expanded)
+                    expansionOverlay[path] = nil
+                }
+            }
         )
     }
 

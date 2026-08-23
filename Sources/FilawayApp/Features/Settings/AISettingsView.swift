@@ -29,15 +29,17 @@ struct AISettingsView: View {
                 }
 
                 SettingsRow(title: "Mode", detail: model.organizationMode.wrappedValue.detail) {
+                    // NFR-6: the accessibility name has to be applied before
+                    // `.labelsHidden()`, or AppKit's control is left nameless.
                     Picker("Mode", selection: model.organizationMode) {
                         ForEach(OrganizationMode.allCases) { mode in
                             Text(mode.label).tag(mode)
                         }
                     }
-                    .labelsHidden()
+                    .accessibilityLabel("Organization mode")
                     .pickerStyle(.menu)
                     .frame(width: 180)
-                    .accessibilityLabel("Organization mode")
+                    .labelsHidden()
                 }
 
                 SettingsRow(
@@ -45,9 +47,10 @@ struct AISettingsView: View {
                     detail: "Keyword search keeps working either way, online or off."
                 ) {
                     Toggle("Semantic search", isOn: model.semanticSearchEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
                         .accessibilityLabel("Semantic search")
+                        .accessibilityHint("Off keeps keyword search and stops building the index")
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
 
                 SettingsRow(
@@ -159,16 +162,20 @@ private struct IdleIntervalPicker: View {
             Text("\(minutes) min")
                 .monospacedDigit()
                 .frame(minWidth: 52, alignment: .trailing)
+            // The name and the value go on the `Stepper` itself. Putting them
+            // on the enclosing `HStack` with `children: .combine` reads well in
+            // SwiftUI but leaves AppKit's `AXIncrementor` unnamed, which is
+            // what VoiceOver actually lands on (NFR-6, M4-06).
             Stepper(
                 "Auto-organize after idle",
                 value: $minutes,
                 in: CoreSettings.idleIntervalRange
             )
+            .accessibilityLabel("Auto-organize after idle")
+            .accessibilityValue("^[\(minutes) minute](inflect: true)")
             .labelsHidden()
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Auto-organize after idle")
-        .accessibilityValue("\(minutes) minutes")
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -225,9 +232,9 @@ private struct AdvancedModelSection: View {
                 + "\(AIModel.defaultSearch.id) for search."
         ) {
             Toggle("Advanced model override", isOn: model.advancedModelOverride)
-                .labelsHidden()
-                .toggleStyle(.switch)
                 .accessibilityLabel("Choose models manually")
+                .toggleStyle(.switch)
+                .labelsHidden()
         }
 
         if model.advancedModelOverride.wrappedValue {
@@ -257,9 +264,9 @@ private struct ModelPicker: View {
                 Text(model.displayName(forModel: id)).tag(id)
             }
         }
-        .labelsHidden()
+        .accessibilityLabel(label)
         .pickerStyle(.menu)
         .frame(width: 220)
-        .accessibilityLabel(label)
+        .labelsHidden()
     }
 }

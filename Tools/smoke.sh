@@ -79,6 +79,8 @@ SEARCH_ROOT="$WORK/SearchNotes"
 SEMANTIC_ROOT="$WORK/SemanticNotes"
 KILL_ROOT="$WORK/KillNotes"
 SETTINGS_ROOT="$WORK/SettingsNotes"
+WIRING_ROOT="$WORK/WiringNotes"
+A11Y_ROOT="$WORK/A11yNotes"
 PASTE_ROOT="$WORK/PasteNotes"
 # M4-01 chooses these through the flow, so they are *not* passed as
 # FILAWAY_NOTES_ROOT — the point of the phase is that the bookmark decides.
@@ -89,6 +91,11 @@ SUITE="com.tejaspanse.filaway.smoke.$STAMP"
 # The settings phases need their own defaults domain: they write preferences the
 # capture phases must not inherit, and phase `settings2` reads them back.
 SETTINGS_SUITE="com.tejaspanse.filaway.smoke.settings.$STAMP"
+# M4-02/M4-06 each get their own domain and Application Support: `settings-wiring`
+# rewrites every FR-8.1 preference and rebuilds a semantic index from scratch,
+# and `a11y` must not inherit either.
+WIRING_SUITE="com.tejaspanse.filaway.smoke.wiring.$STAMP"
+A11Y_SUITE="com.tejaspanse.filaway.smoke.a11y.$STAMP"
 # One root per organize phase: each seeds the same fixture corpus from scratch
 # and each needs its own Application Support so the baselines and the Activity
 # journal start empty.
@@ -105,7 +112,7 @@ FIXTURES="$PWD/Tests/Fixtures/ai-recordings"
 ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
 ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
 mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" \
-         "$SETTINGS_ROOT" "$PASTE_ROOT" \
+         "$SETTINGS_ROOT" "$PASTE_ROOT" "$WIRING_ROOT" "$A11Y_ROOT" \
          "$ORGANIZE_ROOT" "$ORGANIZE_AUTO_ROOT" "$ORGANIZE_OFFLINE_ROOT" \
          "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT"
 
@@ -165,6 +172,35 @@ seed_semantic_corpus() {
 }
 seed_semantic_corpus "$SEMANTIC_ROOT"
 
+# M4-02's `settings-wiring` phase needs notes *inside* the folder it excludes,
+# so "excluding a folder purges what was already indexed" (FR-4.5) has chunks to
+# purge. `Personal` is the folder name SettingsSmokeCheck.excludedFolder names —
+# keep the two in step.
+seed_wiring_corpus() {
+  local root="$1"
+  mkdir -p "$root/Personal" "$root/Commands"
+  {
+    echo "Private journal entry about the weekend and the garden."
+    echo
+    echo "Nothing here should ever reach a model."
+  } > "$root/Personal/Weekend.md"
+  {
+    echo "Second private note, so the folder is not a single-chunk edge case."
+    echo
+    echo "More prose about nothing in particular, at some length, so the"
+    echo "chunker has a paragraph or two to work with rather than one line."
+  } > "$root/Personal/Garden.md"
+  {
+    echo "Public note that must survive the purge."
+    echo
+    echo '```bash'
+    echo 'curl -fsS http://localhost:8080/healthz'
+    echo '```'
+  } > "$root/Commands/Health check.md"
+}
+seed_wiring_corpus "$WIRING_ROOT"
+seed_search_corpus "$A11Y_ROOT"
+
 failures=0
 app_pid=""
 
@@ -172,7 +208,8 @@ cleanup() {
   if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
     kill -9 "$app_pid" 2>/dev/null
   fi
-  for suite in "$SUITE" "$SETTINGS_SUITE" "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
+  for suite in "$SUITE" "$SETTINGS_SUITE" "$WIRING_SUITE" "$A11Y_SUITE" \
+               "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
     defaults delete "$suite" >/dev/null 2>&1
     rm -f "$HOME/Library/Preferences/$suite.plist"
   done
@@ -187,7 +224,7 @@ trap cleanup EXIT INT TERM
 # run_phase <name> <timeout-seconds>
 run_phase() {
   local phase="$1" limit="$2" status
-  local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root=""
+  local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root="" shots=""
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
   [ "$phase" = "semantic" ] && root="$SEMANTIC_ROOT"
@@ -195,6 +232,12 @@ run_phase() {
   local onboard_root=""
   case "$phase" in
     settings|settings2) root="$SETTINGS_ROOT"; suite="$SETTINGS_SUITE" ;;
+    settings-wiring) root="$WIRING_ROOT"; suite="$WIRING_SUITE"; support="$WORK/SupportWiring" ;;
+    a11y)            root="$A11Y_ROOT";   suite="$A11Y_SUITE";   support="$WORK/SupportA11y"
+                     # NFR-7's light/dark bitmaps. Written into the throwaway
+                     # work directory and never committed; `--keep` is how a
+                     # human gets to look at them.
+                     shots="$WORK/shots" ;;
     organize)         root="$ORGANIZE_ROOT";         support="$WORK/SupportOrganize" ;;
     organize-auto)    root="$ORGANIZE_AUTO_ROOT";    support="$WORK/SupportOrganizeAuto" ;;
     organize-offline) root="$ORGANIZE_OFFLINE_ROOT"; support="$WORK/SupportOrganizeOffline"
@@ -217,7 +260,8 @@ run_phase() {
   FILAWAY_AI_MODE="replay" \
   FILAWAY_AI_FIXTURES="$FIXTURES" \
   FILAWAY_AI_FAIL="$fail" \
-    "$APP" 2>&1 &
+  FILAWAY_SMOKE_SHOTS="$shots" \
+    "$APP" > "$WORK/phase-$phase.log" 2>&1 &
   app_pid=$!
 
   ( sleep "$limit"; kill -9 "$app_pid" 2>/dev/null ) &
@@ -228,6 +272,8 @@ run_phase() {
   kill "$watchdog" 2>/dev/null
   wait "$watchdog" 2>/dev/null
   app_pid=""
+  cat "$WORK/phase-$phase.log"
+  cat "$WORK/phase-$phase.log" >> "$WORK/transcript.log"
 
   if [ "$status" -ge 128 ]; then
     echo "SMOKE FAIL phase-$phase — killed after ${limit}s (signal $((status - 128)))"
@@ -268,6 +314,7 @@ run_kill_phase() {
   wait "$app_pid" 2>/dev/null
   app_pid=""
   cat "$out"
+  cat "$out" >> "$WORK/transcript.log"
 
   if [ "$ready" = "1" ]; then
     echo "smoke: phase kill — SIGKILL delivered mid-edit"
@@ -288,6 +335,11 @@ run_phase 1 90
 run_phase 2 60
 run_phase settings 90
 run_phase settings2 60
+# M4-02: preferences reaching the live objects. Slow, because it builds a real
+# semantic index (the bundled Core ML package compiles on first use).
+run_phase settings-wiring 300
+# M4-06: the accessibility walk and the light/dark captures.
+run_phase a11y 120
 run_phase paste 90
 run_phase onboarding 120
 run_phase onboarding2 60
@@ -295,6 +347,22 @@ run_phase onboardingskip 120
 # Last: the embedder compiles the bundled Core ML package on first use, which
 # can take a few seconds on a cold Application Support.
 run_phase semantic 240
+
+# M4-06: AppKit logs "reentrant operation in its NSTableView delegate" to
+# stderr and says it "will become an assert in the future". It only fires when
+# there is a real table — i.e. only when the screen is unlocked and the
+# WindowGroup got a window — so this is a guard that arms itself on a machine
+# that can see it, and stays quiet on one that cannot.
+reentrant="$(grep -c "reentrant operation" "$WORK/transcript.log" 2>/dev/null || echo 0)"
+if [ "$reentrant" != "0" ]; then
+  echo "SMOKE FAIL appkit-reentrancy — $reentrant reentrant NSTableView operations logged"
+  grep -m 3 "reentrant operation" "$WORK/transcript.log"
+  failures=$((failures + 1))
+elif [ "$SCREEN_LOCKED" = "1" ]; then
+  echo "smoke: note — the NSTableView reentrancy guard needs an unlocked screen to mean anything"
+else
+  echo "SMOKE ok   appkit-reentrancy — no reentrant NSTableView operations logged"
+fi
 
 echo
 if [ "$failures" -gt 0 ] && [ "$SCREEN_LOCKED" = "1" ]; then

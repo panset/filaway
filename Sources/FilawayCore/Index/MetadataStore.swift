@@ -329,6 +329,25 @@ public actor MetadataStore {
         try dbQueue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM notes") ?? 0 }
     }
 
+    /// Semantic chunks currently stored, for the whole library or for the notes
+    /// under one folder (M4-02).
+    ///
+    /// The observable half of FR-4.5: excluding a folder has to *remove* what
+    /// was already indexed, and "the chunks are gone" is the only statement of
+    /// that a test can make without reading the model's mind.
+    public func chunkCount(inFolder folderPath: String? = nil) throws -> Int {
+        try dbQueue.read { db in
+            guard let folderPath else {
+                return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM chunks") ?? 0
+            }
+            let normalized = PathRules.normalize(folderPath)
+            return try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM chunks c JOIN notes n ON n.id = c.note_id
+                WHERE n.folder_path = ? OR n.folder_path LIKE ?
+                """, arguments: [normalized, normalized + "/%"]) ?? 0
+        }
+    }
+
     // MARK: - Recents (FR-1.2)
 
     /// Records that the user opened a note. Feeds the Recents ordering.
