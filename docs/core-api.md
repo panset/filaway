@@ -684,7 +684,9 @@ Notes for the UI layer:
 
 Retrieval above is entirely offline and ends at `SemanticResults.promptChunks`.
 This is the step that turns those chunks into Figure 2b's **best-match answer
-card**, and the one place in search that talks to Claude.
+card**, and the one place in search that talks to Claude. Rationale in ADR-054
+(the local arm and the clock), ADR-055 (numbered chunks, verbatim snippets) and
+ADR-056 (the ⌘K side of it).
 
 | Type | Kind | Owns |
 |---|---|---|
