@@ -2053,3 +2053,131 @@ function of `SearchCoordinator`'s state.
   pinned offline by `AnswerGoldenTests`.
 
 ---
+
+## ADR-057 — Changing the notes folder *opens* a library; it never moves one
+
+**Date:** 2026-08-23 · **Task:** M4-02 · **Status:** accepted
+
+**Context.** FR-8.1 lists "notes folder location" as a setting, and M4-01's
+onboarding already stores the choice as a security-scoped bookmark. Settings →
+General has to offer the same choice a second time. The obvious reading of a
+"Change…" button next to a folder path is "move my notes there", and the other
+plausible reading is "copy them there" — both of which would make the button a
+destructive file operation dressed as a preference.
+
+**Decision.** Changing the notes folder **opens** the library at the chosen
+path. Nothing is moved, copied or deleted.
+
+- `AppModel.reopenLibrary(at:)` runs `bootstrap()` in reverse — flush the
+  autosave buffer (FR-2.3 applies to a settings change too), stop the watcher,
+  the organizer and the indexer, drop the whole storage stack, replace the
+  bookmark, re-key the per-library preferences, then `bootstrap()` again.
+- The previous library keeps its database, its exclusions, its expansion set and
+  its last-open note, all of which are keyed by `Library.key`. Pointing Filaway
+  back at it restores every one of them.
+- The confirmation says so in its own words rather than relying on the user
+  guessing right: *"Nothing is moved or copied — your existing notes stay exactly
+  where they are."*
+- `SemanticSearchCoordinator.resetForLibraryChange()` throws the retrieval stack
+  away rather than re-pointing it. The vector store, the index and the ranker are
+  all keyed to one `MetadataStore`; half-swapping them is how you get answers
+  from the folder the user just left.
+
+**Consequences.**
+- The notes root is no longer "resolved once per launch and never changed while
+  the app is running", which `AppSettings.notesRoot` documented. It is still
+  cached; `setNotesRoot(_:)` invalidates the cache and `reopenLibrary(at:)` is
+  the only caller that does so mid-launch.
+- `CoreSettings.libraryKey` is assigned during the swap, which fires an
+  `.excludedFolders` notification — exactly what the organizer and the indexer
+  need to hear, and the reason that setter notifies at all.
+- FR-1.5's restored state is per library, so the window frame and sidebar width
+  (global) survive the change while the expansion set and last-open note come
+  from the new library. That is the intended split, and it is the thing to
+  re-check by hand once there is an unlocked screen.
+
+---
+
+## ADR-058 — One status pill, fed by the organizer, with the connection folded in
+
+**Date:** 2026-08-23 · **Task:** M4-02 · **Status:** accepted
+
+**Context.** Two pills existed. `Features/Organize/AIStatusIndicator` (M2-09)
+drew the toolbar's FR-6.4 state from `OrganizeCoordinator`; `Features/Settings/
+AIStatusPill` (M2-11) drew the same six `AIStatus` cases from
+`AIConnectionManager`, for Settings and onboarding, and was deliberately left out
+of the toolbar so M2-11 did not have to rewrite `ShellView`. They disagreed about
+wording ("AI off" versus "Connect AI") and about when to draw at all.
+
+**Decision.** `AIStatusPill` is the only one. `AIStatusIndicator` is deleted;
+the file keeps the notification names and is renamed `OrganizeNotifications.swift`.
+
+- **The organizer is the input, not the connection manager.** The pill reads
+  `OrganizeCoordinator.status` and `queuedSessionCount`. The coordinator
+  subscribes to `AIConnectionManager.statusChanges()` itself and folds the result
+  in, so there is one place where the two sources of truth meet.
+- **A live pipeline failure wins over "the key validates".** `offline` and
+  `rateLimited` are more specific than a successful `GET /v1/models`, so a
+  `connected` report only clears `notConfigured` and `invalidKey`. The retry loop
+  clears the rest when the provider actually answers.
+- **Nothing is rebuilt when the key changes.** `APIKeySource` reads the Keychain
+  on every request, so Settings → AI → Change… takes effect on the next call.
+  What has to be told is `Organizer.aiStatusChanged(_:)`, which drains the
+  offline queue when the status becomes usable (FR-6.4).
+- **Silence is the healthy state.** The pill draws nothing when connected with an
+  empty queue. A badge that is always lit is a badge nobody reads.
+
+**Consequences.**
+- `.filawayOpenAISettings` finally has a listener:
+  `SettingsWindow.observeOpenRequests()`, registered once from
+  `applicationDidFinishLaunching`, opens Settings on the **AI** tab. Arriving on
+  General after clicking "Connect AI" would be a small betrayal, so the tab is
+  selected through `SettingsTabSelection` *before* the menu item is performed and
+  the window is built showing it.
+- `OrganizeCoordinator` now touches `SettingsModel.shared`. That is safe where
+  `AppModel` would not be: the coordinator is built after the first paint, so
+  none of the Keychain or ledger cost lands on NFR-1's launch path.
+
+---
+
+## ADR-059 — The accessibility check walks the tree, and audits itself first
+
+**Date:** 2026-08-23 · **Task:** M4-06 · **Status:** accepted
+
+**Context.** NFR-6 promises a VoiceOver label on every control. Plan §8 leaves no
+XCTest UI tests, and this machine's GUI session is usually locked, so "someone
+opens Accessibility Inspector" is not a check that runs. But the accessibility
+tree is ordinary AppKit objects, and a `Settings` scene is built by SwiftUI
+without ever being shown.
+
+**Decision.** `AccessibilityAudit` walks a window's live tree through the
+`NSAccessibility` protocol methods and objects to any actionable control, or any
+visible image, with no label, title, help or value. Three rules keep it from
+arguing with correct code, and one keeps it from lying:
+
+1. **A control is a leaf.** AppKit builds a stepper from two nested buttons and a
+   tab item from a button inside a button; none is announced separately.
+2. **A named ancestor covers its children** — which is exactly what
+   `.accessibilityElement(children:)` and SwiftUI's control wrappers do. Without
+   this the walk objects to every correctly labelled `Toggle` in the app.
+3. **Window furniture is skipped by subrole.** Close/minimise/zoom are drawn
+   *and* announced by the system.
+4. **The phase audits itself first**, against a synthetic window holding one
+   unlabelled `NSButton` and one labelled one, and insists on exactly one
+   finding. A check that has silently stopped looking is worse than no check.
+
+The walk descends the `NSView` tree as well as the published AX children,
+because a window that has never been on screen publishes a shallow tree — which
+is the only case available on a locked screen.
+
+**Consequences.**
+- It found two real defects: `.labelsHidden()` applied *after*
+  `.accessibilityLabel` left AppKit's `PlatformSwitch` and `AXIncrementor`
+  nameless, and `AIStatusPill` announced "AI" rather than a sentence.
+- It is not a VoiceOver pass and does not claim to be. It cannot say whether a
+  label reads well, whether focus order makes sense, or whether the rotor finds
+  anything. `docs/a11y-checklist.md` records that split item by item.
+- The main window is audited only when a `WindowGroup` window exists. On a locked
+  screen the phase prints `main-window-skipped` rather than passing on nothing.
+
+---

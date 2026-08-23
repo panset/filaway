@@ -33,6 +33,11 @@ enum SettingsSmokeCheck {
     }
 
     static func start(phase: String) {
+        // Line-buffer stdout. A phase's output is otherwise block-buffered the
+        // moment it is redirected to a file, and a phase that hangs or is killed
+        // by the watchdog then reports *nothing at all* — the one case where the
+        // log matters most.
+        setvbuf(stdout, nil, _IOLBF, 0)
         Task { @MainActor in
             await settle(seconds: 1.0)
             switch phase {

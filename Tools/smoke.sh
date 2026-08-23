@@ -261,7 +261,7 @@ run_phase() {
   FILAWAY_AI_FIXTURES="$FIXTURES" \
   FILAWAY_AI_FAIL="$fail" \
   FILAWAY_SMOKE_SHOTS="$shots" \
-    "$APP" > "$WORK/phase-$phase.log" 2>&1 &
+    "$APP" > >(tee -a "$WORK/transcript.log") 2>&1 &
   app_pid=$!
 
   ( sleep "$limit"; kill -9 "$app_pid" 2>/dev/null ) &
@@ -272,8 +272,6 @@ run_phase() {
   kill "$watchdog" 2>/dev/null
   wait "$watchdog" 2>/dev/null
   app_pid=""
-  cat "$WORK/phase-$phase.log"
-  cat "$WORK/phase-$phase.log" >> "$WORK/transcript.log"
 
   if [ "$status" -ge 128 ]; then
     echo "SMOKE FAIL phase-$phase — killed after ${limit}s (signal $((status - 128)))"

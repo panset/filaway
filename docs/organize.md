@@ -412,7 +412,7 @@ after apply/undo ─▶ LibraryWatcher.reconcile(paths:) ─▶ sidebar, index, 
 | baselines | `ActivityLog` (`note_baselines`) | — |
 | apply | `PlanApplier` | — |
 | offline queue | `PendingSessionStoreGRDB` (`pending_sessions`, `v5-pending-sessions`) | — |
-| settings | `OrganizeSettingsSource`, UserDefaults-backed | M2-11 → `AppSettings` |
+| settings | `OrganizeSettingsSource` → `CoreOrganizeSettings` over `CoreSettings`, live via `observe(_:)` (M4-02) | — |
 | provider | `AIProviderFactory`, `FILAWAY_AI_MODE` defaulting to **`live`** (ADR-041) | — |
 
 Three things are worth knowing because they are easy to get wrong:
@@ -452,12 +452,29 @@ Three things are worth knowing because they are easy to get wrong:
 
 ### Degradation (M2-09)
 
-`AIStatusIndicator` in the toolbar: `AI ready` · `AI queued · N` · `AI offline`
-· `Key invalid` · `AI paused` · `AI off`. Clicking it calls
-`onOpenAISettings`, which posts `.filawayOpenAISettings` for M2-11's Settings
-scene. Queued sessions live in `pending_sessions` and are retried on a 60 s
-loop, on `aiStatusChanged(.connected)`, and once at launch. No modal alert
-anywhere, and nothing on this path can block a keystroke.
+`AIStatusPill` in the toolbar (`Features/Settings/`, hosted by
+`ShellView.AIStatusPillHost`). It draws **nothing** while the connection is
+healthy and the queue is empty; otherwise `Queued · N` · `AI offline` ·
+`Key rejected` · `Rate limited` · `Connect AI`. Clicking it calls
+`onOpenAISettings`, which posts `.filawayOpenAISettings`;
+`SettingsWindow.observeOpenRequests()` opens Settings on its AI tab (M4-02).
+
+Its input is `OrganizeCoordinator.status` and `queuedSessionCount`, and the
+coordinator folds `AIConnectionManager.statusChanges()` into that status itself,
+so the pipeline's own verdict and the key's validity meet in exactly one place.
+A live failure (`offline`, `rateLimited`) is more specific than "the key
+validates", so a `connected` report only clears `notConfigured` / `invalidKey`.
+Nothing is rebuilt when the key changes — `APIKeySource` reads the Keychain on
+every request — but `Organizer.aiStatusChanged(_:)` is told, and it drains the
+queue as soon as the status is usable. ADR-058.
+
+Queued sessions live in `pending_sessions` and are retried on a 60 s loop, on
+`aiStatusChanged(.connected)`, and once at launch. No modal alert anywhere, and
+nothing on this path can block a keystroke.
+
+`AIStatusIndicator`, M2-09's near-identical pill, was deleted in M4-02; the file
+it lived in is now `Features/Organize/OrganizeNotifications.swift` and holds only
+the notification names.
 
 ### Known gap
 

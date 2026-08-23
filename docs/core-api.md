@@ -202,6 +202,7 @@ func note(id: NoteID) throws -> NoteSummary?
 func note(relativePath: String) throws -> NoteSummary?
 func notes(inFolder: String) throws -> [NoteSummary]
 func noteCount() throws -> Int
+func chunkCount(inFolder: String? = nil) throws -> Int   // semantic chunks, all or one subtree
 func folders() throws -> [FolderInfo]
 func tree() throws -> Folder             // the sidebar tree, no disk access
 func snapshot() throws -> LibrarySnapshot
@@ -219,10 +220,16 @@ func setMeta(_ key: String, _ value: String) throws
 * **Recents (FR-1.2)**: `recents(limit: 10)` returns `RecentNote` values ordered
   by `max(lastOpened, mtime)`, newest first — purely chronological, never
   reordered by the AI. Call `markOpened(id:)` when the user opens a note.
+* **`chunkCount(inFolder:)`** counts the semantic index, for the whole library or
+  for one folder *and its subfolders* — exclusion is a prefix rule, so a count
+  that stopped at one level would under-report. It is how FR-4.5's "excluding a
+  folder removes what was already indexed" is asserted, in `ExclusionPurgeTests`
+  and in the `settings-wiring` smoke phase (M4-02).
 * Everything here is derived. Deleting `filaway.sqlite` costs one
-  `rebuild(from: store.scan())`, which is what `Settings → Rebuild index` will
-  do. Only `last_opened` has no file representation, and `rebuild` carries it
-  across by note id.
+  `rebuild(from: store.scan())`. `Settings → Rebuild index` goes the other way —
+  it keeps the notes and throws away the *semantic* index
+  (`Indexer.rebuildAll()`, FR-5.4). Only `last_opened` has no file
+  representation, and `rebuild` carries it across by note id.
 * The migration registry is `DatabaseSchema.migrator`. Append migrations, never
   edit or reorder them. `v2-fts` (M1-06) is described under **Search** below
   and `v4-activity` (M2-08) under **Applying plans**; `v3-chunks` (M3-02) is
@@ -1079,6 +1086,25 @@ Three things to know:
 should run. Handlers fire synchronously on the writing thread with the `Key`
 that changed, which is what lets the Organizer, `SessionTracker` and the
 `Indexer` pick up mode, interval and exclusion edits without a restart.
+
+**Who subscribes (M4-02).** Two objects, and between them they cover every key
+that has a live consumer:
+
+| Subscriber | Keys | What it does with them |
+|---|---|---|
+| `OrganizeCoordinator` | `organizationMode`, `idleInterval`, `excludedFolders`, `organizeModel`, `advancedModelOverride` | `SessionTracker.setConfiguration`, `Organizer.setSettings`, `PlanApplier.setExcludedFolders` |
+| `SemanticSearchCoordinator` | `excludedFolders`, `searchModel`, `advancedModelOverride`, `semanticSearchEnabled` | re-filters and purges the index, `AnswerExtractor.setModel`, starts/stops the `Indexer`, drops ⌘K out of Ask mode |
+
+Two traps the subscribers have to know about:
+
+* **Excluding a folder is not a stale-note event.** `Indexer.catchUp()` only
+  visits notes whose bytes changed, so it will never revisit an indexed note in a
+  folder that has just been excluded. Removing what is already there is a
+  separate pass (`SemanticSearchCoordinator.purgeExcluded`), and
+  `ExclusionPurgeTests` pins the distinction.
+* **Send the *effective* model.** `organizeModel` / `searchModel` are the
+  picker's memory; `effectiveOrganizeModel` / `effectiveSearchModel` are what the
+  provider should actually be asked for (FR-6.2).
 
 `CoreSettings` is a `public typealias` for this type. `FilawayApp` has its own
 `AppSettings` (window frame, sidebar width) and cannot spell
