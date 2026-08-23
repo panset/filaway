@@ -23,7 +23,7 @@ import GRDB
 /// | `v4-activity` | M2-08 | `activity_events`, `undo_events`, `note_baselines` |
 public enum DatabaseSchema {
     /// Bumped whenever the *last* migration changes; mirrored into `meta`.
-    public static let version = 2
+    public static let version = 3
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -106,6 +106,84 @@ public enum DatabaseSchema {
                 try db.execute(sql: "INSERT INTO \(table)(\(table), rank) VALUES('rank', 'bm25(10.0, 1.0)')")
             }
             for sql in ftsTriggerStatements { try db.execute(sql: sql) }
+        }
+
+        // M2-07 / M2-08 (FR-4.3, FR-4.4, NFR-3). One table does double duty:
+        // `activity_events` is both the user-visible Activity log *and* the
+        // apply journal. A row is written with `status = 'inProgress'` before
+        // ``PlanApplier`` touches a single file, and only flips to `'applied'`
+        // once every after-image is durable — so a crash mid-apply leaves a row
+        // that ``PlanApplier/recoverIncompleteEvents()`` can roll back (or
+        // forward) on the next launch.
+        //
+        // `activity_note_images` holds the before/after *raw file text* of every
+        // note an event touched: the material for the diff view (FR-4.3), for
+        // Undo (byte-identical restore or a reverse patch), and for journal
+        // recovery. It is its own table rather than a JSON blob because Undo's
+        // LIFO rule asks "did a later event touch this note?", which wants an
+        // index.
+        migrator.registerMigration("v4-activity") { db in
+            try db.execute(sql: """
+                CREATE TABLE activity_events (
+                    id TEXT PRIMARY KEY,
+                    created_at DOUBLE NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    prompt_version TEXT,
+                    model TEXT,
+                    plan_json TEXT,
+                    session_text TEXT,
+                    progress_json TEXT,
+                    undoable INTEGER NOT NULL DEFAULT 1,
+                    undone_by TEXT,
+                    detail TEXT NOT NULL DEFAULT ''
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX activity_events_on_created ON activity_events(created_at DESC, id DESC)")
+            try db.execute(sql: "CREATE INDEX activity_events_on_status ON activity_events(status)")
+
+            try db.execute(sql: """
+                CREATE TABLE activity_note_images (
+                    event_id TEXT NOT NULL REFERENCES activity_events(id) ON DELETE CASCADE,
+                    note_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    created INTEGER NOT NULL DEFAULT 0,
+                    before_path TEXT,
+                    before_text TEXT,
+                    before_hash TEXT,
+                    after_path TEXT,
+                    after_text TEXT,
+                    after_hash TEXT,
+                    trashed_url TEXT,
+                    PRIMARY KEY (event_id, note_id)
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX activity_note_images_on_note ON activity_note_images(note_id)")
+
+            try db.execute(sql: """
+                CREATE TABLE undo_events (
+                    id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL REFERENCES activity_events(id) ON DELETE CASCADE,
+                    created_at DOUBLE NOT NULL,
+                    outcome TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT ''
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX undo_events_on_event ON undo_events(event_id)")
+
+            // The organized baseline of FR-3.2: the content the last plan was
+            // computed against, so `SessionTracker` can tell "the user typed
+            // since" from "nothing changed".
+            try db.execute(sql: """
+                CREATE TABLE note_baselines (
+                    note_id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    updated_at DOUBLE NOT NULL
+                )
+                """)
         }
 
         return migrator
