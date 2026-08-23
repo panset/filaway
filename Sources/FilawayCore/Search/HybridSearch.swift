@@ -101,7 +101,7 @@ public struct SemanticResults: Sendable, Equatable {
 ///
 /// This type never touches Claude and never touches the network.
 public actor HybridSearch {
-    public struct Options: Sendable {
+    public struct Options: Sendable, Equatable {
         /// Chunks each retriever contributes before fusion (plan §3 M3-03: 50).
         public var candidateLimit: Int
         /// Chunks returned.
@@ -264,7 +264,7 @@ public actor HybridSearch {
                 chunks: chunks,
                 notes: aggregate(fused, limit: options.noteLimit),
                 usedVectors: usedVectors,
-                usedKeywords: !keywordNotes.isEmpty || !terms.isEmpty
+                usedKeywords: Self.orExpression(for: text) != nil
             )
         } catch is CancellationError {
             return .empty(query: query)
@@ -285,25 +285,31 @@ public actor HybridSearch {
     /// Whether a note may appear at all: exclusions, folder scope, and FR-5.3's
     /// hard date range. Applied *inside* the vector top-k so a date-restricted
     /// search cannot come back empty because newer chunks filled the list.
+    ///
+    /// The decision is made **once per note**, not once per chunk. The vector
+    /// scan calls this for every resident row — 340,000 of them on a 20,000-note
+    /// library — so anything that touches a string in here is a query-latency
+    /// disaster: doing the path work per row cost 500 ms of a 580 ms query,
+    /// against 80 ms for the same query without a date filter. Resolving the
+    /// admitted set up front turns the hot path into one set lookup.
     private func admissionFilter(
         options: Options, range: DateRange?
     ) -> (@Sendable (NoteID) -> Bool)? {
         guard !options.exclusions.isEmpty || options.folderPath != nil || range != nil else {
             return nil
         }
-        let meta = noteMeta
         let exclusions = options.exclusions
         let folder = options.folderPath.map(PathRules.normalize)
-        return { id in
-            guard let note = meta[id] else { return false }
-            if let range, !range.contains(note.modified) { return false }
+        var admitted = Set<NoteID>(minimumCapacity: noteMeta.count)
+        for (id, note) in noteMeta {
+            if let range, !range.contains(note.modified) { continue }
             // A note lives *inside* a folder, so only the prefix form applies.
-            if let folder, !folder.isEmpty, !note.relativePath.hasPrefix(folder + "/") {
-                return false
-            }
-            if exclusions.isExcluded(path: note.relativePath) { return false }
-            return true
+            if let folder, !folder.isEmpty, !note.relativePath.hasPrefix(folder + "/") { continue }
+            if !exclusions.isEmpty, exclusions.isExcluded(path: note.relativePath) { continue }
+            admitted.insert(id)
         }
+        let resolved = admitted
+        return { resolved.contains($0) }
     }
 
     // MARK: - Keyword arm

@@ -132,7 +132,11 @@ struct SemanticQueryShape {
     static let all: [SemanticQueryShape] = [
         .init(name: "command lookup", query: "the curl command to fetch documents as json"),
         .init(name: "paraphrase", query: "how do I bring the container stack back up"),
-        .init(name: "temporal", query: "the thing I edited two days ago about tokens"),
+        // `SyntheticCorpus` writes every file at generation time, so "today"
+        // is the only hard date range that can match anything. It exercises
+        // the same path as "two days ago" — parse, then filter inside the
+        // vector top-k — while still returning results to time.
+        .init(name: "temporal", query: "the thing I edited today about tokens"),
         .init(name: "recency", query: "the ranking notes I touched recently"),
         .init(name: "code fragment", query: "rsync deploy to the server over ssh"),
         .init(name: "concept", query: "why does the token budget run out mid session"),

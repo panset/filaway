@@ -3,6 +3,40 @@ import Testing
 
 @testable import FilawayCore
 
+/// One compiled-model cache for the whole suite.
+///
+/// The first `MLModel(contentsOf:)` after a compile costs 1.5–3 s (the Neural
+/// Engine building and caching its own program). Giving each test its own cache
+/// directory paid that twice and slowed every other suite running in parallel
+/// with it — including the highlighter's timing test.
+actor BundledModelCache {
+    static let shared = BundledModelCache()
+
+    private let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("filaway-model-cache-\(UUID().uuidString)", isDirectory: true)
+    /// The load is memoised as a `Task`, not as its result: an actor suspends
+    /// at every `await`, so two concurrent tests would both see a `nil`
+    /// embedder and both compile into the same directory, and one of them would
+    /// lose the race to move the `.mlmodelc` into place.
+    private var loading: Task<CoreMLEmbedder, Error>?
+
+    func load() async throws -> CoreMLEmbedder {
+        if let loading { return try await loading.value }
+        let directory = directory
+        let task = Task {
+            try await BundledEmbeddingModel.load(cacheDirectory: directory).embedder
+        }
+        loading = task
+        return try await task.value
+    }
+
+    func factoryDefault() async -> (embedder: (any Embedder)?, active: ActiveEmbedder) {
+        // Warm the cache first, so the factory's own compile is a cache hit.
+        _ = try? await load()
+        return await EmbedderFactory.default(cacheDirectory: directory)
+    }
+}
+
 /// M3-01 — the bundled model and the ladder that chooses it (ADR-012).
 @Suite("EmbedderFactory")
 struct EmbedderFactoryTests {
@@ -57,14 +91,13 @@ struct EmbedderFactoryTests {
         #expect(mini.queryPrefix.isEmpty)
     }
 
-    @Test("the factory reports the Core ML rung when the bundle has the model")
+    // The two tests below actually run the model. `bundledResourcesExist`
+    // above is the hard assertion that it is there (ADR-022); these skip
+    // rather than fail, so a stripped checkout still gets a useful test run.
+    @Test("the factory reports the Core ML rung when the bundle has the model",
+          .enabled(if: BundledEmbeddingModel.isAvailable))
     func factoryPicksCoreML() async throws {
-        try #require(BundledEmbeddingModel.isAvailable)
-        let cache = FileManager.default.temporaryDirectory
-            .appendingPathComponent("filaway-factory-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: cache) }
-
-        let (embedder, active) = await EmbedderFactory.default(cacheDirectory: cache)
+        let (embedder, active) = await BundledModelCache.shared.factoryDefault()
         let model = try #require(embedder)
         #expect(active.kind == .coreML)
         #expect(active.supportsSemanticSearch)
@@ -79,13 +112,10 @@ struct EmbedderFactoryTests {
         #expect(abs(EmbeddingMath.norm(vectors[0]) - 1) < 1e-3)
     }
 
-    @Test("the query prefix moves a question towards its answer")
+    @Test("the query prefix moves a question towards its answer",
+          .enabled(if: BundledEmbeddingModel.isAvailable))
     func queryPrefixHelpsRetrieval() async throws {
-        try #require(BundledEmbeddingModel.isAvailable)
-        let cache = FileManager.default.temporaryDirectory
-            .appendingPathComponent("filaway-prefix-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: cache) }
-        let (embedder, _) = try await BundledEmbeddingModel.load(cacheDirectory: cache)
+        let embedder = try await BundledModelCache.shared.load()
 
         let passage = try await embedder.embed("scp ./report.pdf user@host:/tmp/ copies a file to a remote host")
         let plain = try await embedder.embed("how do I copy a file to a remote host?")

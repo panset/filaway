@@ -1,10 +1,8 @@
 # FilawayCore public API — storage, metadata, watching, search
 
-What M1-03/04/05/06 landed, and how the app layer is meant to drive it. Everything
-here is in `FilawayCore` (Swift 6 language mode, no AppKit/SwiftUI). Requirement
-IDs refer to `docs/spec/functional-spec.html`.
-
-Three types do the work:
+What M1-03/04/05/06 and M3-01/02/03/04 landed, and how the app layer is meant to
+drive it. Everything here is in `FilawayCore` (Swift 6 language mode, no
+AppKit/SwiftUI). Requirement IDs refer to `docs/spec/functional-spec.html`.
 
 | Type | Kind | Owns |
 |---|---|---|
@@ -12,6 +10,9 @@ Three types do the work:
 | `MetadataStore` | actor | The derived SQLite database in Application Support. |
 | `LibraryWatcher` | actor | FSEvents + reconcile; publishes `LibraryChange`. |
 | `SearchService` | actor | Keyword search over the derived database. |
+| `Indexer` | actor | The semantic index: `chunks` + `embeddings`, and the dirty queue. |
+| `VectorStore` | actor | The in-memory Float16 matrix and cosine top-k. |
+| `HybridSearch` | actor | Natural-language retrieval: vectors ∪ BM25, fused. |
 
 `Library` is the value that ties them together.
 
@@ -703,11 +704,62 @@ and what to do if that ever matters. `SearchScaleTests` gates 5,000 notes at
 p95 < 100 ms on a **debug** build and reports the 20,000-note case against a
 looser 500 ms (NFR-2's "degrade gracefully").
 
+### Semantic index (M3-02, M3-03)
+
+`filaway-bench index --notes N [--embedder coreml|hashed] [--exclude DIR …]`
+times a cold index build; `filaway-bench semantic --notes N [--queries N]
+[--budget-millis N]` times the offline query path and exits non-zero on the
+budget. Release build, M-series, 2026-08, synthetic corpus at 2 KB/note:
+
+| | 5,000 notes | 20,000 notes |
+|---|---:|---:|
+| Chunks | 85,130 (17.0/note) | 340,142 (17.0/note) |
+| Index build — bundled bge-small | **409 s** (4.8 ms/embedding) | ~27 min (extrapolated) |
+| Index build — plumbing only (`--embedder hashed`) | 13.9 s | 49.8 s |
+| Derived database | 55 MB → **179 MB** | ~715 MB (extrapolated) |
+| Resident matrix | 85,130 × 384-d = **68.3 MB** | 340,142 × 384-d = **272.8 MB** |
+| Lazy load of the matrix | 544 ms | 1.08 s |
+| Re-index one edited note | **12.7 ms** (1 embedding, 16 chunks reused) | — |
+| Query p50 / p95 (both arms + RRF, **no Claude**) | **52.9 / 109.0 ms** | **81.2 / 91.5 ms** |
+
+The 5,000-note query row is the bundled model end to end; the 20,000-note row
+was measured with `--embedder hashed`, so add ~5 ms for the model's query
+embedding — everything else on that path is embedder-independent. Both p95s
+were measured on a machine that was also compiling, so they are pessimistic:
+each shape's p50 is roughly half its p95.
+
+Three things worth knowing before reading those numbers:
+
+* **The synthetic corpus is far more command-dense than real notes** — it writes
+  a fenced block every fifth paragraph — so 17 chunks per 2 KB note is a worst
+  case, not a typical one. ADR-024 covers the levers if a real library turns out
+  to look like this.
+* **The 20,000-note matrix is over NFR-2's ~200 MB budget on this corpus**
+  (273 MB), entirely because of that chunk density: the plan's own estimate of
+  ~4 chunks per note lands at 63 MB. If a real 20,000-note library measures like
+  the synthetic one, the levers are (in order) raising `Chunker.minTokens`,
+  folding sub-`minTokens` prose runs into the code chunk that follows them, and
+  `sqlite-vec` (ADR-012's Phase-2 escape hatch). The matrix is loaded lazily, so
+  a user who never runs a semantic search never pays any of it.
+* **The derived database roughly triples.** `chunks.text` stores each chunk's
+  embedding text, which for prose duplicates bytes `note_text` already holds.
+  The lever, if it matters, is to store text only for code chunks (which carry
+  context that is not contiguous in the body) and reconstruct prose chunks from
+  `note_text.body` plus the chunk's range. It is all derived data: deleting
+  `filaway.sqlite` costs a rebuild, not notes.
+
+Query latency is dominated by the query embedding (~5 ms) plus the brute-force
+scan, and leaves NFR-1's 5 s budget almost entirely to the M3-05 Claude step.
+One measured trap is worth repeating: a filtered query calls the admission gate
+once per **resident chunk**, so the gate must be a set lookup and nothing more.
+Resolving it per note up front took a date-filtered 20,000-note query from
+580 ms to 93 ms.
+
 ---
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 151 tests, ~1.8 s without the slow tags.
+`Tests/FilawayCoreTests` — 426 tests, ~22 s (the M3 suites dominate).
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -730,6 +782,30 @@ looser 500 ms (NFR-2's "degrade gracefully").
 * `ScaleTests` — 5,000 notes under 3 s (tagged `.slow`).
 * `SearchScaleTests` — keyword p95 under 100 ms at 5,000 notes on a debug build;
   20,000 notes reported (tagged `.slow`).
+* `EmbedderFactoryTests` — the bundled model is really in the resource bundle,
+  the descriptor is the package ADR-012 chose, the identifier changes when the
+  numbers would, and the query prefix reaches the query and not the passage.
+* `ChunkerTests` — a Figure-1 note, nested headings, code inside a list,
+  unterminated fences, CRLF, astral characters, budget splitting, the
+  small-section coalescing rule, a 4,000-section note, and the token estimate
+  against the real WordPiece vocabulary.
+* `IndexerTests` — one edited section re-embeds one chunk; a paragraph inserted
+  at the top re-embeds nothing; delete, move, folder removal; an excluded folder
+  is never indexed and is purged if excluded later; a model change re-embeds
+  without re-chunking; debounce, status, cancellation.
+* `VectorStoreTests` — the binary16 codec, top-k against a brute-force Float32
+  reference, the blocked path against the store's own reference, the note gate,
+  tombstone reuse, growth, and the 20,000-chunk memory budget.
+* `TemporalQueryParserTests` — every pattern against a fixed Wednesday, an
+  injected time zone, and fourteen negatives ("two days", "v2.1", "I may need
+  to…", "the august release").
+* `HybridSearchTests` / RRF unit tests — consensus beats a single first place,
+  a date range hard-filters, "recently" only biases, exclusions and folder
+  scopes hold on both arms, and the whole path still works with no embedder.
+
+The chunker, indexer, vector store, fusion and temporal suites all run against
+`HashedEmbedder` (a deterministic signed hashed bag-of-words), so CI covers the
+whole pipeline whether or not Core ML is usable on the runner.
 
 `FILAWAY_SKIP_SLOW_TESTS=1 swift test` skips the churn, scale and FSEvents
 suites. `Tools/fs_churn.sh --root ~/Notes -n 500` is the manual counterpart:

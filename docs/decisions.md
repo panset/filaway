@@ -765,7 +765,11 @@ without the ILP64 headers, and it is the same BLAS kernel underneath.
 - Deletes tombstone a slot and the next upsert reuses it, so a note being edited
   repeatedly never memmoves the matrix.
 - Measured: 20,000 chunks × 384-d = 15.4 MB resident, including the side arrays
-  and the chunk-id map.
+  and the chunk-id map; a real 20,000-note library on the synthetic corpus's
+  chunk density (340,000 chunks) is 273 MB, which is over NFR-2's ~200 MB. See
+  ADR-024 for why that density is a worst case and what the levers are.
+- Loading is lazy, so a user who only ever uses ⌘K keyword search pays none of
+  it — which is also what keeps the NFR-1 2 s launch budget intact.
 
 ## ADR-024 — A heading starts a chunk only when the run in progress is big enough
 
@@ -843,11 +847,18 @@ sum of normalised scores, and where in the pipeline the temporal filter goes.
    single answer.
 
 **Consequences.**
+- `SemanticResults.usedVectors` is the FR-5.5/FR-6.4 signal. With no embedder
+  the whole path still works on BM25 alone, and says so.
+- The admission gate is resolved **once per note, into a `Set<NoteID>`**, not
+  evaluated per chunk. The first implementation called
+  `ExclusionFilter.isExcluded(path:)` — and therefore `PathRules.normalize` —
+  inside the vector scan, once per resident row: a date-filtered query over
+  20,000 notes took **580 ms**, of which 500 ms was string normalisation, against
+  80 ms for the same query unfiltered. Anything added to that gate must stay a
+  hash lookup.
 - `HybridSearch` caches note identity (title, path, mtime) against the
   `notes_generation` counter, the way `SearchService` caches titles: the vector
   arm needs every note's mtime *before* the cut, and one query per candidate
   would be worse than one query per generation.
-- `SemanticResults.usedVectors` is the FR-5.5/FR-6.4 signal. With no embedder
-  the whole path still works on BM25 alone, and says so.
 - `promptChunks` (top 8) is the contract M3-05 builds `answer.v1` on; nothing
   else about the shape of `RankedChunk` is load-bearing for it.

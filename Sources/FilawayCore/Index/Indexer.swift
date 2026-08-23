@@ -324,8 +324,9 @@ public actor Indexer {
     /// Compares the active model against the one the index was built with.
     ///
     /// - Returns: `true` when they differ, in which case every vector for the
-    ///   old model has been deleted and every note re-queued. The *chunks*
-    ///   survive: only the embeddings depend on the model.
+    ///   old model has been deleted and every note re-queued. The notes folder
+    ///   is not re-read and nothing is re-chunked — the chunk text does not
+    ///   depend on the model, only the vectors do.
     @discardableResult
     public func synchronizeModel() async throws -> Bool {
         let stored = try await metadata.meta(Self.modelMetaKey)

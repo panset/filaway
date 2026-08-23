@@ -117,8 +117,9 @@ public enum DatabaseSchema {
         // * `text_hash` is the diff key: editing one paragraph re-embeds one
         //   chunk, not the note (M3-02's incremental test).
         // * `embeddings.model_id` is `Embedder.identifier`. Swapping models
-        //   leaves the chunks alone and re-embeds them; the rows for the old
-        //   model are deleted in the same pass.
+        //   costs a re-embed but never a re-read of the notes folder: the
+        //   chunk text is unchanged, and the old model's vectors are deleted
+        //   in the same pass.
         // * `vector` is a Float16 BLOB — half the memory of Float32 at no
         //   measurable ranking cost (ADR-023), stored as raw IEEE 754 binary16
         //   so it is architecture-independent.
