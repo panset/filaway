@@ -66,6 +66,7 @@ final class SemanticSearchCoordinator: ObservableObject {
     private var settingsToken: CoreSettings.Observation?
     private var aiStatusTask: Task<Void, Never>?
     private var providerOverride: (any AIProvider)?
+    private var deferredFinder: DeferredCandidateFinder?
 
     init(settings: CoreSettings? = nil) {
         injectedSettings = settings
@@ -132,6 +133,7 @@ final class SemanticSearchCoordinator: ObservableObject {
             self.extractor = extractor
             self.service = service
             self.isReady = true
+            self.deferredFinder?.adopt(hybrid)
             self.observeIndexStatus()
             self.observeSettings()
             self.observeAIStatus()
@@ -149,11 +151,7 @@ final class SemanticSearchCoordinator: ObservableObject {
         }
     }
 
-    /// The provider the answer step uses.
-    ///
-    /// `replay` with no fixture directory — a normal launch of the shipped app
-    /// — gets **no** extractor at all rather than a stand-in that throws, so
-    /// the panel says "connect your AI" instead of "offline" (FR-6.4).
+    /// The provider the answer step uses — the same one the organizer gets.
     private static func makeExtractor(
         settings: CoreSettings,
         ledger: AIUsageLedger?,
@@ -163,12 +161,11 @@ final class SemanticSearchCoordinator: ObservableObject {
         if let override {
             return AnswerExtractor(provider: override, ledger: ledger, configuration: configuration)
         }
-        let mode = AIMode.current()
-        let store = AIRecordingStore.fromEnvironment()
-        guard mode != .replay || store != nil else { return nil }
-        guard let provider = try? AIProviderFactory.make(
-            mode: mode, store: store, keySource: .storeThenEnvironment(KeychainStore())
-        ) else { return nil }
+        // One convention for the whole app: default `live`, `replay` only with
+        // `FILAWAY_AI_FIXTURES`, `FILAWAY_AI_FAIL` for the offline phases
+        // (ADR-041). `makeProvider` throws when replay has nothing to replay,
+        // which is the "connect your AI" state rather than an outage.
+        guard let provider = try? OrganizeCoordinator.makeProvider() else { return nil }
         return AnswerExtractor(provider: provider, ledger: ledger, configuration: configuration)
     }
 
@@ -235,6 +232,23 @@ final class SemanticSearchCoordinator: ObservableObject {
         _ = try? await indexer.catchUp()
         try? await vectors?.reload()
         await hybrid?.invalidate()
+    }
+
+    // MARK: - Merge-target retrieval (M3-08)
+
+    /// A `CandidateFinder` the organizer can be built with **before** the
+    /// retrieval stack is up.
+    ///
+    /// `OrganizeCoordinator.start` runs on the first paint; the embedder is
+    /// still compiling then, so `hybrid` is `nil` and there is nothing to hand
+    /// it. This returns a stable object that forwards to `fallback` until the
+    /// index exists and to ``HybridCandidateFinder`` from then on — so the
+    /// organizer is constructed once and silently gets better (FR-4.6).
+    func candidateFinder(fallback: any CandidateFinder) -> any CandidateFinder {
+        let finder = DeferredCandidateFinder(fallback: fallback)
+        deferredFinder = finder
+        if let hybrid { finder.adopt(hybrid) }
+        return finder
     }
 
     // MARK: - Searching
@@ -304,7 +318,9 @@ final class SemanticSearchCoordinator: ObservableObject {
     /// a replayed one does not.
     private func observeAIStatus() {
         guard aiStatusTask == nil else { return }
-        guard AIMode.current().isLive else {
+        let mode = ProcessInfo.processInfo.environment[AIMode.environmentVariable]
+            .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
+        guard mode.isLive else {
             providerReady.set(extractor != nil)
             return
         }
@@ -340,6 +356,37 @@ private final class ExclusionBox: @unchecked Sendable {
     }
 
     func isExcluded(_ path: String) -> Bool { current.isExcluded(path: path) }
+}
+
+/// Forwards to ``HybridCandidateFinder`` once there is an index, and to the
+/// keyword finder until then (M3-08).
+private final class DeferredCandidateFinder: CandidateFinder, @unchecked Sendable {
+    private let lock = NSLock()
+    private let fallback: any CandidateFinder
+    private var hybrid: (any CandidateFinder)?
+
+    init(fallback: any CandidateFinder) {
+        self.fallback = fallback
+    }
+
+    func adopt(_ search: HybridSearch) {
+        let finder = HybridCandidateFinder(hybrid: search, fallback: fallback)
+        lock.lock()
+        defer { lock.unlock() }
+        hybrid = finder
+    }
+
+    private var current: any CandidateFinder {
+        lock.lock()
+        defer { lock.unlock() }
+        return hybrid ?? fallback
+    }
+
+    func candidates(
+        for query: CandidateQuery, in context: OrganizeContext
+    ) async throws -> [OrganizeCandidate] {
+        try await current.candidates(for: query, in: context)
+    }
 }
 
 private final class Flag: @unchecked Sendable {

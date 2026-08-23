@@ -1379,9 +1379,350 @@ sum of normalised scores, and where in the pipeline the temporal filter goes.
 - `promptChunks` (top 8) is the contract M3-05 builds `answer.v1` on; nothing
   else about the shape of `RankedChunk` is load-bearing for it.
 
+## ADR-041 — The app's AI mode defaults to `live`, and the smoke suite replays
+
+**Date:** 2026-08-23 · **Task:** M2-12 · **Status:** accepted
+
+**Context.** `AIMode.current()` defaults to `replay` because that is right for
+`swift test` and CI: no key, no network, no cost. The app cannot inherit that
+default — a shipped `Filaway.app` with no `FILAWAY_AI_MODE` set would serve
+fixtures that are not in the bundle, and quietly organize nothing.
+
+**Decision.** `OrganizeCoordinator.makeProvider(environment:)` reads
+`FILAWAY_AI_MODE` itself and defaults to **`live`** with
+`APIKeySource.storeThenEnvironment(KeychainStore())`. `replay` additionally
+requires `FILAWAY_AI_FIXTURES`, which `Tools/smoke.sh` sets to
+`Tests/Fixtures/ai-recordings`. A fourth, app-only lever, `FILAWAY_AI_FAIL`,
+returns a `MockProvider` that always fails with a network error (or an invalid
+key), because there is no way to unplug the network from inside a test and
+FR-6.4's degradation is exactly the path worth proving end to end.
+
+**Consequences.**
+- Every smoke phase runs with `FILAWAY_AI_MODE=replay`, so no phase can reach
+  the network even by accident — including the ones that predate M2.
+- The `organize` phases replay a **committed** fixture, so they assert the real
+  card text rather than a mock's.
+- A missing fixture surfaces as `AIError.missingRecording`, which the organizer
+  does *not* queue: the phase fails loudly instead of hanging.
+- `FILAWAY_AI_FAIL` is app-layer only. Nothing in `FilawayCore` knows about it.
+
+## ADR-042 — One prompt behind the goldens and the smoke phase, and the card sits bottom-trailing
+
+**Date:** 2026-08-23 · **Task:** M2-10, M2-12 · **Status:** accepted
+
+**Context.** Two things had to be decided to make M2 visible and testable: where
+the organization card lives on screen, and how a headless phase can replay a
+recorded model answer when the fixture's filename is a hash of the whole
+rendered prompt — library tree, note ids, session delta, candidate ranking and
+the session's end time.
+
+**Decision (the card).** Bottom-trailing of the editor pane, stacked, newest at
+the bottom. The top strip already belongs to `BannerView` — "the file changed
+under you" and "the AI has a suggestion" are different enough to deserve
+different places — and the caret is usually in the upper half of the pane, where
+a top banner would cover the words the card is talking about. Ask mode is a
+question that waits indefinitely (**Accept** ⏎ / **Edit** / **Dismiss** ⎋); auto
+mode is a statement that fades after 20 s (**Undo** / **View changes**), with
+Undo living on in the Activity window. Nothing ever takes first responder.
+
+**Decision (the fixture).** The smoke corpus is chosen so the app's own wiring
+renders **exactly** M2-06's `merge-code-block` prompt: seeded front matter pins
+the note ids, and `OrganizeCoordinator.endSessionNow(noteID:endedAt:)` rewinds
+the tracker's last activity by the idle interval and ticks, so the session ends
+at a named instant with reason `idle`. One recording therefore stands behind the
+Core goldens, the Core end-to-end wiring test and the smoke phase.
+`OrganizeWiringTests.wiringHitsTheCommittedFixture` asserts the key, so drift is
+a named test failure at `make test` rather than a bare `missingRecording` in a
+smoke run half an hour later. Auto mode renders `Mode: auto` and so has its own
+fixture, `122cfeeded98ffbb.json`.
+
+**Consequences.**
+- `KeywordCandidateFinder` normalises keyword scores over *eligible* hits only.
+  Letting the session's own note (top hit, never a candidate) set the divisor
+  would make the prompt depend on indexing order.
+- The `organize` phases wait for `MetadataStore.textIndexCount()` to catch up
+  before ending the session, for the same reason.
+- Changing the prompt, the ranker or the corpus moves the key: regenerate with
+  `FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter OrganizeWiringTests/regenerateFixture`,
+  which writes only fixtures that do not exist and never overwrites a golden.
+- The auto-mode card shows the *plan's* summary, read back off the Activity row,
+  not `AppliedPlan.summary` — the latter is the applier's account of what it did
+  ("Moved a section from Scratch."), where FR-4.2 asks for the model's
+  plain-language sentence.
+
 ---
 
-## ADR-041 — The answer card has a local arm, and the Claude arm is raced against a clock
+## ADR-043 — Sparkle comes from SPM, and it brings its own command-line tools
+
+**Date:** 2026-08-23 · **Task:** M4-04 · **Status:** accepted
+
+**Context.** Plan §1 picks Sparkle 2 via SPM. The risk was that it would not
+resolve on this machine at all: there is no Xcode, only the Command Line Tools
+(Swift 6.0.3), and GRDB already had to be pinned below 7.9.0 because its
+manifest declares swift-tools-version 6.1 (ADR-003). The brief allowed a
+fallback of downloading the release xcframework into `Tools/sparkle/` and
+wiring it up as a local `binaryTarget`.
+
+**Decision.** Plain SPM: `.package(url: "…/sparkle-project/Sparkle", from:
+"2.9.0")`, resolved at 2.9.6. The fallback is not needed. Sparkle's own manifest
+is **swift-tools-version 5.3** — far below anything 6.0.3 objects to — and its
+single target is a `binaryTarget` pointing at a checksummed
+`Sparkle-for-Swift-Package-Manager.zip` on the GitHub release, containing a
+prebuilt `Sparkle.xcframework` with a `macos-arm64_x86_64` slice. Nothing has to
+be compiled, so the toolchain's age is irrelevant. Verified by building and
+linking `SPUStandardUpdaterController` before touching the real package.
+
+The second, more useful discovery: that zip is the *whole* Sparkle
+distribution, so `swift build` also unpacks
+`.build/artifacts/sparkle/Sparkle/bin/{generate_keys,sign_update,generate_appcast,BinaryDelta}`.
+`Tools/lib.sh` locates them there. There is no separate download step, no
+`Tools/sparkle/bin` to gitignore, and CI gets the tools from the same
+`swift build` it already runs.
+
+**Consequences.**
+- `swift build` now downloads a ~32 MB binary artifact on a cold cache. It is
+  cached by `Package.resolved` hash in both workflows.
+- The framework is universal already, so embedding it does not constrain the
+  app's own architecture — only `make_app.sh`'s build flags do.
+- Sparkle links into `FilawayApp` only. `FilawayCore` stays UI-free and
+  Sparkle-free, so `swift test` is unaffected.
+- If a future Sparkle raises its tools-version above the local toolchain, the
+  documented fallback (download the xcframework, local `binaryTarget`) is still
+  open; pin the last working tag rather than vendoring in a hurry.
+
+---
+
+## ADR-044 — "Updates not configured" is a real implementation, not an error path
+
+**Date:** 2026-08-23 · **Task:** M4-04 · **Status:** accepted
+
+**Context.** Sparkle needs `SUFeedURL` and `SUPublicEDKey` in the Info.plist.
+Neither exists on this machine and neither will until the user generates keys
+and publishes an appcast (plan §8). Meanwhile every `make app`, every CI run and
+every one of the six smoke phases launches the app. `SPUStandardUpdaterController`
+with no feed logs an error and leaves an updater that can never succeed, so the
+unconfigured build cannot simply construct one and hope.
+
+**Decision.** A two-line protocol, `UpdaterProviding`, with two real
+implementations: `SparkleUpdaterProvider` wrapping
+`SPUStandardUpdaterController`, and `UnconfiguredUpdaterProvider` whose
+`unavailableReason` is `"Updates not configured in this build"`.
+`UpdaterController` reads the Info.plist — both keys present, non-empty, and not
+an unsubstituted `@…` placeholder — and picks one. The menu item is disabled
+with that reason as its tooltip.
+
+The provider is built **lazily, and never during launch**. SwiftUI evaluates
+`commands` while the first window is coming up, which is precisely the interval
+NFR-1 budgets for "cold launch to editable"; constructing Sparkle's controller
+there would put its bundle and Keychain work on the critical path for no
+benefit, since nothing can be checked before the app is running anyway. The
+menu item reads only the plist; the controller appears on
+`didFinishLaunching`, or on the first click, whichever comes first.
+
+`startIfPossible()` is additionally a no-op under `FILAWAY_SMOKE`: a smoke phase
+must never reach the network, and `Tools/smoke.sh` launches the app six times in
+a row, which would otherwise look like six update checks.
+
+**Consequences.**
+- The app-side footprint is one new file plus one line
+  (`UpdaterCommands()`) in `FilawayApp.swift` — `AppDelegate` is untouched,
+  because `UpdaterController` observes `didFinishLaunching` itself.
+- `make app` on a machine with no Sparkle key produces a working app with a
+  disabled, self-explaining menu item rather than a broken updater.
+- The seam is the natural place for a fake in a future test; nothing about
+  `UpdaterProviding` assumes Sparkle.
+
+---
+
+## ADR-045 — Not sandboxed, so Sparkle's XPC services are stripped
+
+**Date:** 2026-08-23 · **Task:** M4-04 / M4-05 · **Status:** accepted
+
+**Context.** `Sparkle.framework` ships `XPCServices/Installer.xpc` and
+`XPCServices/Downloader.xpc`. They exist so a **sandboxed** app can still
+install an update and reach the network, and they are activated by the
+`SUEnableInstallerLauncherService` / `SUEnableDownloaderService` Info.plist
+keys. Filaway is deliberately not sandboxed: spec §3 ships outside the App Store
+so the app can read and write an arbitrary user-chosen notes folder with plain
+POSIX calls, which a sandbox would turn into security-scoped bookmarks on every
+note.
+
+**Decision.** `Tools/make_app.sh` deletes `XPCServices` (and the framework's
+`Headers`, `PrivateHeaders` and `Modules`, which are build-time artefacts) after
+`ditto`-ing the framework into `Contents/Frameworks`, and the two Info.plist
+keys stay unset — which is what Sparkle's sandboxing guide prescribes for a
+non-sandboxed app. `Tools/Filaway.entitlements` states
+`com.apple.security.app-sandbox = false` explicitly rather than omitting it, so
+the reasoning is visible at the point of decision.
+
+The entitlements file is otherwise close to empty, and deliberately so.
+Specifically **no** `allow-unsigned-executable-memory` and no `allow-jit`:
+`FilawayCore/Embeddings` calls `MLModel.compileModel(at:)` at first launch and
+then `MLModel(contentsOf:)`, and Core ML compilation runs out of process in the
+system's compiler service while the compiled `.mlmodelc` it loads back is data,
+not code. Neither exception applies. Also no
+`disable-library-validation`: every bundled executable — the app,
+`Sparkle.framework`, `Autoupdate`, `Updater.app` — is signed by the same
+Developer ID in one inner-out pass, so library validation is satisfied rather
+than switched off.
+
+**Consequences.**
+- Signing is explicit and inner-out (`Autoupdate`, `Updater.app`, the framework,
+  then the app), never `codesign --deep`, which is deprecated and cannot apply
+  entitlements to nested code.
+- Ad-hoc builds are signed **without** `--options runtime`. An ad-hoc signature
+  carries no team identifier, so a hardened ad-hoc app would fail library
+  validation against the equally ad-hoc `Sparkle.framework` and refuse to
+  launch. Hardened runtime switches on with a real `$DEVELOPER_ID`.
+- The app binary needs an `@executable_path/../Frameworks` rpath that SwiftPM
+  does not emit (it gives only `@loader_path`); `make_app.sh` adds it with
+  `install_name_tool` and drops the Command Line Tools' developer-frameworks
+  rpath. `ci.yml` asserts `otool -L` still resolves Sparkle, because this breaks
+  silently and only at launch.
+- Should Filaway ever be sandboxed, this is the ADR to reverse: restore
+  `XPCServices`, sign each `.xpc` with its own entitlements, and set both keys.
+
+---
+
+## ADR-046 — CFBundleVersion is the commit count, and the appcast is signed per tag
+
+**Date:** 2026-08-23 · **Task:** M4-05 · **Status:** accepted
+
+**Context.** Sparkle decides "is this newer?" by comparing `CFBundleVersion`,
+not `CFBundleShortVersionString`. It has to increase monotonically and never
+repeat. The marketing version fails both — 0.1.0 can plausibly ship twice — and
+a timestamp is not reproducible from a checkout.
+
+**Decision.** `CFBundleShortVersionString` comes from `$FILAWAY_VERSION`, else
+an exact `v*` tag on HEAD, else the `VERSION` file (a dirty tree or a commit
+past the tag falls through, so a local build never claims to be the tagged
+release). `CFBundleVersion` is `git rev-list --count HEAD`.
+
+GitHub Releases put assets under `…/releases/download/<tag>/`, which is a
+different prefix for every release, while `generate_appcast` takes one
+`--download-url-prefix` per run. `Tools/sparkle/make_appcast.sh` therefore
+passes *this* tag's prefix each time: the tool applies it only to new items and
+leaves existing entries' URLs alone, which is exactly the required behaviour.
+`build/releases/` accumulates recent DMGs so binary deltas can be built against
+them; `release.yml` re-downloads the last three releases' assets for that.
+
+**Consequences.**
+- A shallow clone produces the wrong build number, so `release.yml` uses
+  `fetch-depth: 0`.
+- Two silent failure modes were found by building it both ways, and are now
+  asserted in CI and documented in `docs/release.md`:
+  `generate_appcast` writes `sparkle:edSignature` **only** when the archived
+  app declares `SUPublicEDKey` (otherwise the entry is silently unsigned and
+  every client rejects it), and it stamps `sparkle:hardwareRequirements` from
+  the slices in the archive, so an arm64-only release is never offered to Intel
+  Macs at all.
+- `build/releases/` is gitignored: the DMGs live on the GitHub Release.
+
+## ADR-047 — Retrieval constants are measured on a corpus, not derived from first principles
+
+**Date:** 2026-08-23 · **Task:** M3-07 · **Status:** accepted (amends ADR-040)
+
+**Context.** ADR-040 set three constants by reasoning: RRF's `k = 60` because
+that is what the paper used, a recency ceiling of +20% because it sounded
+"mild", and a prompt slice of eight chunks because plan §3 M3-05 says eight.
+M3-07 built the first corpus that could test them — 302 notes, 62 of them
+hand-written around a real command, and 89 queries with a known answer — and
+all three were wrong in the same way: each was chosen without reference to the
+*scale of the thing it acts on*.
+
+**Decision.**
+
+1. **`RecencyPrior.maxBoost` 0.2 → 0.05** (`recent` 0.6 → 0.15,
+   `window(_:maxBoost:)` likewise). The ceiling multiplies an RRF score, where
+   adjacent ranks differ by ~1.6% (`1/61` vs `1/62`). "+20%" is therefore worth
+   about twelve rank positions, and thirteen of 77 queries lost to a note that
+   was merely newer. Note top-1 78% → 90% on this change alone.
+2. **`HybridSearch.Options.rrfK` 60 → 20.** The paper's 60 was tuned for lists
+   of thousands. With fifty candidates per arm, `1/61 … 1/110` is under a 2×
+   spread, so fusion degenerates into "how many arms found it" and rank stops
+   carrying information. `k = 20` spans 3.3×. Worth +1 note top-1, +6 answer
+   top-1, and it halves the damage the recency prior can do.
+3. **`SemanticResults.promptChunks` 8 → `promptChunkLimit` (20).** The chunk
+   holding the answer was inside the top eight only **65%** of the time and
+   inside the top twenty **94%**. The cause is structural, not a ranking bug: a
+   short note splits into a prose chunk written in the language of the
+   *question* (so it ranks first) and a code chunk carrying the command, which
+   shares almost no vocabulary with the question (so it ranks tenth). No
+   reranking inside eight chunks can recover a chunk that was never in them.
+4. **The offline answer heuristic picks the winning *note's* code block**, not
+   the best-scoring code block. Globally-best picks a different note's command
+   most of the time; same-note took answer top-1 from 42% to 86%.
+
+Result on the bundled bge-small model: note top-1 **91%**, top-3 97%, MRR@10
+**0.939**, answer-card accuracy **90%**, p95 **17 ms**. Spec §8 asks for ≥ 90%
+under ten seconds. Full table and ablations: `docs/verification/M3-retrieval.md`.
+
+**Consequences.**
+- ADR-040's points 1 and 4 are amended; its points 2, 3 and 5 stand unchanged.
+- **A cosine threshold cannot carry the "no answer" decision.** Measured, the
+  two distributions overlap (answerable 0.57–0.88, unanswerable 0.59–0.70): the
+  floor that rejects every negative also suppresses a third of the real
+  answers. The abstain decision belongs to M3-05's extractor, which can read
+  the chunks; the floor is only the FR-5.5 offline backstop.
+- The prompt grows from ~8 to ~20 chunks (~3,000 tokens). That is still a small
+  Haiku call, and it is the difference between an answer card that is right 70%
+  of the time and one that is right 90% of the time.
+- **Open gap:** typo'd queries are the weak category at 57% top-1. FTS5 matches
+  terms exactly and WordPiece turns `"crul"` into subword soup, so both arms
+  fail together. Proposed for M4: expand rare terms to their nearest
+  in-vocabulary neighbours (the `Fuzzy` machinery `⌘K` already uses) when the
+  OR expression matches fewer than *k* notes.
+
+## ADR-048 — The dev corpus is generated from curated tables, and scale numbers are measured on it
+
+**Date:** 2026-08-23 · **Task:** M3-07 / M3-09 · **Status:** accepted
+
+**Context.** Two questions the earlier tasks left open. Where does a *realistic*
+corpus live, given that `SyntheticCorpus` (ADR-011) exists for scale and is not
+realistic? And which corpus do the NFR-2 numbers describe?
+
+The second question turned out to matter a great deal. `SyntheticCorpus` writes
+a fenced block every fifth paragraph, and every fence is unconditionally its own
+chunk (ADR-039), so it produces **17 chunks per note**. Every M3-03 number
+derived from it — a 409 s index build at 5,000 notes, a 273 MB matrix at 20,000
+— is a function of that density and not of anything a user would have.
+
+**Decision.**
+
+1. **`Tests/Fixtures/corpus/dev` is committed Markdown** (302 notes, 236 KB),
+   generated by `filaway-bench corpus generate --seed` from
+   `DevCorpusContent` (62 curated golden notes) plus a deterministic distractor
+   generator. Curation happens in the Swift tables; the Markdown is the
+   artefact. `RetrievalFixtureTests` asserts the generator still reproduces what
+   is committed, so a hand-edit to a fixture file fails the suite instead of
+   silently drifting.
+2. **The corpus and the benchmark runner live in `FilawayCore/Bench`**, for
+   ADR-011's reason: a SwiftPM executable target cannot be imported by a test
+   target, and the CI gate and the CLI must measure exactly the same thing.
+3. **Timestamps travel in front matter.** Git does not preserve mtimes and every
+   FR-5.3 query is answered from `notes.mtime`, so each note carries `created`
+   and `modified`, and `DevCorpus.materialize` stamps them onto the files.
+   Dates are midday UTC and the runner parses with a fixed UTC, Monday-first
+   calendar, so "last week" means the same thing on a laptop and on CI.
+4. **NFR-2 numbers are reported on a corpus of dev-corpus shape**, with
+   `SyntheticCorpus` kept as the explicit worst case. Measured (M3-09):
+   5,000 notes index in **50 s** (not 409 s) and 20,000 notes hold a **33 MB**
+   matrix (not 273 MB).
+
+**Consequences.**
+- Two corpora with two jobs: `SyntheticCorpus` for filesystem and database
+  scale, `DevCorpus` for retrieval quality and for realistic index cost. Any
+  number quoted from either must name which.
+- The repository gains 236 KB of Markdown that changes only when the tables do.
+- ADR-039's chunk-density levers (`minTokens`, folding small prose runs) are
+  **not** needed: measured on realistic notes the chunker produces 2.0 chunks
+  per note, and raising `minTokens` from 64 to 128 moves the synthetic corpus by
+  only 4.6% because its density is code fences, which never fold.
+
+---
+---
+
+## ADR-049 — The answer card has a local arm, and the Claude arm is raced against a clock
 
 **Date:** 2026-08-23 · **Task:** M3-05 · **Status:** accepted
 
@@ -1432,7 +1773,7 @@ an error sheet.
 
 ---
 
-## ADR-042 — Prompt chunks are numbered, and a reported snippet must be verbatim
+## ADR-050 — Prompt chunks are numbered, and a reported snippet must be verbatim
 
 **Date:** 2026-08-23 · **Task:** M3-05 · **Status:** accepted
 
@@ -1444,7 +1785,7 @@ paste into a terminal.
 
 **Decision.**
 
-1. **Chunks are addressed by 1-based position in the prompt**, `[1]…[8]`, not by
+1. **Chunks are addressed by 1-based position in the prompt**, `[1]…[N]`, not by
    row id. Models count short integers far more reliably than six-digit ones; a
    6-digit id costs tokens in both directions; and — decisively — a replay
    fixture's key is a hash of the rendered request, so row ids would move the key
@@ -1456,11 +1797,15 @@ paste into a terminal.
    lines; a miss falls back to the chunk's own fenced body and logs. The prompt
    says "never write a command that is not in the chunk" — this is the part that
    does not depend on the prompt being obeyed.
-3. **The prompt renders `edited:` as an ISO-8601 instant.** It is the only field
+3. **`AnswerSelection.maxChunks` follows `SemanticResults.promptChunkLimit`**
+   rather than pinning its own number, so M3-07's measurement (ADR-047: the top
+   eight hold the answer 65% of the time, the top twenty 94%) moves the prompt
+   without touching the extractor.
+4. **The prompt renders `edited:` as an ISO-8601 instant.** It is the only field
    that makes the request non-deterministic, and it earns its place: FR-5.3
    queries are about *when*, and the model has to be able to say which of two
    near-identical chunks is the one from Tuesday.
-4. **The goldens are built from hand-written `SemanticResults`, not from a live
+5. **The goldens are built from hand-written `SemanticResults`, not from a live
    index.** A fixture key derived from a real index moves whenever the chunker,
    the embedder or a file's mtime moves, and the test would then be pinning the
    index rather than the answer. Retrieval has its own end-to-end suites.
@@ -1471,12 +1816,12 @@ paste into a terminal.
 - The card's `snippetText` is what Copy puts on the pasteboard, and it is
   guaranteed to exist somewhere in the note. That is a property a user can rely
   on, and one the `invented-snippet` golden pins.
-- Chunk text is clipped at 1,400 characters so eight chunks cannot blow Haiku's
+- Chunk text is clipped at 1,400 characters so a full slice cannot blow Haiku's
   budget on a note that is one enormous fence.
 
 ---
 
-## ADR-043 — ⏎ is the semantic trigger, and the answer card is the first selectable item
+## ADR-051 — ⏎ is the semantic trigger, and the answer card is the first selectable item
 
 **Date:** 2026-08-23 · **Task:** M3-06 · **Status:** accepted
 

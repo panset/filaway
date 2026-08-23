@@ -608,7 +608,7 @@ func invalidate()
 var supportsVectors: Bool
 
 struct Options { var candidateLimit = 50, chunkLimit = 20, noteLimit = 10
-                 var rrfK = 60.0
+                 var rrfK = 20.0        // ADR-047 lowered this from 60
                  var recencyPrior = RecencyPrior.default
                  var exclusions = ExclusionFilter.none
                  var folderPath: String?
@@ -619,7 +619,7 @@ struct SemanticResults { let query, strippedQuery: String
                          let chunks: [RankedChunk]     // best first
                          let notes: [RankedNote]       // one entry per note
                          let usedVectors, usedKeywords: Bool
-                         var promptChunks: [RankedChunk] }   // top 8 → M3-05
+                         var promptChunks: [RankedChunk] }   // top 20 → M3-05
 
 struct RankedChunk { let id: Int64; let noteID: NoteID
                      let title, relativePath: String; let modified: Date
@@ -636,9 +636,19 @@ struct RankedNote { let id: NoteID; let title, relativePath: String
 ```
 
 The pipeline: parse the time phrase out, embed the rest (with the model's query
-prefix), take vector top-50 and FTS5 BM25 top-50, fuse with **RRF (k = 60)**,
+prefix), take vector top-50 and FTS5 BM25 top-50, fuse with **RRF (k = 20)**,
 apply the recency prior when no hard range was found, then aggregate to notes
 keeping the best chunk of each.
+
+Three of those constants were retuned by M3-07 after measuring them on a real
+corpus, and the reasoning is worth carrying into any future change (ADR-047):
+**everything here multiplies an RRF score, where adjacent ranks differ by about
+1.6%.** `k` came down from 60 (which flattens a fifty-item list into a 2×
+spread) to 20; `RecencyPrior.maxBoost` came down from 0.2 — worth twelve rank
+positions, and costing twelve points of top-1 accuracy — to 0.05; and
+`promptChunks` grew from 8 to `SemanticResults.promptChunkLimit` (20), because
+the chunk holding the answer is inside the top eight only 65% of the time and
+inside the top twenty 94%.
 
 Notes for the UI layer:
 
@@ -652,16 +662,19 @@ Notes for the UI layer:
   filled the list first.
 * **`bestChunk.range` is where to scroll**, in the same coordinates as
   `KeywordHit.matchRange`.
-* **`promptChunks` is the M3-05 hand-off** — top eight, each with its note,
-  heading path and text.
+* **`promptChunks` is the M3-05 hand-off** — `SemanticResults.promptChunkLimit`
+  (20) chunks, each with its note, heading path and text. Not eight: a short
+  note splits into a prose chunk written in the language of the *question* and
+  a code chunk carrying the command, and the code chunk routinely ranks tenth.
+  No reranking inside eight chunks can recover one that was never in them.
 
 ---
 
 ## Answers — `AnswerExtractor`, `SemanticSearchService` (M3-05, FR-5.2/5.5)
 
 Retrieval above is entirely offline and ends at `SemanticResults.promptChunks`.
-This is the step that turns those eight chunks into Figure 2b's **best-match
-answer card**, and the one place in search that talks to Claude.
+This is the step that turns those chunks into Figure 2b's **best-match answer
+card**, and the one place in search that talks to Claude.
 
 | Type | Kind | Owns |
 |---|---|---|
@@ -735,7 +748,7 @@ The request is fixed by `AnswerExtractor.request(query:chunks:)`:
 |---|---|---|
 | `model` | `effectiveSearchModel`, default `claude-haiku-4-5` | keeps the card under 5 s (NFR-1) |
 | `system` | `answer.v1` | §9 prompt versioning |
-| `messages` | the numbered chunks, `[1]…[8]` | `AnswerPrompt.userMessage` |
+| `messages` | the numbered chunks, `[1]…[N]` | `AnswerPrompt.userMessage` |
 | `tools` | `AnswerSelection.tool`, `strict: true` | the model must not answer in prose |
 | `maxTokens` | 600 | a card is small; a truncated one is unusable |
 | `thinking` / `effort` | **omitted** for Haiku | pre-4.6 `budget_tokens` contract |
@@ -1181,12 +1194,82 @@ once per **resident chunk**, so the gate must be a set lookup and nothing more.
 Resolving it per note up front took a date-filtered 20,000-note query from
 580 ms to 93 ms.
 
+**Read every number in that table as a worst case.** They were measured on
+`SyntheticCorpus`, which writes a fenced block every fifth paragraph, and every
+fence is unconditionally its own chunk (ADR-039) — 17 chunks per note. On the
+hand-written M3-07 corpus the same chunker produces **2.0 chunks per note**, and
+the whole picture changes (ADR-048, `docs/verification/M3-perf.md`):
+
+| 5,000 notes, bundled bge-small | Synthetic corpus | Dev-corpus shape |
+|---|--:|--:|
+| Chunks | 85,130 | **10,163** |
+| Index build | 409 s | **50 s** |
+| Resident matrix | 68.3 MB | **8.2 MB** |
+| Derived database | +124 MB | **+19 MB** |
+
+At 20,000 notes of dev-corpus shape the matrix is **32.6 MB** (against 273 MB
+synthetic), lazy-loaded in 132 ms, and query p95 is 42 ms.
+
+---
+
+## Benchmarking and the development corpus (M3-07, `FilawayCore/Bench`)
+
+```swift
+let corpus  = try DevCorpus.load()                 // Tests/Fixtures/corpus/dev
+let queries = try RetrievalQuerySet.load()         // Tests/Fixtures/queries/dev.json
+let report  = try await RetrievalBenchmark.run(
+    corpus: corpus, queries: queries, library: library, embedder: embedder,
+    selector: LocalHeuristicSelector()
+)
+report.overall.noteTop1     // spec §8: ≥ 0.90
+report.overall.answerTop1   // FR-5.2: the card shows the right chunk
+print(report.table())
+```
+
+| Type | Role |
+|---|---|
+| `CorpusNote` / `DevCorpus` | A note of the committed corpus; loading, writing and **materialising it with its mtimes** |
+| `DevCorpusGenerator` | Golden notes from `DevCorpusContent` plus deterministic distractors, from a seed |
+| `RetrievalQuery` / `RetrievalQuerySet` | The query fixture: text, expected note, expected snippet, optional `now`/`expectedRange` |
+| `RetrievalBenchmark` | Materialise → scan → rebuild → index → score every query |
+| `RetrievalReport` / `RetrievalMetrics` / `QueryOutcome` | The numbers, per category, as a table or as JSON |
+| `AnswerSelecting` | The M3-05 seam: `(query, promptChunks) async -> chunkID?` |
+| `LocalHeuristicSelector` | The FR-5.5 offline answer card: the winning note's code block |
+| `ReplaySelector` | Recorded answers from `Tests/Fixtures/ai-recordings/answer/`, falling back to the heuristic |
+
+Three things to know before using it:
+
+* **`DevCorpus.materialize` stamps mtimes.** Git does not preserve them and
+  every FR-5.3 query is answered from `notes.mtime`, so `created`/`modified`
+  travel in each note's front matter and are written back onto the files.
+* **The runner parses time with the query set's calendar** (UTC, Monday-first),
+  not `Calendar.current`, so "last week" is the same Monday-to-Sunday on a
+  laptop and on CI.
+* **Curation happens in `DevCorpusContent`, not in the Markdown.**
+  `RetrievalFixtureTests` asserts the generator still reproduces exactly what is
+  committed, so a hand-edited fixture fails the suite rather than drifting.
+
+Metrics: note top-1 / top-3, MRR@10, answer-chunk top-1 (the selected chunk is
+in the expected note *and* contains the expected snippet), the "answer was in
+the prompt chunks at all" ceiling, negative-rejection and false-rejection rates,
+the cosine separation between answerable and unanswerable queries, and p50/p95 —
+each broken down by `command` / `paraphrase` / `temporal` / `typo` / `negative`.
+
+```
+filaway-bench corpus generate [--seed N] [--distractors N]   # rewrite the fixture
+filaway-bench corpus stats                                   # what is committed
+filaway-bench retrieval --embedder bge|hashed|bm25 [--json] [--failures]
+```
+
+`retrieval` exits non-zero below the gate (note top-1 ≥ 0.90, answer top-1
+≥ 0.85, p95 < 1 s), the way `keyword` does for NFR-1. Results and the tuning
+that produced them: `docs/verification/M3-retrieval.md`.
+
 ---
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 212 tests, ~2 s without the slow tags.
-`Tests/FilawayCoreTests` — 426 tests, ~22 s (the M3 suites dominate).
+`Tests/FilawayCoreTests` — 624 tests, ~23 s (the M3 suites dominate).
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -1241,6 +1324,16 @@ Resolving it per note up front took a date-filtered 20,000-note query from
 * `TemporalQueryParserTests` — every pattern against a fixed Wednesday, an
   injected time zone, and fourteen negatives ("two days", "v2.1", "I may need
   to…", "the august release").
+* `RetrievalFixtureTests` — the committed corpus and query set: shape, ≤2 MB,
+  path depth, front-matter round-trip, the generator still reproducing what is
+  committed, every expected path golden and present, every expected snippet
+  unique to its note, and every temporal query's range being what the parser
+  really produces.
+* `RetrievalBenchmarkTests` — the whole M3-07 pipeline on `HashedEmbedder` (no
+  model needed): metrics, the temporal hard filter, the BM25-only baseline, the
+  offline answer heuristic and the replay selector.
+* `RetrievalGateTests` — spec §8, with the real bundled model (tagged `.slow`):
+  note top-1 ≥ 0.90, answer top-1 ≥ 0.85, MRR ≥ 0.90, p95 < 1 s.
 * `HybridSearchTests` / RRF unit tests — consensus beats a single first place,
   a date range hard-filters, "recently" only biases, exclusions and folder
   scopes hold on both arms, and the whole path still works with no embedder.

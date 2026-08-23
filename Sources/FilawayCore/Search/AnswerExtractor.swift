@@ -1,6 +1,6 @@
 import Foundation
 
-/// Turns the top-8 retrieved chunks into Figure 2b's answer card (M3-05,
+/// Turns the retrieved chunks into Figure 2b's answer card (M3-05,
 /// FR-5.2, NFR-1).
 ///
 /// ```swift
@@ -152,8 +152,9 @@ public actor AnswerExtractor {
 
         // The ledger is FR-6.6 and must not be able to fail a search.
         if let ledger {
-            let usage = response
-            try? await ledger.record(response: usage, purpose: .search, provider: provider.identifier, at: now)
+            _ = try? await ledger.record(
+                response: response, purpose: .search, provider: provider.identifier, at: now
+            )
         }
 
         let decoded: AnswerSelection.Decoded

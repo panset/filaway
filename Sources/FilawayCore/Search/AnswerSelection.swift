@@ -18,8 +18,13 @@ import Foundation
 public enum AnswerSelection {
     public static let toolName = "answer_selection"
 
-    /// How many chunks the prompt ever shows (`SemanticResults.promptChunks`).
-    public static let maxChunks = 8
+    /// How many chunks the prompt ever shows.
+    ///
+    /// Follows ``SemanticResults/promptChunkLimit`` rather than pinning its own
+    /// number: M3-07 measured that eight chunks lose the answer outright on
+    /// paraphrased queries, and no amount of reranking inside eight can recover
+    /// a chunk that was never in them (ADR-047).
+    public static var maxChunks: Int { SemanticResults.promptChunkLimit }
 
     public static var tool: AITool {
         AITool(
@@ -155,8 +160,8 @@ public enum AnswerSelection {
 /// layout must move the key, which is exactly what makes a stale recording
 /// impossible to reuse (plan §9).
 public enum AnswerPrompt {
-    /// The chunk body is capped so eight chunks cannot blow past Haiku's budget
-    /// on a note full of one enormous code block.
+    /// The chunk body is capped so a full slice cannot blow past Haiku's budget
+    /// on a note that is one enormous code block.
     public static let maxChunkCharacters = 1_400
 
     public static func userMessage(query: String, chunks: [RankedChunk]) -> String {

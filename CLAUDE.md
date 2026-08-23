@@ -13,14 +13,24 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make build` | `swift build` (debug, all targets) |
 | `make test` | `swift test` — **must be green before any task is reported done** |
 | `make bench` | Runs `filaway-bench` (pass `ARGS="keyword --notes 5000"`) |
-| `make app` | Release build → `build/Filaway.app`, ad-hoc signed |
+| `make bench ARGS="retrieval --embedder bge --failures"` | M3-07 retrieval gate: note top-1, MRR@10, answer-card accuracy, p95 over `Tests/Fixtures/{corpus/dev,queries/dev.json}`; exits non-zero below the bar |
+| `make bench ARGS="corpus generate"` | Regenerates the committed dev corpus from `DevCorpusContent` |
+| `make bench ARGS="index --notes 5000"` | Semantic index build cost (add `--embed-batch`/`--min-tokens` to probe the levers) |
+| `make bench ARGS="semantic --notes 5000"` | Offline semantic query p50/p95 and the resident matrix |
+| `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
-| `make dmg` | `build/Filaway.dmg` (create-dmg, hdiutil fallback) |
-| `make notarize` | Developer ID sign + notarize + staple (currently BLOCKED, see below) |
-| `make release` | app → dmg → notarize |
+| `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
+| `make notarize` | Developer ID sign + notarize + staple + `spctl` (currently BLOCKED, see below) |
+| `make sparkle-keys` | Create/print the EdDSA key pair Sparkle signs updates with |
+| `make appcast` | `build/releases/appcast.xml`, EdDSA-signed |
+| `make release VERSION=x.y.z` | test → app → dmg → notarize → appcast → GitHub Release (`DRY_RUN=1` publishes nothing) |
 | `make clean` | Removes `.build/` and `build/` |
 
-Headless UI smoke tests (no Xcode/XCTest needed, works on a locked screen):
+Headless UI smoke tests (no Xcode/XCTest needed, no synthetic key events —
+but **the screen must be unlocked**: on macOS 26 a newly launched app gets no
+window while the screen is locked, SwiftUI never builds the scene, and every
+phase fails at `library-open` with no `SMOKE window …` lines. `Tools/smoke.sh`
+detects it and says so):
 
 ```
 make smoke          # or: Tools/smoke.sh [--keep]
@@ -29,6 +39,16 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  *before* launch: as-you-type hits, match and
 #                                  snippet ranges, ↑↓⏎esc, open-scrolled-to-
 #                                  match, fuzzy titles, recents, "No matches"
+# -> === smoke phase: organize === M2 end to end on a committed replay fixture:
+#                                  seed the library the fixture was recorded
+#                                  against, type the session, end it at the
+#                                  fixture's instant, Accept -> bytes move ->
+#                                  Activity has the event + diff -> Undo
+# -> === smoke phase: organize-auto === the same session in auto mode: applied
+#                                  unasked, the card offers Undo, Undo restores
+# -> === smoke phase: organize-offline === the provider fails with a network
+#                                  error: nothing changes, the session is queued
+#                                  durably, no modal, capture still works
 # -> === smoke phase: kill ===     type -> wait out the 750 ms debounce -> type
 #                                  again -> park; the script sends SIGKILL
 # -> === smoke phase: killcheck === relaunch: the debounced burst is on disk,
@@ -51,12 +71,17 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-`Tools/smoke.sh` runs `build/Filaway.app` six times against throwaway notes
+`Tools/smoke.sh` runs `build/Filaway.app` nine times against throwaway notes
 roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
-overstays, and never leaves the app running. `editor`, `search` and
-`kill`/`killcheck` each get their own notes root; `1` and `2` share one so the
-relaunch has state to restore. A single phase directly:
+overstays, and never leaves the app running. `editor`, `search`,
+`kill`/`killcheck` and each `organize*` phase get their own notes root (the
+organize phases get their own Application Support too, so baselines and the
+Activity journal start empty); `1` and `2` share one so the relaunch has state
+to restore. Every phase runs with `FILAWAY_AI_MODE=replay` and
+`FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
+network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. A single
+phase directly:
 
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
@@ -69,7 +94,20 @@ cannot be unit-tested: shell behaviour in
 `Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
 `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, search behaviour in
 `Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`, semantic search in
-`Sources/FilawayApp/Features/Search/SemanticSmokeCheck.swift`.
+`Sources/FilawayApp/Features/Search/SemanticSmokeCheck.swift`, organize behaviour
+in `Sources/FilawayApp/Features/Organize/OrganizeSmokeCheck.swift`.
+
+The organize phases replay a **committed** fixture whose filename is a hash of
+the whole rendered prompt, so the corpus in `OrganizeSmokeCheck` and
+`AppWiringFixture` (`Tests/FilawayCoreTests/OrganizeWiringTests.swift`) must
+stay in step — `wiringHitsTheCommittedFixture` pins the key so drift is a test
+failure, not a mystery. Regenerate with
+`FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter OrganizeWiringTests/regenerateFixture`.
+
+The `semantic` phase scripts its provider instead of replaying: a replay key
+hashes the rendered prompt, and the prompt carries the *indexed* chunks, so a
+committed fixture would break the first time the chunker or the embedder moved
+(ADR-051). The prompt→tool contract is pinned offline by `AnswerGoldenTests`.
 
 CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
@@ -92,6 +130,10 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
                            #   AppSettings, SmokeDriver
   Features/Sidebar/        # Recents + Library tree (Figure 1, FR-1.2)
   Features/Editor/         # TextKit 2 editor, AutosaveController
+  Features/Organize/       # OrganizeCoordinator (the whole M2 seam), the
+                           #   Figure 2a card, Edit + View-changes sheets,
+                           #   the AI status pill (FR-4.2, FR-6.4)
+  Features/Activity/       # Activity window ⌥⌘A: events, diffs, Undo (FR-4.3)
   Features/Search/         # toolbar field, SearchCoordinator, ⌘K results panel
                            #   (Figure 2b, FR-1.3, FR-5.1/5.2)
 
@@ -99,15 +141,28 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
                            #   Activity, AIStatusPill, SettingsSmokeCheck
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
-Tools/                     # make_app.sh, make_dmg.sh, notarize.sh, smoke.sh
-.github/workflows/ci.yml   # macos-15: build, test, assemble app
+Sources/FilawayApp/
+  Features/Updates/        # UpdaterMenu.swift — UpdaterProviding + Sparkle 2
+                           #   "Check for Updates…" (M4-04)
+Tools/                     # lib.sh (versions/release.env/Sparkle paths/identity),
+                           #   make_app.sh, make_dmg.sh, notarize.sh, release.sh,
+                           #   smoke.sh, sparkle/{generate_keys,make_appcast}.sh,
+                           #   Filaway.entitlements, release.env.example
+VERSION                    # CFBundleShortVersionString fallback
+.github/workflows/ci.yml   # macos-15: build, test, universal app, smoke
+.github/workflows/release.yml  # tag v*: sign, notarize, DMG, appcast, Release
 docs/plan.md               # Phase 1 plan (authoritative)
+docs/release.md            # signing/notarization/Sparkle setup + release flow
 docs/decisions.md          # ADR-lite — append every notable decision
 docs/spec/                 # functional spec
 ```
 
 Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index`,
 `Search`, `Session`, `Organize`, `AI`, `Embeddings`, `Activity`, `Settings`, `Util`.
+Plus `Bench/` — the M3-07 development corpus and retrieval benchmark. It lives
+in Core, not in `FilawayBench`, because a SwiftPM executable target cannot be
+imported by a test target and the CI gate must measure exactly what the CLI
+measures (ADR-011, ADR-042).
 
 ## Conventions
 
@@ -144,7 +199,9 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
     is installed (needed for NFR Intel support).
   - **XCTest UI tests are unavailable.** Use (a) Core-level tests for all logic,
     (b) the `FILAWAY_SMOKE=1` hook above / `osascript` + `screencapture`
-    drivers, (c) manual DoD checklists.
+    drivers, (c) manual DoD checklists. The smoke phases need no unlocked
+    *screen saver* interaction, but they do need the screen **unlocked**: a
+    locked session gives a launched app no window at all (see above).
   - **Core ML `coremlcompiler` is Xcode-only** → compile `.mlpackage` at first
     launch with `MLModel.compileModel(at:)` and cache it. The embedder fallback
     ladder gains `NLContextualEmbedding` (macOS 14+) as a zero-download option.
@@ -152,6 +209,13 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
   Signing, notarization and Sparkle EdDSA are blocked. `Tools/notarize.sh` runs
   every precondition check and exits with a `BLOCKED: …` message; implement
   release tasks up to the signing step and verify once credentials exist.
+  **The full pipeline is written and everything not needing credentials has been
+  run end to end — see `docs/release.md` for the user's unblock checklist.**
+  Sparkle itself works: it resolves under 6.0.3 because its manifest is
+  tools-version 5.3 and its target is a prebuilt universal xcframework
+  (ADR-041). Local builds get no `SUPublicEDKey`, so the "Check for Updates…"
+  item is disabled with the tooltip "Updates not configured in this build"
+  (ADR-042) — that is the intended state, not a bug.
 - **GRDB is pinned below 7.9.0**: 7.9.0+ declares swift-tools-version 6.1, which
   the 6.0.3 toolchain cannot read. Raise the bound with the toolchain.
 - **Action for the user:** install Xcode from the App Store and enrol in the
@@ -225,7 +289,35 @@ pure function of that state. Full rationale in ADR-034.
   (FR-5.5), and so does semantic *retrieval*: only the card needs a provider.
   `SemanticSearchCoordinator` owns the embedder/index/vectors/hybrid/extractor
   stack and is fed from autosave, the watcher and `excludedFolders`. See
-  ADR-041…043.
+  ADR-049…051.
+
+## Organize UI (spec Figure 2a, FR-4.2, FR-4.3, FR-6.4)
+
+`OrganizeCoordinator` (`Features/Organize/`) is the seam, the way
+`SearchCoordinator` is for ⌘K: it owns the `SessionTracker`, the `Organizer`,
+the `PlanApplier`, the `ActivityLog`, `UndoService` and the durable offline
+queue, and turns `OrganizerEvent`s into main-actor card state. `AppModel` builds
+one after the first paint. Full wiring diagram in `docs/organize.md`.
+
+- **The card** is a non-blocking stack at the **bottom-trailing** of the editor
+  pane (ADR-036 — the top strip is `BannerView`'s, and the caret usually is not
+  at the bottom). Ask mode asks — *Organize this session?* with **Accept** (⏎),
+  **Edit**, **Dismiss** (⎋) — and waits as long as it takes. Auto mode states —
+  *Session organized* with **Undo** and **View changes** — and fades after 20 s.
+  Cards queue; none of them ever takes first responder.
+- **Menu items.** Window ▸ **Activity** is ⌥⌘A (the `Window` scene's own
+  shortcut). Edit ▸ **Undo Last Organization** is **⌥⌘Z** — ⇧⌘Z is Redo in every
+  macOS text view including Filaway's editor, and taking it would make the
+  editor lie.
+- **Status.** One pill in the toolbar (`AI ready` / `AI queued · N` /
+  `AI offline` / `Key invalid` / `AI paused` / `AI off`). Clicking it posts
+  `.filawayOpenAISettings` for Settings to catch. No modal alerts anywhere;
+  queued sessions retry on their own and survive a relaunch.
+- **Settings** are read through `OrganizeSettingsSource` (keys
+  `organizationMode`, `idleInterval` in minutes, `excludedFolders`) with a
+  UserDefaults default, so M2-11 can substitute `AppSettings` in one line.
+- **Candidates** come from `KeywordCandidateFinder` (FTS body evidence on top of
+  title overlap). M3-08 replaces it behind the same `CandidateFinder` protocol.
 
 ## Current state
 
@@ -251,8 +343,32 @@ calls, and `Organize/HybridCandidateFinder` swaps the organizer's merge-target
 retrieval onto the same hybrid ranker (M3-08). See `docs/core-api.md`
 § "Answers" and `docs/organize.md` § "Finding candidates".
 
+**M2 is wired end to end** (M2-09/10/12): a writing session ends, the plan comes
+back from the provider, the Figure 2a card appears, Accept applies it, Activity
+records a diff and Undo restores every byte — proved headlessly by the
+`organize`, `organize-auto` and `organize-offline` smoke phases against a
+committed replay fixture. Settings → AI (M2-11) is in; the organizer still reads
+`OrganizeSettingsSource` from UserDefaults (swap to `AppSettings` pending) and the
+status pill's click posts `.filawayOpenAISettings`.
+
+One known gap: FR-4.4's **raw session text is not recorded** on the automatic
+path — `PlanApplying.apply(_:)` has no room for it, so nothing between the
+tracker and the applier carries the text (`docs/organize.md`, "Known gap").
+
 The onboarding folder picker is M4-01, so the notes root is `~/Notes` (override
 with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
+
+**M4-04 / M4-05 are in.** Sparkle 2.9.x arrives through SPM and is embedded in
+`Contents/Frameworks` by `Tools/make_app.sh`, which also writes the Sparkle
+Info.plist keys, applies `Tools/Filaway.entitlements`, and signs inner-out with
+`$DEVELOPER_ID` when one exists. `Tools/release.sh` (`make release`) and
+`.github/workflows/release.yml` are the pipeline; every secret-dependent step in
+the workflow degrades to a visible warning so it can be dispatched before
+enrolment. Two Sparkle traps worth knowing, both verified by building it both
+ways and both asserted in CI: `generate_appcast` signs an entry **only** when
+the archived app declares `SUPublicEDKey`, and it derives
+`sparkle:hardwareRequirements` from the slices in the archive, so an arm64-only
+release is never offered to Intel Macs (ADR-046).
 
 **M2-11 Settings** is in: a `Settings` scene (⌘,) with General / AI / Activity,
 the AI pane built to Figure 4, and `FilawayCore/Settings/` holding `AppSettings`

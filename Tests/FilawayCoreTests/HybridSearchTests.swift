@@ -236,12 +236,13 @@ struct HybridSearchTests {
         }
     }
 
-    @Test("the prompt slice M3-05 consumes is the top eight chunks")
+    @Test("the prompt slice M3-05 consumes is the top chunks, in order")
     func promptChunks() async throws {
         let fixture = try await Self.makeIndexedFixture()
         let results = await fixture.hybrid.semanticCandidates("bearer token rotation", now: Self.now)
-        #expect(results.promptChunks.count <= 8)
-        #expect(results.promptChunks == Array(results.chunks.prefix(8)))
+        let limit = SemanticResults.promptChunkLimit
+        #expect(results.promptChunks.count <= limit)
+        #expect(results.promptChunks == Array(results.chunks.prefix(limit)))
         #expect(results.promptChunks.allSatisfy { !$0.text.isEmpty })
     }
 

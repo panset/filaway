@@ -16,6 +16,15 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift", "7.0.0" ..< "7.9.0"),
         .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.8.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
+        // Sparkle 2 (M4-04). Its own manifest is swift-tools-version 5.3 and the
+        // product is a *binary* target (a prebuilt, universal
+        // `Sparkle.xcframework` downloaded from the GitHub release), so it
+        // resolves and links under the 6.0.3 Command Line Tools with no Xcode —
+        // verified, see ADR-041. `swift build` drops `Sparkle.framework` next to
+        // the executable and the `bin/` tools (`generate_keys`, `sign_update`,
+        // `generate_appcast`, `BinaryDelta`) into
+        // `.build/artifacts/sparkle/Sparkle/bin`, which `Tools/sparkle/*.sh` use.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
     ],
     targets: [
         // All logic lives here. Never imports AppKit or SwiftUI (see CLAUDE.md).
@@ -41,7 +50,10 @@ let package = Package(
         // complete strict-concurrency checking surfaced as warnings.
         .executableTarget(
             name: "FilawayApp",
-            dependencies: ["FilawayCore"],
+            dependencies: [
+                "FilawayCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 .enableUpcomingFeature("StrictConcurrency"),

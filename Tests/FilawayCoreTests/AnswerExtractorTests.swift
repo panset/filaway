@@ -83,9 +83,9 @@ struct AnswerRequestTests {
         #expect(message.contains(AnswerGolden.curlCommand))
     }
 
-    @Test("never more than eight chunks reach the prompt")
+    @Test("the prompt never shows more chunks than retrieval hands over")
     func promptChunkCap() {
-        let many = (0..<20).map { index in
+        let many = (0..<(SemanticResults.promptChunkLimit + 12)).map { index in
             AnswerGolden.chunk(
                 id: Int64(1_000 + index), noteID: AnswerGolden.curlID, title: "n\(index)",
                 path: "n\(index).md", modified: AnswerGolden.curlModified, kind: .prose,
@@ -95,8 +95,8 @@ struct AnswerRequestTests {
         let results = AnswerGolden.results(query: "q", chunks: many)
         #expect(results.promptChunks.count == AnswerSelection.maxChunks)
         let message = AnswerPrompt.userMessage(query: "q", chunks: results.promptChunks)
-        #expect(message.contains("[8] "))
-        #expect(!message.contains("[9] "))
+        #expect(message.contains("[\(AnswerSelection.maxChunks)] "))
+        #expect(!message.contains("[\(AnswerSelection.maxChunks + 1)] "))
     }
 
     @Test("a runaway chunk is clipped rather than sent whole")

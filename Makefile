@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: setup build test smoke bench app run dmg notarize clean release
+.PHONY: setup build test smoke bench app run dmg notarize clean release appcast sparkle-keys
 
 ## setup: check the toolchain and report optional tools
 setup:
@@ -12,6 +12,7 @@ setup:
 	@security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" \
 		&& echo "signing:    Developer ID present" \
 		|| echo "signing:    no Developer ID (notarization blocked; see docs/plan.md §8)"
+	@test -f Tools/release.env && echo "release.env: present" || echo "release.env: missing (optional, copy Tools/release.env.example)"
 	@swift package resolve
 
 ## build: debug build of every target
@@ -46,8 +47,19 @@ dmg: app
 notarize:
 	Tools/notarize.sh
 
-## release: app -> dmg -> notarize
-release: app dmg notarize
+## sparkle-keys: create (or print) the EdDSA key pair Sparkle signs updates with
+sparkle-keys:
+	Tools/sparkle/generate_keys.sh
+
+## appcast: regenerate build/releases/appcast.xml from the built DMG
+appcast:
+	Tools/sparkle/make_appcast.sh
+
+## release: test -> app -> dmg -> notarize -> appcast -> GitHub Release
+## Usage: make release VERSION=0.2.0 [DRY_RUN=1]
+release:
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=x.y.z [DRY_RUN=1]"; exit 2; }
+	DRY_RUN=$(DRY_RUN) Tools/release.sh $(VERSION)
 
 ## clean: remove build products
 clean:
