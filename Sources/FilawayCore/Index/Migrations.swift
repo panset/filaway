@@ -21,9 +21,10 @@ import GRDB
 /// | `v2-fts` | M1-06 | `note_text` + `notes_fts` (unicode61) + `notes_trigram` and their sync triggers |
 /// | `v3-chunks` | M3-02 | `chunks`, `embeddings` (vector BLOBs) |
 /// | `v4-activity` | M2-08 | `activity_events`, `undo_events`, `note_baselines` |
+/// | `v5-pending-sessions` | M2-09 | `pending_sessions` (the FR-6.4 offline queue) |
 public enum DatabaseSchema {
     /// Bumped whenever the *last* migration changes; mirrored into `meta`.
-    public static let version = 3
+    public static let version = 4
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -184,6 +185,28 @@ public enum DatabaseSchema {
                     updated_at DOUBLE NOT NULL
                 )
                 """)
+        }
+
+        // M2-09 (FR-6.4). The offline queue: sessions that could not reach the
+        // provider, so a relaunch still files them. ``PendingSessionStoreGRDB``
+        // owns this table and opens its own connection, like ``ActivityLog``
+        // (ADR-027). `note_ids` is a JSON array rather than a join table
+        // because nothing ever queries the queue *by note* — it is drained
+        // whole, oldest first.
+        migrator.registerMigration("v5-pending-sessions") { db in
+            try db.execute(sql: """
+                CREATE TABLE pending_sessions (
+                    id TEXT PRIMARY KEY,
+                    note_ids TEXT NOT NULL,
+                    started_at DOUBLE NOT NULL,
+                    ended_at DOUBLE NOT NULL,
+                    reason TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    next_attempt_at DOUBLE
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX pending_sessions_on_ended ON pending_sessions(ended_at ASC)")
         }
 
         return migrator
