@@ -894,3 +894,63 @@ default (`.immediateError`) would have surfaced normal contention as an error.
 - `note_baselines` rides along on the same connection: `DatabaseBaselineStore`
   is a thin `BaselineStore` façade over `ActivityLog`, so the session tracker
   never opens a third connection.
+
+---
+
+## ADR-035 — Settings are a Core value store, and the app spells it `CoreSettings`
+
+**Date:** 2026-08-23 · **Task:** M2-11 · **Status:** accepted
+
+**Context.** FR-8.1's preferences drive Core objects — the organizer's mode, the
+session tracker's idle interval, the exclusion filter's folder list, the
+indexer's semantic toggle — but the obvious home for "preferences" is the app
+target, which Core is forbidden to import. `FilawayApp` also already has an
+`AppSettings` (window frame, sidebar width, last-open note), and `FilawayCore`
+is the name of both the module *and* an enum inside it, so
+`FilawayCore.AppSettings` does not resolve to the module's type.
+
+**Decision.** `AppSettings` lives in `FilawayCore/Settings`, backed by an
+injected `UserDefaults` suite, with typed and clamped accessors and Combine-free
+change notification (`observe(_:)` returning a token, plus `changes()` as an
+`AsyncStream`). Core exports `public typealias CoreSettings = AppSettings`, and
+the app uses that name. The shell's `AppSettings` keeps its own scope: window
+and sidebar geometry, which is AppKit state and belongs there.
+
+**Consequences.**
+- Every preference is unit-testable with `swift test` alone, against a throwaway
+  suite — no app, no window.
+- Consumers subscribe rather than poll, so a mode or interval edit takes effect
+  without a restart. Handlers run synchronously on the writing thread.
+- Two `AppSettings` types coexist. The alias makes the Core one unambiguous;
+  merging them is a later cleanup, not a Phase 1 one.
+- The clamp is applied on read as well as write, so a hand-edited plist cannot
+  put `idleInterval` outside 1–15.
+
+---
+
+## ADR-036 — The API key reaches the Keychain only after it validates
+
+**Date:** 2026-08-23 · **Task:** M2-11 · **Status:** accepted
+
+**Context.** FR-6.1 wants paste → validate → confirm. The naive order is to
+store the key and then check it, which is simpler but means a typo in Settings →
+AI → Change… replaces a working credential with a broken one, and the user's
+next writing session silently fails to file.
+
+**Decision.** `AIConnectionManager.connect(apiKey:)` validates the *entered*
+key through a provider bound to `APIKeySource.fixed(_:)`, and writes to the
+`SecretStore` only on success. A blank key is rejected without a network call.
+On failure nothing is written and the previously stored key is untouched.
+Validation is `GET /v1/models`, which is free (plan §1 amendment 4), so the
+check costs nothing to repeat.
+
+**Consequences.**
+- The stored credential is always one that worked at least once; `.invalidKey`
+  afterwards means the key was revoked, not mistyped.
+- `refresh()` re-validates on every Settings open, so the pill is never stale —
+  one free request per visit.
+- Losing connectivity never removes a key: `.network` folds to `.offline`, and
+  FR-6.4's degradation applies rather than a disconnect.
+- A smoke run gets an `InMemorySecretStore`. An unsigned bundle querying the
+  real Keychain can prompt or fail, and a scripted run has no business writing
+  the user's credential.
