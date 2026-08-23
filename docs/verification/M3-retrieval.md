@@ -5,6 +5,15 @@
 **Spec §8 criterion:** *"find a specific stored command via natural language in
 under 10 seconds, ≥ 90% of the time."*
 
+> **Superseded in part by M4-07** (`docs/verification/M4-perf.md` §6). The typo
+> gap §5 leaves open was closed by `TypoExpansion`: the typo category went
+> **57% → 100%** top-1 and the corpus overall **91% → 95%**, top-3 **97% →
+> 100%**, MRR **0.939 → 0.970**, answer **90% → 94%**, with nothing regressing.
+> The numbers below are the pre-M4-07 baseline and are still reproducible with
+> `filaway-bench retrieval --embedder bge --no-typo-expansion`.
+> Also: §5 names the answer fixtures as `Tests/Fixtures/ai-recordings/answer/`;
+> they are in `…/search/`.
+
 **Verdict: met.** The bundled bge-small model puts the right note first **91%**
 of the time and the right *command* on the answer card **90%** of the time, in
 **17 ms** at p95 — three orders of magnitude inside the ten-second budget, with
