@@ -4,11 +4,12 @@ import FilawayCore
 /// Benchmark harness. Subcommands (`corpus`, `keyword`, `semantic`,
 /// `retrieval`, `prompts`) arrive with M1-07 and M3-07.
 @main
-struct FilawayBench: ParsableCommand {
+struct FilawayBench: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "filaway-bench",
         abstract: "Corpus generation and performance benchmarks for Filaway.",
-        version: FilawayCore.version
+        version: FilawayCore.version,
+        subcommands: [EmbedCommand.self]
     )
 
     func run() throws {
