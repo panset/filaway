@@ -28,4 +28,14 @@ actor ChangeCollector {
     private func append(_ change: LibraryChange) { changes.append(change) }
 
     func snapshot() -> [LibraryChange] { changes }
+
+    /// `true` once any collected change matches — the shape every FSEvents
+    /// barrier and every `waitUntil` in `WatcherTests` is built out of.
+    func contains(_ predicate: (LibraryChange) -> Bool) -> Bool {
+        changes.contains(where: predicate)
+    }
+
+    /// Forgets everything collected so far, so an assertion about what the
+    /// stream delivered is not confused by the barrier that opened it.
+    func reset() { changes.removeAll() }
 }
