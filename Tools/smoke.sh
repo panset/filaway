@@ -20,6 +20,14 @@
 #   settings   ⌘, opens Settings; the Figure 4 rows write through AppSettings;
 #              the idle interval clamps; AIConnectionManager walks
 #   settings2  relaunch: every one of those preferences came back
+#   paste      M4-03: a curl line goes on the real pasteboard, ⌘V lands it
+#              verbatim, the affordance appears, Wrap fences it, ⌘Z undoes it
+#              in one step, prose offers nothing, the setting turns it off
+#   onboarding M4-01: first launch shows the three-step flow; a temp folder is
+#              chosen; the mock key validates; finishing writes the bookmark and
+#              opens the library at the chosen folder
+#   onboarding2  relaunch: no flow, same library
+#   onboardingskip  the "Skip for now" path: the gentle sidebar prompt appears
 #
 # Exits non-zero on any failure. Never leaves the app running.
 #
@@ -46,12 +54,22 @@ EDITOR_ROOT="$WORK/EditorNotes"
 SEARCH_ROOT="$WORK/SearchNotes"
 KILL_ROOT="$WORK/KillNotes"
 SETTINGS_ROOT="$WORK/SettingsNotes"
+PASTE_ROOT="$WORK/PasteNotes"
+# M4-01 chooses these through the flow, so they are *not* passed as
+# FILAWAY_NOTES_ROOT — the point of the phase is that the bookmark decides.
+ONBOARD_ROOT="$WORK/OnboardChosen"
+ONBOARD_SKIP_ROOT="$WORK/OnboardSkipChosen"
 SUPPORT="$WORK/Support"
 SUITE="com.tejaspanse.filaway.smoke.$STAMP"
 # The settings phases need their own defaults domain: they write preferences the
 # capture phases must not inherit, and phase `settings2` reads them back.
 SETTINGS_SUITE="com.tejaspanse.filaway.smoke.settings.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT"
+# Onboarding needs a suite with no `onboarding.completed` in it, and the skip
+# variant needs one the connected variant has not already answered.
+ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
+ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT" "$PASTE_ROOT"
+mkdir -p "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT"
 
 # Three notes on disk before the app ever runs, so the search phase also proves
 # a cold launch indexes a library Filaway has never seen. Titles and the tail
@@ -103,10 +121,10 @@ cleanup() {
   if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
     kill -9 "$app_pid" 2>/dev/null
   fi
-  defaults delete "$SUITE" >/dev/null 2>&1
-  defaults delete "$SETTINGS_SUITE" >/dev/null 2>&1
-  rm -f "$HOME/Library/Preferences/$SUITE.plist"
-  rm -f "$HOME/Library/Preferences/$SETTINGS_SUITE.plist"
+  for suite in "$SUITE" "$SETTINGS_SUITE" "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
+    defaults delete "$suite" >/dev/null 2>&1
+    rm -f "$HOME/Library/Preferences/$suite.plist"
+  done
   if [ "$KEEP" = "1" ]; then
     echo "smoke: kept $WORK"
   else
@@ -122,13 +140,22 @@ run_phase() {
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
   [ "$phase" = "killcheck" ] && root="$KILL_ROOT"
+  local onboard_root=""
   case "$phase" in
     settings|settings2) root="$SETTINGS_ROOT"; suite="$SETTINGS_SUITE" ;;
+    paste) root="$PASTE_ROOT" ;;
+    # The onboarding phases pass an *empty* FILAWAY_NOTES_ROOT so the app falls
+    # through to the bookmark the flow writes — which is the whole assertion.
+    onboarding|onboarding2)
+      root=""; suite="$ONBOARD_SUITE"; onboard_root="$ONBOARD_ROOT" ;;
+    onboardingskip)
+      root=""; suite="$ONBOARD_SKIP_SUITE"; onboard_root="$ONBOARD_SKIP_ROOT" ;;
   esac
   echo
   echo "=== smoke phase: $phase ==============================================="
   FILAWAY_SMOKE="$phase" \
   FILAWAY_NOTES_ROOT="$root" \
+  FILAWAY_ONBOARD_ROOT="$onboard_root" \
   FILAWAY_SUPPORT_ROOT="$SUPPORT" \
   FILAWAY_DEFAULTS_SUITE="$suite" \
     "$APP" 2>&1 &
@@ -197,6 +224,10 @@ run_phase 1 90
 run_phase 2 60
 run_phase settings 90
 run_phase settings2 60
+run_phase paste 90
+run_phase onboarding 120
+run_phase onboarding2 60
+run_phase onboardingskip 120
 
 echo
 echo "SMOKE result failures=$failures"

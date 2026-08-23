@@ -35,15 +35,74 @@ enum AppSettings {
         return value != nil && value != "0"
     }
 
+    /// The FR-8.1 preference store, on the same suite as everything above.
+    ///
+    /// `SettingsModel` owns the instance the Settings window binds to; this one
+    /// exists for the handful of places that need a preference *before* any
+    /// window exists — the launch gate (`onboardingCompleted`), the notes-root
+    /// bookmark, and the editor's paste offer.
+    static let core = CoreSettings(defaults: defaults)
+
     // MARK: - Notes root
 
-    /// `~/Notes` unless `FILAWAY_NOTES_ROOT` overrides it (tests, smoke driver).
-    /// Onboarding's folder picker (M4-01) replaces this with a bookmark.
+    /// Where the notes live, in precedence order:
+    ///
+    /// 1. `FILAWAY_NOTES_ROOT` — tests and the smoke driver, always wins;
+    /// 2. the bookmark onboarding's folder picker stored (NFR-5: the root may be
+    ///    an external or synced volume, and it may be renamed);
+    /// 3. `~/Notes`, the FR-7.1 default.
+    ///
+    /// Resolved once per launch. Onboarding runs *before* the library is opened,
+    /// so the value it writes is the one this launch uses; nothing else changes
+    /// the root while the app is running.
     static var notesRoot: URL {
+        if let cached = resolvedNotesRoot { return cached }
+        // Whoever asks first is, by definition, the first thing that needs the
+        // answer onboarding gives — so asking runs the gate (ADR-037). A no-op
+        // after the first run, and off the main thread there is nothing to run.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { OnboardingPresenter.runIfNeeded() }
+        }
+        let resolved = resolveNotesRoot()
+        resolvedNotesRoot = resolved
+        return resolved
+    }
+
+    nonisolated(unsafe) private static var resolvedNotesRoot: URL?
+
+    /// Forgets the cached root. Called by onboarding after it stores a bookmark.
+    static func invalidateNotesRoot() { resolvedNotesRoot = nil }
+
+    private static func resolveNotesRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["FILAWAY_NOTES_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: (override as NSString).expandingTildeInPath).standardizedFileURL
         }
+        if let bookmark = core.notesRootBookmark {
+            do {
+                let (library, isStale) = try Library.resolving(bookmark: bookmark)
+                // A stale bookmark still resolves; macOS is asking for a fresh
+                // one, and writing it back now keeps the next launch cheap.
+                if isStale { core.notesRootBookmark = try? library.bookmarkData() }
+                return library.root
+            } catch {
+                Log.app.error("notes-root bookmark did not resolve: \(String(describing: error), privacy: .public)")
+            }
+        }
         return Library.defaultRoot
+    }
+
+    /// Stores `url` as the notes root and drops the cached resolution.
+    /// - Returns: `false` when macOS refused to make a bookmark.
+    @discardableResult
+    static func setNotesRoot(_ url: URL) -> Bool {
+        let library = Library(root: url)
+        guard let bookmark = try? library.bookmarkData() else {
+            Log.app.error("could not bookmark the chosen notes folder")
+            return false
+        }
+        core.notesRootBookmark = bookmark
+        invalidateNotesRoot()
+        return true
     }
 
     /// `FILAWAY_SUPPORT_ROOT` redirects the derived database out of the user's

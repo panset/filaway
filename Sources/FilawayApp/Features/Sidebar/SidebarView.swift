@@ -225,6 +225,16 @@ struct SidebarView: View {
     }
 
     private var footer: some View {
+        VStack(spacing: 0) {
+            // FR-7.1's persistent, gentle "connect your AI" prompt. Shows itself
+            // only when the connection was skipped, and hides for the launch on
+            // the ×.
+            ConnectAIPromptRow(model: ConnectAIPromptModel.shared)
+            countAndNewNote
+        }
+    }
+
+    private var countAndNewNote: some View {
         HStack {
             Text(model.noteCount == 1 ? "1 note" : "\(model.noteCount) notes")
                 .font(.system(size: 11))

@@ -13,14 +13,8 @@ struct APIKeySheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var key = ""
-    @State private var phase: Phase = .idle
-
-    private enum Phase: Equatable {
-        case idle
-        case validating
-        case valid
-        case failed(String)
-    }
+    /// The same four-state line onboarding step 2 shows (``KeyValidationStatusLine``).
+    @State private var phase: OnboardingModel.KeyPhase = .idle
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -39,7 +33,7 @@ struct APIKeySheet: View {
                 .onChange(of: key) { _, _ in if phase != .validating { phase = .idle } }
                 .disabled(phase == .validating)
 
-            statusLine
+            KeyValidationStatusLine(phase: phase)
                 .frame(minHeight: 18)
 
             HStack {
@@ -62,32 +56,6 @@ struct APIKeySheet: View {
         }
         .padding(20)
         .frame(width: 420)
-    }
-
-    @ViewBuilder
-    private var statusLine: some View {
-        switch phase {
-        case .idle:
-            EmptyView()
-        case .validating:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Checking the key…").foregroundStyle(.secondary)
-            }
-            .font(.callout)
-            .accessibilityLabel("Checking the key")
-        case .valid:
-            Label("Key valid · stored in macOS Keychain", systemImage: "checkmark.circle.fill")
-                .font(.callout)
-                .foregroundStyle(.green)
-                .accessibilityLabel("Key valid, stored in the macOS Keychain")
-        case let .failed(message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("Key rejected. \(message)")
-        }
     }
 
     private func validate() {
