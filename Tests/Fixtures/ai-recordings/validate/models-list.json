@@ -1,0 +1,79 @@
+{
+  "key" : "models-list",
+  "model" : "",
+  "note" : "hand-authored (M2-02) — GET /v1/models, key validation",
+  "purpose" : "validate",
+  "request" : {
+    "maxTokens" : 1024,
+    "messages" : [
+
+    ],
+    "model" : "",
+    "purpose" : "validate",
+    "timeout" : 15,
+    "tools" : [
+
+    ]
+  },
+  "requestBody" : {
+    "method" : "GET",
+    "path" : "/v1/models?limit=100"
+  },
+  "responseBody" : {
+    "data" : [
+      {
+        "capabilities" : {
+          "thinking" : {
+            "types" : {
+              "adaptive" : {
+                "supported" : true
+              }
+            }
+          }
+        },
+        "created_at" : "2026-02-01T00:00:00Z",
+        "display_name" : "Claude Opus 5",
+        "id" : "claude-opus-5",
+        "max_input_tokens" : 1000000,
+        "max_tokens" : 128000,
+        "type" : "model"
+      },
+      {
+        "capabilities" : {
+          "thinking" : {
+            "types" : {
+              "adaptive" : {
+                "supported" : true
+              }
+            }
+          }
+        },
+        "created_at" : "2026-02-01T00:00:00Z",
+        "display_name" : "Claude Sonnet 5",
+        "id" : "claude-sonnet-5",
+        "max_input_tokens" : 1000000,
+        "max_tokens" : 128000,
+        "type" : "model"
+      },
+      {
+        "capabilities" : {
+          "thinking" : {
+            "types" : {
+              "adaptive" : {
+                "supported" : false
+              }
+            }
+          }
+        },
+        "created_at" : "2026-02-01T00:00:00Z",
+        "display_name" : "Claude Haiku 4.5",
+        "id" : "claude-haiku-4-5",
+        "max_input_tokens" : 200000,
+        "max_tokens" : 64000,
+        "type" : "model"
+      }
+    ],
+    "has_more" : false
+  },
+  "version" : 1
+}

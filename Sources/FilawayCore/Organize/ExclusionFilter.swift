@@ -82,10 +82,9 @@ public struct ExclusionFilter: Sendable, Equatable {
         let haystack = body.allStrings.joined(separator: "\n")
         var found: [String] = []
         for note in excluded(notes) {
-            if haystack.contains(note.title) { found.append(note.relativePath) }
-            if let text = bodies[note.id], !text.isEmpty, haystack.contains(text) {
-                found.append(note.relativePath)
-            }
+            let titleLeaked = haystack.contains(note.title)
+            let bodyLeaked = (bodies[note.id].map { !$0.isEmpty && haystack.contains($0) }) ?? false
+            if titleLeaked || bodyLeaked { found.append(note.relativePath) }
         }
         return found
     }

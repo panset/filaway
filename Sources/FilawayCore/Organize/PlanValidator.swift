@@ -161,6 +161,11 @@ public struct PlanValidator: Sendable {
         var moveTargets: [NoteID: (index: Int, folder: String)] = [:]
         var retitles: [NoteID: (index: Int, title: String)] = [:]
         var createdPaths: [String: Int] = [:]
+        // Where each note ends up as the plan runs, and which paths are taken.
+        // Collisions have to be judged against the *projected* library, or a
+        // move followed by a retitle could quietly land on an existing note.
+        var projectedPaths: [NoteID: String] = [:]
+        var occupiedPaths = Set(context.notes.map { PathRules.normalize($0.relativePath) })
 
         for (index, action) in plan.actions.enumerated() {
             if let first = seenActions[action] {
@@ -190,7 +195,7 @@ public struct PlanValidator: Sendable {
             for created in action.createdNotes {
                 validateTitle(created.title, index: index, errors: &errors)
                 let path = PathRules.relativePath(folder: created.folderPath, title: created.title)
-                if context.note(path: path) != nil {
+                if occupiedPaths.contains(path) {
                     errors.append(PlanIssue(
                         kind: .titleCollision,
                         actionIndex: index,
@@ -205,6 +210,7 @@ public struct PlanValidator: Sendable {
                     ))
                 } else {
                     createdPaths[path] = index
+                    occupiedPaths.insert(path)
                 }
             }
 
@@ -254,13 +260,18 @@ public struct PlanValidator: Sendable {
                 } else {
                     moveTargets[note.id] = (index, destination)
                 }
-                let target = PathRules.relativePath(folder: destination, title: note.title)
-                if target != note.relativePath, context.note(path: target) != nil {
+                let current = projectedPaths[note.id] ?? PathRules.normalize(note.relativePath)
+                let target = PathRules.relativePath(folder: destination, title: PathRules.title(of: current))
+                if target != current, occupiedPaths.contains(target) {
                     errors.append(PlanIssue(
                         kind: .titleCollision,
                         actionIndex: index,
                         detail: "\(target) already exists."
                     ))
+                } else if target != current {
+                    occupiedPaths.remove(current)
+                    occupiedPaths.insert(target)
+                    projectedPaths[note.id] = target
                 }
 
             case let .retitleNote(retitle):
@@ -280,11 +291,18 @@ public struct PlanValidator: Sendable {
                 } else {
                     retitles[note.id] = (index, retitle.newTitle)
                 }
-                let target = PathRules.relativePath(folder: note.folderPath, title: retitle.newTitle)
-                if target != note.relativePath, context.note(path: target) != nil {
+                let current = projectedPaths[note.id] ?? PathRules.normalize(note.relativePath)
+                let target = PathRules.relativePath(
+                    folder: PathRules.folderPath(of: current), title: retitle.newTitle
+                )
+                if target != current, occupiedPaths.contains(target) {
                     errors.append(PlanIssue(
                         kind: .titleCollision, actionIndex: index, detail: "\(target) already exists."
                     ))
+                } else if target != current {
+                    occupiedPaths.remove(current)
+                    occupiedPaths.insert(target)
+                    projectedPaths[note.id] = target
                 }
 
             case let .tagNote(tag):
