@@ -20,20 +20,35 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make release` | app → dmg → notarize |
 | `make clean` | Removes `.build/` and `build/` |
 
-Headless UI smoke check (no Xcode/XCTest needed, works on a locked screen):
+Headless UI smoke tests (no Xcode/XCTest needed, works on a locked screen):
 
 ```
-FILAWAY_SMOKE=1 build/Filaway.app/Contents/MacOS/Filaway
-# -> SMOKE window title="Filaway" visible=true size=1000x680
-# -> SMOKE ok   pasteboard-has-code-without-fences
-# -> SMOKE result failures=0            (exit status = number of failures)
+make smoke          # or: Tools/smoke.sh [--keep]
+# -> === smoke phase: editor ===   M1-10 editor checks, on a note read from disk
+# -> === smoke phase: 1 ===        empty sidebar -> ⌘N -> type -> autosave hits
+#                                  disk -> retitle renames the file -> an
+#                                  external note reaches the sidebar -> quit
+#                                  mid-burst
+# -> === smoke phase: 2 ===        relaunch: last note and that last burst are
+#                                  back (FR-1.5, FR-2.3)
+# -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-It drives the real editor code paths (insert text, toggle a checkbox, hover +
-Copy a code block and read the pasteboard, probe attributes and rendered pixels
-in light and dark, measure typing latency) and exits non-zero on any failure —
-add a `check(...)` line in `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`
-for each new UI behaviour that cannot be unit-tested.
+`Tools/smoke.sh` runs `build/Filaway.app` three times against a throwaway notes
+root, preferences domain and Application Support (`FILAWAY_NOTES_ROOT`,
+`FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
+overstays, and never leaves the app running. A single phase directly:
+
+```
+FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
+```
+
+The phases drive the real objects — `AppModel`, `NoteStore`, the live
+`NSTextView` — so they cover the callback chain, autosave timing, the watcher
+and state restoration. Add a `check(...)` line for each new UI behaviour that
+cannot be unit-tested: shell behaviour in
+`Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
+`Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`.
 
 ## Layout
 
@@ -42,9 +57,13 @@ Package.swift              # single root package (no .xcodeproj — see §8)
 Sources/FilawayCore/       # all logic; library; Swift 6 language mode
   Util/Log.swift           # OSLog factory, subsystem com.tejaspanse.filaway
 Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
+  Features/Shell/          # AppModel (owns the storage stack), ShellView,
+                           #   toolbar search field, AppSettings, SmokeDriver
+  Features/Sidebar/        # Recents + Library tree (Figure 1, FR-1.2)
+  Features/Editor/         # TextKit 2 editor, AutosaveController
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
-Tools/                     # make_app.sh, make_dmg.sh, notarize.sh
+Tools/                     # make_app.sh, make_dmg.sh, notarize.sh, smoke.sh
 .github/workflows/ci.yml   # macos-15: build, test, assemble app
 docs/plan.md               # Phase 1 plan (authoritative)
 docs/decisions.md          # ADR-lite — append every notable decision
@@ -103,13 +122,50 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
   Apple Developer Program to unblock notarization, Sparkle signing, universal
   builds and XCTest UI tests.
 
+## Window layout (spec Figure 1)
+
+```
+┌─ toolbar ────────────────────────────────────────────────────────────────┐
+│ [sidebar]        ✦ Ask anything…                 ⌘K      [square.and.pencil] │
+├──────────────────────────┬───────────────────────────────────────────────┤
+│ Recents                  │  August 22, 2026 · 9:41      ← date stamp     │
+│   Untitled note          │  Untitled note               ← title field    │
+│   Now · editing          │                                               │
+│   Auth API debug  2d ago │  curl to fetch docs from staging:             │
+│                          │  ┌───────────────────────────────┐ bash  Copy │
+│ ✦ Library                │  │ curl -H "Auth: Bearer $TOK" … │            │
+│   ▾ 📁 Commands          │  └───────────────────────────────┘            │
+│       curl               │  remember: token expires hourly               │
+│   ▸ 📁 Snippets          │                                               │
+└──────────────────────────┴───────────────────────────────────────────────┘
+```
+
+Rules the layout encodes:
+
+- **Recents** — at most 10, ordered by `max(lastOpened, mtime)`, title plus a
+  relative timestamp, `Now · editing` while the note has unwritten text. Purely
+  chronological; the AI never reorders it (FR-1.2).
+- **Library** — a collapsible tree, at most two folder levels
+  (`PathRules.maxFolderDepth`), root-level notes below the folders. Context
+  menu: New Note, New Folder…, Rename…, Move to…, Show in Finder, Delete (to
+  the Trash). Notes drag onto folders.
+- **Toolbar** — sidebar toggle, the search pill (⌘K focuses it; every keystroke
+  goes to `SearchCoordinator.query(_:)`, whose backend M1-12 supplies), New Note
+  (⌘N).
+- System colors and materials only, so light and dark both come for free
+  (NFR-6/7). SF Symbols for every glyph; `accessibilityLabel` on every control.
+
 ## Current state
 
-M1-01 / M1-02 scaffolding plus **M1-10 (editor)**: the app shows the placeholder
-sidebar next to the real editor on an in-memory sample note — styled Markdown
-source on TextKit 2, fenced-code background with a language tag and hover Copy,
-clickable checkboxes, title field and date stamp
-(`Sources/FilawayApp/Features/Editor/`, highlighter in
-`Sources/FilawayCore/Markdown/MarkdownHighlighter.swift`). No storage, no DB, no
-AI. Next tasks are M1-03 (storage model), M1-09 (shell/sidebar) and M1-11
-(autosave) — see `docs/plan.md` §3.
+M1-01 through M1-05 and M1-09 / M1-10 / M1-11 / M1-13 plus the wiring half of
+M1-14: Filaway is a working notes app on `~/Notes`. Two-pane window per Figure 1,
+Recents + Library sidebar, ⌘N, 750 ms autosave with flushes on switch / resign /
+quit, external edits reconciled live (conflict copies announced by a banner),
+window frame, sidebar width, last-open note and folder expansion restored across
+launches. Storage is `FilawayCore/{Storage,Index,Watch}` — see `docs/core-api.md`.
+
+Not yet wired: **M1-06 keyword search** (`SearchService`) and **M1-12 search UI**.
+`Sources/FilawayApp/Features/Shell/SearchCoordinator.swift` is the seam — the
+field, ⌘K and the as-you-type call are real; set its `backend` and render
+`results`. The onboarding folder picker is M4-01, so the notes root is `~/Notes`
+(override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
