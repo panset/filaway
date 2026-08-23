@@ -11,9 +11,19 @@ extension Tag {
     @Tag static var fsevents: Self
 }
 
+/// Swift Testing tags are not filterable from the SwiftPM 6.0.3 command line, so
+/// the heavy suites are additionally gated on environment variables:
+///
+/// * `FILAWAY_SKIP_SLOW_TESTS=1` — skip the churn, scale and FSEvents suites.
+/// * `FILAWAY_SKIP_FSEVENTS_TESTS=1` — skip only the live-FSEvents suite, which
+///   is the timing-sensitive one on a loaded CI runner.
 enum TestEnvironment {
     static var runsSlowTests: Bool {
         ProcessInfo.processInfo.environment["FILAWAY_SKIP_SLOW_TESTS"] != "1"
+    }
+
+    static var runsFSEventsTests: Bool {
+        runsSlowTests && ProcessInfo.processInfo.environment["FILAWAY_SKIP_FSEVENTS_TESTS"] != "1"
     }
 }
 

@@ -7,7 +7,7 @@ import Testing
 struct WatcherTests {
     @Test(
         "The live stream reports an external create, edit, move and delete",
-        .enabled(if: TestEnvironment.runsSlowTests),
+        .enabled(if: TestEnvironment.runsFSEventsTests),
         .timeLimit(.minutes(1))
     )
     func liveStream() async throws {
@@ -51,7 +51,7 @@ struct WatcherTests {
 
     @Test(
         "The store's own writes never reach the live stream",
-        .enabled(if: TestEnvironment.runsSlowTests),
+        .enabled(if: TestEnvironment.runsFSEventsTests),
         .timeLimit(.minutes(1))
     )
     func liveEchoSuppression() async throws {
@@ -79,7 +79,7 @@ struct WatcherTests {
         #expect(noisy.isEmpty, "own writes leaked into the change stream: \(noisy)")
     }
 
-    @Test("Stopping the watcher finishes its streams", .enabled(if: TestEnvironment.runsSlowTests))
+    @Test("Stopping the watcher finishes its streams", .enabled(if: TestEnvironment.runsFSEventsTests))
     func stopFinishesStreams() async throws {
         let temp = try TempLibrary()
         let metadata = try temp.metadataStore()
