@@ -52,7 +52,13 @@ struct BenchIndex {
         root: String?,
         embedderKind: String,
         computeUnits: String,
-        excluded: [String]
+        excluded: [String],
+        // M3-09 levers: how many chunks go to the embedder in one call, and
+        // how small a section may be before the chunker folds it into its
+        // neighbour (ADR-039). Both change index-build time and the resident
+        // matrix roughly linearly, so both need to be measurable.
+        embedBatchSize: Int = 32,
+        minTokens: Int? = nil
     ) async throws -> BenchIndex {
         let bench = BenchLibrary(root: root)
         if bench.generated {
@@ -75,11 +81,14 @@ struct BenchIndex {
             reader: metadata.reader, modelID: embedder.identifier, dimension: embedder.dimension
         )
         let exclusions = ExclusionFilter(excludedFolders: excluded)
+        var chunkerConfiguration = Chunker.Configuration()
+        if let minTokens { chunkerConfiguration.minTokens = minTokens }
         let indexer = Indexer(
             metadata: metadata,
             embedder: embedder,
+            chunker: Chunker(configuration: chunkerConfiguration),
             vectorStore: vectors,
-            configuration: .init(debounce: .zero),
+            configuration: .init(debounce: .zero, embedBatchSize: embedBatchSize),
             isExcluded: { exclusions.isExcluded(path: $0) }
         )
         return BenchIndex(
@@ -137,6 +146,12 @@ struct IndexCommand: AsyncParsableCommand {
     @Option(help: "Use an existing notes folder instead of generating a corpus.")
     var root: String?
 
+    @Option(help: "Chunks handed to the embedder in one call (M3-09 lever).")
+    var embedBatch = 32
+
+    @Option(help: "Chunker minTokens — how small a section may be before it folds (ADR-039).")
+    var minTokens: Int?
+
     @Flag(help: "Keep the generated corpus and print its path.")
     var keep = false
 
@@ -145,7 +160,8 @@ struct IndexCommand: AsyncParsableCommand {
         print("")
         let index = try await BenchIndex.make(
             notes: notes, bytes: bytes, root: root, embedderKind: embedder,
-            computeUnits: computeUnits, excluded: exclude
+            computeUnits: computeUnits, excluded: exclude,
+            embedBatchSize: embedBatch, minTokens: minTokens
         )
         defer { if !keep { index.bench.removeIfGenerated() } }
         print("embedder: \(index.embedderDescription)")
