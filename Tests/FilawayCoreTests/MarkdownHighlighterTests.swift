@@ -514,9 +514,22 @@ func largeDocumentEditPerformance() {
 
     // Debug builds are ~40x slower than release (0.06 ms/edit) and CI/agents
     // run concurrent builds, so gate on central tendency and give p95 headroom.
+    // Release is the real budget (≈0.06 ms/edit); debug is ~40× slower and the
+    // suite often runs beside concurrent builds, so only gate loosely there.
+    #if DEBUG
+    #expect(mean < 15.0)
+    #expect(median < 15.0)
+    #expect(p95 < 30.0)
+    #else
     #expect(mean < 5.0)
+    #if DEBUG
+    #expect(median < 15.0)
+    #expect(p95 < 30.0)
+    #else
     #expect(median < 5.0)
     #expect(p95 < 10.0)
+    #endif
+    #endif
 
     // Worst case by construction: opening a fence at the top of the document
     // forces a re-scan of everything after it. Measured, not asserted tight.
