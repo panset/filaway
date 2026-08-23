@@ -378,6 +378,15 @@ public final class AppSettings: @unchecked Sendable {
     }
 }
 
+/// Disambiguating alias for the app target.
+///
+/// `FilawayApp` has its own `AppSettings` — window frame, sidebar width,
+/// last-open note — which shadows this one inside that module, and the obvious
+/// escape hatch does not work: `FilawayCore.AppSettings` resolves `FilawayCore`
+/// to the *enum* of that name (`FilawayCore.version`, `.subsystem`) before it
+/// resolves the module. So the app spells this type `CoreSettings`.
+public typealias CoreSettings = AppSettings
+
 private extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()

@@ -13,6 +13,11 @@ struct FilawayApp: App {
         }
         .defaultSize(width: 1000, height: 680)
         .commands { AppCommands(model: model) }
+
+        // Settings → General / AI / Activity, ⌘, (M2-11, FR-8.1).
+        Settings {
+            SettingsRootView(model: SettingsModel.shared)
+        }
     }
 }
 
@@ -76,7 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // happened, then quit with a non-zero status on failure. Lets CI and a
         // locked screen verify the shell without XCTest UI.
         if let phase = ProcessInfo.processInfo.environment["FILAWAY_SMOKE"], phase != "0" {
-            SmokeDriver.start(phase: phase)
+            if SettingsSmokeCheck.handles(phase: phase) {
+                SettingsSmokeCheck.start(phase: phase)
+            } else {
+                SmokeDriver.start(phase: phase)
+            }
         }
     }
 
