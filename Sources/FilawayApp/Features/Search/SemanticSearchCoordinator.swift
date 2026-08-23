@@ -33,8 +33,13 @@ final class SemanticSearchCoordinator: ObservableObject {
     @Published private(set) var embedderDescription: String?
     /// `false` when no embedder loaded: retrieval falls back to BM25 only.
     @Published private(set) var supportsVectors = false
+    /// FR-8.1's Semantic-search switch, mirrored so SwiftUI redraws when it
+    /// moves. `settings.semanticSearchEnabled` is the source of truth; this is
+    /// the published shadow (M4-02).
+    @Published private(set) var semanticEnabled = CoreSettings.defaultSemanticSearchEnabled
 
     private(set) var indexer: Indexer?
+    private(set) var metadata: MetadataStore?
     private(set) var vectors: VectorStore?
     private(set) var hybrid: HybridSearch?
     private(set) var extractor: AnswerExtractor?
@@ -68,6 +73,10 @@ final class SemanticSearchCoordinator: ObservableObject {
     private var providerOverride: (any AIProvider)?
     private var deferredFinder: DeferredCandidateFinder?
 
+    /// Told when FR-8.1's semantic switch moves, so ⌘K can leave Ask mode
+    /// (M4-02). `AppModel` wires it to ``SearchCoordinator``.
+    var onEnabledChanged: ((Bool) -> Void)?
+
     init(settings: CoreSettings? = nil) {
         injectedSettings = settings
     }
@@ -81,7 +90,8 @@ final class SemanticSearchCoordinator: ObservableObject {
 
     // MARK: - Settings the panel reads
 
-    /// FR-8.1's toggle. Off → the Ask mode is hidden and ⏎ stays keyword.
+    /// FR-8.1's toggle. Off → the Ask mode is hidden, ⏎ stays keyword, and the
+    /// indexer is parked (M4-02).
     var isSemanticSearchEnabled: Bool { settings.semanticSearchEnabled }
 
     // MARK: - Launch
@@ -89,6 +99,7 @@ final class SemanticSearchCoordinator: ObservableObject {
     /// Builds the stack behind the first frame. Safe to call twice.
     func start(metadata: MetadataStore, library: Library) {
         guard indexTask == nil else { return }
+        self.metadata = metadata
         let ledger = try? AIUsageLedger(library: library)
         let settings = self.settings
         let exclusions = self.exclusions
@@ -139,6 +150,12 @@ final class SemanticSearchCoordinator: ObservableObject {
             self.observeAIStatus()
 
             guard let indexer else { return }
+            // FR-8.1: with semantic search off there is nothing to index for —
+            // the embeddings are derived data nobody is about to read, and
+            // building them would spend battery on a feature the user turned
+            // off. The switch coming back on runs the catch-up (M4-02).
+            self.semanticEnabled = settings.semanticSearchEnabled
+            guard settings.semanticSearchEnabled else { return }
             do {
                 _ = try await indexer.synchronizeModel()
                 _ = try await indexer.catchUp()
@@ -167,6 +184,38 @@ final class SemanticSearchCoordinator: ObservableObject {
         // which is the "connect your AI" state rather than an outage.
         guard let provider = try? OrganizeCoordinator.makeProvider() else { return nil }
         return AnswerExtractor(provider: provider, ledger: ledger, configuration: configuration)
+    }
+
+    /// Tears the retrieval stack down so ``start(metadata:library:)`` can build
+    /// a new one against a different library (Settings → General → Change…,
+    /// M4-02).
+    ///
+    /// The embedder is deliberately *not* kept: the vector store, the index and
+    /// the ranker are all keyed to one `MetadataStore`, and half-swapping them
+    /// is how you get answers from the folder the user just left.
+    func resetForLibraryChange() {
+        indexTask?.cancel()
+        statusTask?.cancel()
+        changeTask?.cancel()
+        settingsToken?.invalidate()
+        let stopping = indexer
+        Task { await stopping?.stop() }
+        indexTask = nil
+        statusTask = nil
+        changeTask = nil
+        settingsToken = nil
+        indexer = nil
+        metadata = nil
+        vectors = nil
+        hybrid = nil
+        extractor = nil
+        service = nil
+        deferredFinder = nil
+        isReady = false
+        indexStatus = .idle
+        // Re-resolving re-points the exclusion box at the new library's list —
+        // `excludedFolders` is per `Library.key` (FR-4.5).
+        resolvedSettings = nil
     }
 
     /// Smoke and previews: swap the answer step's provider, before or after
@@ -224,6 +273,33 @@ final class SemanticSearchCoordinator: ObservableObject {
             Log.index.error("rebuild failed: \(String(describing: error), privacy: .public)")
             return nil
         }
+    }
+
+    /// FR-4.5, the half `catchUp()` cannot do (M4-02).
+    ///
+    /// Excluding a folder has to *remove* what is already indexed, not merely
+    /// stop adding to it — otherwise the chunks stay retrievable and land in a
+    /// prompt, which is exactly what the setting promises will never happen.
+    /// `catchUp()` is no help: an indexed note whose content has not changed is
+    /// not stale, so it is never revisited. `Indexer.index(noteID:)` *does*
+    /// purge an excluded note, so this walks the library and asks for each one
+    /// the filter now covers.
+    ///
+    /// - Returns: how many notes were purged, which the smoke phase asserts.
+    @discardableResult
+    func purgeExcluded(_ filter: ExclusionFilter) async -> Int {
+        guard !filter.isEmpty, let indexer, let metadata else { return 0 }
+        let notes = (try? await metadata.allNotes()) ?? []
+        var purged = 0
+        for note in notes where filter.isExcluded(path: note.relativePath) {
+            let report = try? await indexer.index(noteID: note.id)
+            purged += report?.notesPurged ?? 0
+        }
+        if purged > 0 {
+            try? await vectors?.reload()
+            await hybrid?.invalidate()
+        }
+        return purged
     }
 
     /// After a `MetadataStore.rebuild(from:)`, which drops chunks with the notes.
@@ -292,18 +368,43 @@ final class SemanticSearchCoordinator: ObservableObject {
     private func observeSettings() {
         guard settingsToken == nil else { return }
         settingsToken = settings.observe { [weak self] key in
-            guard key == .excludedFolders || key == .searchModel || key == .advancedModelOverride else { return }
-            Task { @MainActor in self?.settingsChanged(key) }
+            switch key {
+            case .excludedFolders, .searchModel, .advancedModelOverride, .semanticSearchEnabled:
+                Task { @MainActor in self?.settingsChanged(key) }
+            default:
+                break
+            }
         }
     }
 
     private func settingsChanged(_ key: CoreSettings.Key) {
         switch key {
+        case .semanticSearchEnabled:
+            let enabled = settings.semanticSearchEnabled
+            guard enabled != semanticEnabled else { return }
+            semanticEnabled = enabled
+            onEnabledChanged?(enabled)
+            guard let indexer else { return }
+            Task { [weak self] in
+                if enabled {
+                    // Catching up first means the index is usable the moment
+                    // the loop starts, rather than one poll interval later.
+                    await self?.catchUp()
+                    await indexer.start()
+                } else {
+                    await indexer.stop()
+                }
+            }
+
         case .excludedFolders:
             let filter = ExclusionFilter(excludedFolders: settings.excludedFolders)
             exclusions.set(filter)
             Task { [weak self] in
                 await self?.service?.setExclusions(filter)
+                // Order matters: purge what is now excluded *before* catching
+                // up, so a folder that was excluded and re-included in one
+                // session does not end up half-indexed.
+                await self?.purgeExcluded(filter)
                 await self?.catchUp()
             }
         case .searchModel, .advancedModelOverride:

@@ -68,6 +68,16 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  clamps; AIConnectionManager walks
 #                                  notConfigured -> connected -> notConfigured
 # -> === smoke phase: settings2 ==  relaunch: those preferences persisted
+# -> === smoke phase: settings-wiring === M4-02: a preference reaching the live
+#                                  objects — mode and model to the Organizer
+#                                  actor, the interval to SessionTracker, an
+#                                  exclusion to both the organizer and the index
+#                                  (already-indexed chunks purged), the semantic
+#                                  switch to ⌘K's Ask mode, Rebuild index
+# -> === smoke phase: a11y ===     M4-06: a walk of the live accessibility tree
+#                                  (no unlabelled control, no unlabelled visible
+#                                  image), the walk audited against a synthetic
+#                                  broken window first, plus light/dark captures
 # -> === smoke phase: paste ===    M4-03: a curl line on the real pasteboard ->
 #                                  ⌘V lands it verbatim -> the affordance shows
 #                                  -> Wrap fences it -> one ⌘Z undoes the wrap;
@@ -85,6 +95,17 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  filter, and the offline notice
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
+
+**If a phase produces *no output at all* and dies at its timeout, it is not the
+lock screen — it is macOS's crash-history alert.** The suite SIGKILLs the app on
+purpose (the `kill` phase, and the watchdog on any phase that overstays), so
+Filaway accumulates a crash history by design; `NSPersistentUIRestorer` then puts
+up a modal "reopen its windows?" alert from inside `_handleAEOpenEvent`, before
+`applicationDidFinishLaunching` runs and with nobody to answer it. The phase
+hangs, the watchdog kills it, and *that* adds another crash — once it starts it
+never stops. `Tools/smoke.sh` passes `-ApplePersistenceIgnoreState YES` to every
+launch, which skips the machinery entirely (M4-06). `sample <pid>` on a wedged
+phase names it in one line.
 
 **Run `make smoke` only when no other agent is running it.** Two
 `build/Filaway.app` processes with the same bundle id at the same time and only
@@ -144,10 +165,20 @@ CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 `Tools/smoke.sh`.
 
 `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, Settings in
-`Sources/FilawayApp/Features/Settings/SettingsSmokeCheck.swift` (its phases are
-dispatched from `AppDelegate`). `FILAWAY_SMOKE_SHOTS=<dir>` writes the rendered
-Settings pane to a PNG — `screencapture` needs screen-recording permission this
-machine has not granted.
+`Sources/FilawayApp/Features/Settings/SettingsSmokeCheck.swift` (its phases —
+`settings`, `settings2`, `settings-wiring`, `a11y` — are dispatched from
+`AppDelegate`). `FILAWAY_SMOKE_SHOTS=<dir>` writes the rendered panes to PNGs,
+in both appearances during the `a11y` phase — `screencapture` needs
+screen-recording permission this machine has not granted, but a view's own
+`cacheDisplay` bitmap needs neither that nor a visible window. The PNGs land in
+`smoke.sh`'s throwaway work directory and are **never committed**; `--keep` is
+how a human gets at them.
+
+`make smoke` also greps its own transcript for AppKit's "reentrant operation in
+its NSTableView delegate" and counts it (M4-06). It reports rather than fails —
+the warning predates the guard and is not fixed — but the count is the
+regression signal. It can only mean something where there is a window, so with
+no scene it says so rather than claiming a pass.
 
 ## Layout
 
@@ -357,13 +388,17 @@ one after the first paint. Full wiring diagram in `docs/organize.md`.
   shortcut). Edit ▸ **Undo Last Organization** is **⌥⌘Z** — ⇧⌘Z is Redo in every
   macOS text view including Filaway's editor, and taking it would make the
   editor lie.
-- **Status.** One pill in the toolbar (`AI ready` / `AI queued · N` /
-  `AI offline` / `Key invalid` / `AI paused` / `AI off`). Clicking it posts
-  `.filawayOpenAISettings` for Settings to catch. No modal alerts anywhere;
-  queued sessions retry on their own and survive a relaunch.
-- **Settings** are read through `OrganizeSettingsSource` (keys
-  `organizationMode`, `idleInterval` in minutes, `excludedFolders`) with a
-  UserDefaults default, so M2-11 can substitute `AppSettings` in one line.
+- **Status.** One pill in the toolbar — `Features/Settings/AIStatusPill`, hosted
+  by `ShellView.AIStatusPillHost`. It draws *nothing* when connected with an
+  empty queue, and otherwise `Queued · N` / `AI offline` / `Key rejected` /
+  `Rate limited` / `Connect AI`. Clicking it posts `.filawayOpenAISettings`,
+  which `SettingsWindow.observeOpenRequests()` turns into Settings → AI. No
+  modal alerts anywhere; queued sessions retry on their own and survive a
+  relaunch (ADR-059).
+- **Settings** are read through `OrganizeSettingsSource`, whose only
+  implementation is now `CoreOrganizeSettings` over `CoreSettings` (M4-02). The
+  coordinator's `observe(_:)` subscription pushes every change at
+  `SessionTracker`, `Organizer` and `PlanApplier` — FR-8.1's "applies live".
 - **Candidates** come from `KeywordCandidateFinder` (FTS body evidence on top of
   title overlap). M3-08 replaces it behind the same `CandidateFinder` protocol.
 
@@ -395,9 +430,7 @@ retrieval onto the same hybrid ranker (M3-08). See `docs/core-api.md`
 back from the provider, the Figure 2a card appears, Accept applies it, Activity
 records a diff and Undo restores every byte — proved headlessly by the
 `organize`, `organize-auto` and `organize-offline` smoke phases against a
-committed replay fixture. Settings → AI (M2-11) is in; the organizer still reads
-`OrganizeSettingsSource` from UserDefaults (swap to `AppSettings` pending) and the
-status pill's click posts `.filawayOpenAISettings`.
+committed replay fixture. Settings feeds it live (M4-02, below).
 
 That gap is closed: FR-4.4's raw session text now reaches the Activity row on
 both paths (`PlanApplying.apply(_:sessionText:)` with a dropping default;
@@ -430,26 +463,46 @@ plants a sentinel in a note body, a note filename, a setting, a log line and a
 crash report and asserts it is in no file of the zip. Numbers, the two bugs it
 found, and the remaining gaps: `docs/verification/M4-reliability.md`.
 
-**M2-11 Settings** is in: a `Settings` scene (⌘,) with General / AI / Activity,
-the AI pane built to Figure 4, and `FilawayCore/Settings/` holding `AppSettings`
-(every FR-8.1 preference, typed, clamped, observable — see `docs/core-api.md`)
-and `AIConnectionManager` (key validation, Keychain, `AIStatus`, monthly usage).
-Two seams are left for the integration pass, both deliberate so this task did not
-rewrite files other agents own:
+**Settings is complete and wired (M2-11 + M4-02).** A `Settings` scene (⌘,) with
+General / AI / Activity, the AI pane built to Figure 4, and
+`FilawayCore/Settings/` holding `AppSettings` (every FR-8.1 preference, typed,
+clamped, observable — see `docs/core-api.md`) and `AIConnectionManager` (key
+validation, Keychain, `AIStatus`, monthly usage). M4-02 closed every seam M2-11
+and M2-12 left open — **there is no longer a UserDefaults stand-in anywhere**:
 
-- **`AIStatusPill`** exists in `Features/Settings/` and is not in the toolbar.
-  One line in `ShellView`: `ToolbarItem(placement: .status) { AIStatusPill(status:
-  …) }`, fed from `AIConnectionManager.statusChanges()`.
-- **`Settings → Rebuild index` is not wired.**
-  `SemanticSearchCoordinator.rebuildAll()` exists and does the whole job
-  (rebuild, reload vectors, invalidate the ranker); the Settings pane just has
-  to call it (FR-5.4).
-- **Nothing reads the preferences yet.** The Organizer and `SessionTracker`
-  should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
-  the app's own `AppSettings` shadows it, ADR-035) and subscribe with
-  `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
-  `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
-  `effectiveSearchModel`. `SettingsModel.shared` owns the app's instances.
+- The organize pipeline reads `CoreSettings` through `CoreOrganizeSettings` and
+  subscribes with `observe(_:)`. Mode, idle interval, excluded folders and
+  `effectiveOrganizeModel` reach `SessionTracker.setConfiguration`,
+  `Organizer.setSettings` and `PlanApplier.setExcludedFolders` live, no relaunch.
+  Probe what the actors actually hold with
+  `OrganizeCoordinator.organizerSettingsProbe()` / `sessionConfigurationProbe()`.
+- The toolbar carries `AIStatusPill`, fed by `OrganizeCoordinator.status` (which
+  folds in `AIConnectionManager.statusChanges()`) plus the queue depth.
+  `AIStatusIndicator` is gone — ADR-059.
+- `.filawayOpenAISettings` has one listener,
+  `SettingsWindow.observeOpenRequests()`, which opens Settings on the AI tab.
+  Address a tab from outside with `SettingsWindow.open(tab:)`.
+- Settings → General: notes-folder **Change…** (`AppModel.reopenLibrary(at:)` —
+  it *opens* a library and moves nothing, ADR-058), Show in Finder, FR-5.4's
+  Rebuild index with progress off `IndexStatus`.
+- Settings → Activity embeds the last five events and opens the ⌥⌘A window.
+- `semanticSearchEnabled` off parks the indexer and drops ⌘K out of Ask mode;
+  excluding a folder purges what is already indexed
+  (`SemanticSearchCoordinator.purgeExcluded`) — `catchUp()` structurally cannot,
+  because an unchanged note is never stale (`ExclusionPurgeTests`).
+
+**M4-06's accessibility and HIG pass is in.** `docs/a11y-checklist.md` is the
+audit, item by item, and is explicit about what the `a11y` smoke phase proves
+versus what needs a person at an unlocked screen with VoiceOver on.
+`Features/Settings/AccessibilityAudit.swift` walks a window's live accessibility
+tree and fails on any unlabelled control (ADR-060). The M1 launch warning
+"reentrant operation in its NSTableView delegate" is **not fixed**, but it is
+now measured and bounded: `make smoke` keeps a transcript and counts it, and
+the count says it is once per *population of the sidebar `List`* (empty library:
+zero; seeded: one; `semantic`, which repopulates repeatedly: four). Everything
+schedulable has been ruled out — see `docs/a11y-checklist.md` § 5 for the full
+list and the one experiment left, which needs a debugger that can attach to an
+ad-hoc-signed bundle.
 
 ## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
 

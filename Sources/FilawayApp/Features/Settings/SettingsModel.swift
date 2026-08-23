@@ -37,6 +37,14 @@ final class SettingsModel: ObservableObject {
     /// Library folders offered by the exclusion picker (FR-4.5).
     @Published private(set) var folders: [String] = []
     @Published private(set) var isRefreshing = false
+    /// `true` while ``changeNotesFolder(to:)`` is closing one library and
+    /// opening another (FR-8.1, M4-02).
+    @Published private(set) var isChangingLibrary = false
+    /// `true` while a full reindex is running (FR-5.4). The button is disabled
+    /// and the row shows ``SemanticSearchCoordinator/indexStatus`` instead.
+    @Published private(set) var isRebuildingIndex = false
+    /// What the last rebuild did — "4,182 chunks from 512 notes".
+    @Published private(set) var lastRebuildSummary: String?
 
     private var statusTask: Task<Void, Never>?
 
@@ -162,6 +170,52 @@ final class SettingsModel: ObservableObject {
         models = []
         hasStoredKey = false
         status = await connection.status
+    }
+
+    // MARK: - Notes folder (FR-8.1, FR-7.1 — M4-02)
+
+    /// Opens the library at `url`. **Nothing is moved.**
+    ///
+    /// The confirmation the caller shows says so in as many words, because
+    /// "Change…" next to a folder path is otherwise read as "move my notes
+    /// there". What actually happens is in ``AppModel/reopenLibrary(at:)``: the
+    /// current library is flushed and closed, the bookmark is replaced, and the
+    /// folder at `url` is opened with its own database, its own exclusions and
+    /// its own restored state.
+    ///
+    /// - Returns: `false` when macOS refused to bookmark the folder, which is
+    ///   the only way this fails without an exception.
+    @discardableResult
+    func changeNotesFolder(to url: URL) async -> Bool {
+        guard !isChangingLibrary else { return false }
+        isChangingLibrary = true
+        defer { isChangingLibrary = false }
+        await AppModel.shared.reopenLibrary(at: url)
+        objectWillChange.send()
+        reloadFolders()
+        return AppSettings.notesRoot.standardizedFileURL == url.standardizedFileURL
+    }
+
+    /// FR-5.4's "rebuild the search index", from Settings → General.
+    ///
+    /// The index is derived data — chunks and embeddings — so this can never
+    /// touch a note. Progress comes from `Indexer.statusStream()` by way of
+    /// ``SemanticSearchCoordinator/indexStatus``; this only owns the
+    /// disabled-while-running flag and the sentence at the end.
+    func rebuildIndex() async {
+        guard !isRebuildingIndex else { return }
+        isRebuildingIndex = true
+        defer { isRebuildingIndex = false }
+        let report = await AppModel.shared.semanticSearch.rebuildAll()
+        guard let report else {
+            lastRebuildSummary = "The semantic index is not available in this build."
+            return
+        }
+        let chunks = report.chunksInserted + report.chunksReused
+        // Plain interpolation: `^[…](inflect:)` is only expanded inside a
+        // `LocalizedStringKey` literal, and this string is shown as a `String`.
+        lastRebuildSummary = "Rebuilt: \(chunks) chunk\(chunks == 1 ? "" : "s") "
+            + "from \(report.notesIndexed) note\(report.notesIndexed == 1 ? "" : "s")."
     }
 
     // MARK: - Derived display state

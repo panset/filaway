@@ -374,6 +374,23 @@ final class SearchCoordinator: ObservableObject {
         return semantic.isSemanticSearchEnabled && semantic.isReady
     }
 
+    /// FR-8.1's Semantic-search switch moved while the panel was up (M4-02).
+    ///
+    /// Turning it off has to take Ask away *now*, not at the next ⌘K: the
+    /// toggle is already hidden by `isAskAvailable`, but a panel that is
+    /// currently in Ask mode would otherwise keep showing an answer card for a
+    /// feature the user just disabled. Falling back to keyword is always safe —
+    /// it needs neither the index nor a provider (FR-5.5).
+    func semanticAvailabilityChanged() {
+        objectWillChange.send()
+        guard mode == .semantic, !isAskAvailable else { return }
+        mode = .keyword
+        Self.lastChosenMode = .keyword
+        selectedIndex = -1
+        clearSemanticResults()
+        if isPresented { run(debounced: false) }
+    }
+
     /// The Find/Ask toggle, and the ⏎ trigger. Keeps the text either way
     /// (FR-5.1: "no mode-switching friction").
     func setMode(_ mode: SearchMode) {

@@ -38,10 +38,9 @@ enum SmokeDriver {
         // Before the scene builds: `OrganizeCoordinator` reads the mode when
         // `AppModel.bootstrap()` runs, and that is moments from now.
         if phase.hasPrefix("organize") {
-            AppSettings.defaults.set(
-                phase == "organize-auto" ? OrganizeMode.auto.rawValue : OrganizeMode.ask.rawValue,
-                forKey: UserDefaultsOrganizeSettings.modeKey
-            )
+            // M4-02: the mode is a real FR-8.1 preference now, not a raw key.
+            AppSettings.core.organizationMode =
+                phase == "organize-auto" ? .autoFile : .askBeforeFiling
         }
         Task { @MainActor in
             // Let the scene build and `AppModel.bootstrap()` finish.

@@ -91,6 +91,8 @@ final class OrganizeCoordinator: ObservableObject {
     private var sessionTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
+    private var connectionTask: Task<Void, Never>?
+    private var settingsToken: CoreSettings.Observation?
     private var dismissTasks: [UUID: Task<Void, Never>] = [:]
 
     private let log = Log.make("organize-ui")
@@ -110,7 +112,7 @@ final class OrganizeCoordinator: ObservableObject {
         store: NoteStore,
         metadata: MetadataStore,
         watcher: LibraryWatcher,
-        settings: any OrganizeSettingsSource = UserDefaultsOrganizeSettings()
+        settings: any OrganizeSettingsSource = CoreOrganizeSettings(SettingsModel.shared.settings)
     ) {
         self.library = library
         self.store = store
@@ -123,6 +125,7 @@ final class OrganizeCoordinator: ObservableObject {
         sessionTask?.cancel()
         eventTask?.cancel()
         retryTask?.cancel()
+        connectionTask?.cancel()
     }
 
     // MARK: - Launch
@@ -180,6 +183,8 @@ final class OrganizeCoordinator: ObservableObject {
             self.tracker = tracker
 
             consume(tracker: tracker, organizer: organizer)
+            observeSettings()
+            observeConnection()
             startRetryLoop()
             isReady = true
 
@@ -241,6 +246,9 @@ final class OrganizeCoordinator: ObservableObject {
         sessionTask?.cancel()
         eventTask?.cancel()
         retryTask?.cancel()
+        connectionTask?.cancel()
+        settingsToken?.invalidate()
+        settingsToken = nil
         for task in dismissTasks.values { task.cancel() }
         dismissTasks.removeAll()
         let tracker = self.tracker
@@ -260,13 +268,70 @@ final class OrganizeCoordinator: ObservableObject {
         let settings = settingsSource
         let tracker = self.tracker
         let organizer = self.organizer
+        let applier = self.applier
         Task {
             await tracker?.setConfiguration(settings.sessionConfiguration)
             await organizer?.setSettings(settings.organizerSettings)
+            // FR-4.5 is enforced twice: the organizer never *proposes* a
+            // destination inside an excluded folder, and the applier refuses to
+            // write into one. Both have to hear about the change.
+            await applier?.setExcludedFolders(settings.excludedFolders)
         }
     }
 
     var mode: OrganizeMode { settingsSource.organizationMode }
+
+    /// FR-8.1's "changes apply live" (M4-02).
+    ///
+    /// `CoreSettings.observe(_:)` fires synchronously on whichever thread wrote
+    /// the preference — which is the main actor for every path that goes
+    /// through the Settings window — so the handler only re-reads the source
+    /// and pushes it at the two actors. Nothing here restarts the pipeline: a
+    /// running session keeps its identity and only its deadline moves.
+    private func observeSettings() {
+        guard settingsToken == nil, let core = (settingsSource as? CoreOrganizeSettings)?.settings else { return }
+        settingsToken = core.observe { [weak self] key in
+            switch key {
+            case .organizationMode, .idleInterval, .excludedFolders,
+                 .organizeModel, .advancedModelOverride:
+                Task { @MainActor in self?.settingsChanged() }
+            default:
+                break
+            }
+        }
+    }
+
+    /// FR-6.4 / FR-6.5: the key changed in Settings → AI, so the pill moves and
+    /// anything that was queued waiting for a working key goes out now.
+    ///
+    /// The provider itself needs no rebuilding — `APIKeySource` reads the
+    /// Keychain on every request, so "Change…" takes effect on the next call
+    /// with no relaunch. What has to be told is the `Organizer`, whose own
+    /// status gates the queue.
+    private func observeConnection() {
+        guard connectionTask == nil else { return }
+        let connection = SettingsModel.shared.connection
+        connectionTask = Task { [weak self] in
+            for await status in await connection.statusChanges() {
+                guard let self else { return }
+                await self.connectionStatusChanged(status)
+            }
+        }
+    }
+
+    /// Visible for the smoke phase, which has no live Keychain to change.
+    func connectionStatusChanged(_ status: AIStatus) async {
+        // A live pipeline failure (offline, rate limit) is more specific than
+        // "the key validates", so a `connected` report never overwrites one —
+        // the retry loop clears it when the provider actually answers.
+        if status == .connected {
+            if self.status == .notConfigured || self.status == .invalidKey { self.status = .connected }
+        } else {
+            self.status = status
+        }
+        await organizer?.aiStatusChanged(status)
+        await refreshQueueCount()
+    }
 
     // MARK: - Editor and application inputs (FR-3.1)
 
@@ -515,6 +580,20 @@ final class OrganizeCoordinator: ObservableObject {
     }
 
     // MARK: - Test hooks
+
+    /// What the `Organizer` actor is actually running with (M4-02).
+    ///
+    /// The FR-8.1 promise is that a Settings edit applies live; proving it
+    /// needs a look *past* `UserDefaults`, at the object that will build the
+    /// next prompt. `nil` before ``start(searchService:autosave:candidateFinder:)``.
+    func organizerSettingsProbe() async -> OrganizerSettings? {
+        await organizer?.currentSettings
+    }
+
+    /// The idle interval the `SessionTracker` is timing with (FR-3.1).
+    func sessionConfigurationProbe() async -> SessionConfiguration? {
+        await tracker?.configuration
+    }
 
     /// Ends the current session **now**, as if the idle timer had fired at
     /// `endedAt`, and waits for the pipeline to settle.

@@ -121,6 +121,11 @@ final class AppModel: ObservableObject {
         }
         search.onOpenAISettings = { SettingsWindow.open() }
         search.semantic = semanticSearch
+        // FR-8.1 (M4-02): Settings turned semantic search off while the panel
+        // was open — Ask goes away at once rather than at the next ⌘K.
+        semanticSearch.onEnabledChanged = { [weak self] _ in
+            self?.search.semanticAvailabilityChanged()
+        }
     }
 
     // MARK: - Launch
@@ -182,7 +187,14 @@ final class AppModel: ObservableObject {
             // Paint from the database alone — no disk scan — so the sidebar and
             // the last note are up before the launch reconcile runs. The yield
             // keeps the first paint out of the SwiftUI update that `.task`
-            // started, so AppKit never sees a reentrant table edit.
+            // started.
+            //
+            // It does **not** silence AppKit's "reentrant operation in its
+            // NSTableView delegate" warning, and neither does a full run-loop
+            // turn here, before `restoreLastNote()`, or inside
+            // `refreshSidebarNow()` — all three were measured (M4-06). See
+            // `docs/a11y-checklist.md` § 5 for what the warning is actually
+            // tied to and everything that has been ruled out.
             await Task.yield()
             await refreshSidebarNow()
             isLoaded = true
@@ -239,6 +251,69 @@ final class AppModel: ObservableObject {
         } catch {
             Log.app.error("reconcile failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    // MARK: - Changing the notes folder (FR-8.1, M4-02)
+
+    /// Points Filaway at a different notes folder, live.
+    ///
+    /// **Nothing is moved or copied.** The library at `url` is *opened*; the
+    /// previous one is left exactly as it is, with its own database, its own
+    /// exclusions and its own restored state — pointing back at it later brings
+    /// all of that back. Settings says so before it calls this, because "change
+    /// folder" is otherwise the most plausible-sounding way to lose a library.
+    ///
+    /// The order is the reverse of ``bootstrap()``: flush what is unwritten,
+    /// stop everything that watches or indexes, drop the stack, re-key the
+    /// per-library preferences, then bootstrap again. `bootstrap()` guards on
+    /// `store == nil`, which is exactly what this leaves behind.
+    func reopenLibrary(at url: URL) async {
+        // FR-2.3: nothing typed may be lost, including by a settings change.
+        await flushNow(trigger: .manual)
+
+        changeTask?.cancel()
+        changeTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        organize?.stop()
+        await watcher?.stop()
+        semanticSearch.resetForLibraryChange()
+
+        // **Close the note while `library` is still the old one.** FR-1.5's
+        // last-open note is stored per `Library.key`, and `closeOpenNote()`
+        // clears that key's entry — do this after the swap and it erases what
+        // the *new* library remembered, one instruction before `bootstrap()`
+        // goes looking for it.
+        closeOpenNote()
+
+        AppSettings.setNotesRoot(url)
+        let library = Library(root: url, supportRoot: AppSettings.supportRoot)
+        self.library = library
+        // Excluded folders are relative paths inside *one* library (FR-4.5), so
+        // the preference store has to be re-keyed before anything reads them.
+        SettingsModel.shared.settings.libraryKey = library.key
+
+        store = nil
+        metadata = nil
+        watcher = nil
+        autosave = nil
+        searchService = nil
+        organize = nil
+        search.backend = nil
+        recents = []
+        tree = nil
+        noteCount = 0
+        dirtyNoteIDs = []
+        // FR-1.5's window/sidebar state is per library too: the frame and the
+        // sidebar width are global, the expansion set and the last-open note
+        // are not.
+        expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
+        isLoaded = false
+
+        await bootstrap()
+        await reconcile()
+        SettingsModel.shared.reloadFolders()
+        show(Banner(text: "Filaway is now reading \(url.path). Nothing was moved.", symbol: "folder"))
     }
 
     private func restoreLastNote() async {

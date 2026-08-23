@@ -71,6 +71,16 @@ if [ "$(ioreg -n Root -d1 -a 2>/dev/null | grep -c CGSSessionScreenIsLocked)" !=
   echo "smoke:           every phase will fail at library-open. Unlock and re-run."
 fi
 
+# **`-ApplePersistenceIgnoreState YES` is not optional here.** The `kill` phase
+# SIGKILLs the app on purpose, and the watchdog SIGKILLs any phase that
+# overstays, so Filaway accumulates a crash history by design. Once macOS
+# decides the app "quit unexpectedly", `NSPersistentUIRestorer` puts up a
+# *modal* "reopen its windows?" alert from inside `_handleAEOpenEvent` — before
+# `applicationDidFinishLaunching` runs, before any smoke phase starts, and with
+# nobody to answer it. Every phase then hangs silently until the watchdog kills
+# it, which adds another crash to the history. The flag skips the persistent-UI
+# machinery entirely. Symptom, if it ever comes back: a phase that produces no
+# output at all and is killed at its timeout. `sample <pid>` names it.
 STAMP="$(date +%s)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
@@ -79,6 +89,8 @@ SEARCH_ROOT="$WORK/SearchNotes"
 SEMANTIC_ROOT="$WORK/SemanticNotes"
 KILL_ROOT="$WORK/KillNotes"
 SETTINGS_ROOT="$WORK/SettingsNotes"
+WIRING_ROOT="$WORK/WiringNotes"
+A11Y_ROOT="$WORK/A11yNotes"
 PASTE_ROOT="$WORK/PasteNotes"
 # M4-01 chooses these through the flow, so they are *not* passed as
 # FILAWAY_NOTES_ROOT — the point of the phase is that the bookmark decides.
@@ -89,6 +101,11 @@ SUITE="com.tejaspanse.filaway.smoke.$STAMP"
 # The settings phases need their own defaults domain: they write preferences the
 # capture phases must not inherit, and phase `settings2` reads them back.
 SETTINGS_SUITE="com.tejaspanse.filaway.smoke.settings.$STAMP"
+# M4-02/M4-06 each get their own domain and Application Support: `settings-wiring`
+# rewrites every FR-8.1 preference and rebuilds a semantic index from scratch,
+# and `a11y` must not inherit either.
+WIRING_SUITE="com.tejaspanse.filaway.smoke.wiring.$STAMP"
+A11Y_SUITE="com.tejaspanse.filaway.smoke.a11y.$STAMP"
 # One root per organize phase: each seeds the same fixture corpus from scratch
 # and each needs its own Application Support so the baselines and the Activity
 # journal start empty.
@@ -105,7 +122,7 @@ FIXTURES="$PWD/Tests/Fixtures/ai-recordings"
 ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
 ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
 mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" \
-         "$SETTINGS_ROOT" "$PASTE_ROOT" \
+         "$SETTINGS_ROOT" "$PASTE_ROOT" "$WIRING_ROOT" "$A11Y_ROOT" \
          "$ORGANIZE_ROOT" "$ORGANIZE_AUTO_ROOT" "$ORGANIZE_OFFLINE_ROOT" \
          "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT"
 
@@ -165,6 +182,35 @@ seed_semantic_corpus() {
 }
 seed_semantic_corpus "$SEMANTIC_ROOT"
 
+# M4-02's `settings-wiring` phase needs notes *inside* the folder it excludes,
+# so "excluding a folder purges what was already indexed" (FR-4.5) has chunks to
+# purge. `Personal` is the folder name SettingsSmokeCheck.excludedFolder names —
+# keep the two in step.
+seed_wiring_corpus() {
+  local root="$1"
+  mkdir -p "$root/Personal" "$root/Commands"
+  {
+    echo "Private journal entry about the weekend and the garden."
+    echo
+    echo "Nothing here should ever reach a model."
+  } > "$root/Personal/Weekend.md"
+  {
+    echo "Second private note, so the folder is not a single-chunk edge case."
+    echo
+    echo "More prose about nothing in particular, at some length, so the"
+    echo "chunker has a paragraph or two to work with rather than one line."
+  } > "$root/Personal/Garden.md"
+  {
+    echo "Public note that must survive the purge."
+    echo
+    echo '```bash'
+    echo 'curl -fsS http://localhost:8080/healthz'
+    echo '```'
+  } > "$root/Commands/Health check.md"
+}
+seed_wiring_corpus "$WIRING_ROOT"
+seed_search_corpus "$A11Y_ROOT"
+
 failures=0
 app_pid=""
 
@@ -172,7 +218,8 @@ cleanup() {
   if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
     kill -9 "$app_pid" 2>/dev/null
   fi
-  for suite in "$SUITE" "$SETTINGS_SUITE" "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
+  for suite in "$SUITE" "$SETTINGS_SUITE" "$WIRING_SUITE" "$A11Y_SUITE" \
+               "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
     defaults delete "$suite" >/dev/null 2>&1
     rm -f "$HOME/Library/Preferences/$suite.plist"
   done
@@ -187,7 +234,7 @@ trap cleanup EXIT INT TERM
 # run_phase <name> <timeout-seconds>
 run_phase() {
   local phase="$1" limit="$2" status
-  local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root=""
+  local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root="" shots=""
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
   [ "$phase" = "semantic" ] && root="$SEMANTIC_ROOT"
@@ -195,6 +242,12 @@ run_phase() {
   local onboard_root=""
   case "$phase" in
     settings|settings2) root="$SETTINGS_ROOT"; suite="$SETTINGS_SUITE" ;;
+    settings-wiring) root="$WIRING_ROOT"; suite="$WIRING_SUITE"; support="$WORK/SupportWiring" ;;
+    a11y)            root="$A11Y_ROOT";   suite="$A11Y_SUITE";   support="$WORK/SupportA11y"
+                     # NFR-7's light/dark bitmaps. Written into the throwaway
+                     # work directory and never committed; `--keep` is how a
+                     # human gets to look at them.
+                     shots="$WORK/shots" ;;
     organize)         root="$ORGANIZE_ROOT";         support="$WORK/SupportOrganize" ;;
     organize-auto)    root="$ORGANIZE_AUTO_ROOT";    support="$WORK/SupportOrganizeAuto" ;;
     organize-offline) root="$ORGANIZE_OFFLINE_ROOT"; support="$WORK/SupportOrganizeOffline"
@@ -217,7 +270,8 @@ run_phase() {
   FILAWAY_AI_MODE="replay" \
   FILAWAY_AI_FIXTURES="$FIXTURES" \
   FILAWAY_AI_FAIL="$fail" \
-    "$APP" 2>&1 &
+  FILAWAY_SMOKE_SHOTS="$shots" \
+    "$APP" -ApplePersistenceIgnoreState YES > >(tee -a "$WORK/transcript.log") 2>&1 &
   app_pid=$!
 
   ( sleep "$limit"; kill -9 "$app_pid" 2>/dev/null ) &
@@ -252,7 +306,7 @@ run_kill_phase() {
   FILAWAY_DEFAULTS_SUITE="$SUITE" \
   FILAWAY_AI_MODE="replay" \
   FILAWAY_AI_FIXTURES="$FIXTURES" \
-    "$APP" > "$out" 2>&1 &
+    "$APP" -ApplePersistenceIgnoreState YES > "$out" 2>&1 &
   app_pid=$!
 
   while [ "$waited" -lt "$limit" ]; do
@@ -268,6 +322,7 @@ run_kill_phase() {
   wait "$app_pid" 2>/dev/null
   app_pid=""
   cat "$out"
+  cat "$out" >> "$WORK/transcript.log"
 
   if [ "$ready" = "1" ]; then
     echo "smoke: phase kill — SIGKILL delivered mid-edit"
@@ -288,6 +343,11 @@ run_phase 1 90
 run_phase 2 60
 run_phase settings 90
 run_phase settings2 60
+# M4-02: preferences reaching the live objects. Slow, because it builds a real
+# semantic index (the bundled Core ML package compiles on first use).
+run_phase settings-wiring 300
+# M4-06: the accessibility walk and the light/dark captures.
+run_phase a11y 120
 run_phase paste 90
 run_phase onboarding 120
 run_phase onboarding2 60
@@ -295,6 +355,26 @@ run_phase onboardingskip 120
 # Last: the embedder compiles the bundled Core ML package on first use, which
 # can take a few seconds on a cold Application Support.
 run_phase semantic 240
+
+# M4-06: AppKit's "reentrant operation in its NSTableView delegate", which it
+# says "will become an assert in the future". It fires **once per population of
+# the sidebar List** — a phase on an empty notes root logs none, a seeded phase
+# logs one, `semantic` logs one per repopulation. It predates M4-06 and is not
+# fixed; what is known and what has been ruled out is in
+# `docs/a11y-checklist.md` § 5.
+#
+# Reported, not failed. Failing here would make `make smoke` red for every
+# agent over a warning none of them introduced. The count is the regression
+# signal: it should track the number of seeded phases, and going up means
+# something new started reloading the sidebar.
+reentrant="$(grep -c "reentrant operation" "$WORK/transcript.log" 2>/dev/null || echo 0)"
+if [ "$reentrant" != "0" ]; then
+  echo "SMOKE note appkit-reentrancy — $reentrant occurrences (known, unfixed: docs/a11y-checklist.md §5)"
+elif [ "$SCREEN_LOCKED" = "1" ]; then
+  echo "smoke: note — the NSTableView reentrancy count needs a window to mean anything"
+else
+  echo "SMOKE ok   appkit-reentrancy — none logged (it was $reentrant; if this sticks, close out §5)"
+fi
 
 echo
 if [ "$failures" -gt 0 ] && [ "$SCREEN_LOCKED" = "1" ]; then
