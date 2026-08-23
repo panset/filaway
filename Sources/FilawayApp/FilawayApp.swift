@@ -26,6 +26,7 @@ struct AppCommands: Commands {
     @ObservedObject var model: AppModel
 
     var body: some Commands {
+        UpdaterCommands()  // "Check for Updates…" under About Filaway (M4-04)
         CommandGroup(replacing: .newItem) {
             Button("New Note") { model.newNote() }
                 .keyboardShortcut("n", modifiers: .command)
