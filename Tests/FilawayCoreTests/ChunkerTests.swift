@@ -221,6 +221,39 @@ struct ChunkerTests {
         #expect(chunks.count > 100)
     }
 
+    @Test("a run of one-line sections coalesces instead of becoming a chunk each")
+    func tinySectionsCoalesce() {
+        // A release-note shape: eight headings, one line each. Embedding eight
+        // 20-token chunks costs eight full 256-token inferences (ADR-012), for
+        // text that fits in one.
+        var body = "# Changelog\n\n"
+        for index in 0 ..< 8 {
+            body += "## 1.\(index).0\n\nFixed the thing that broke in \(index).\n\n"
+        }
+        let chunks = Chunker().chunk(body, title: "Release history")
+        #expect(chunks.count <= 3)
+        #expect(chunks.allSatisfy { $0.kind == .prose })
+        // Nothing is lost: every heading is still inside some chunk's text.
+        let joined = chunks.map(\.text).joined(separator: "\n")
+        for index in 0 ..< 8 {
+            #expect(joined.contains("1.\(index).0"))
+        }
+        #expect(chunks[0].headingPath.starts(with: ["Release history", "Changelog"]))
+    }
+
+    @Test("sections large enough to stand alone still get their own chunk")
+    func largeSectionsStayApart() {
+        let paragraph = String(
+            repeating: "This section carries enough words to be worth embedding on its own. ",
+            count: 12
+        )
+        let body = "# Doc\n\n## First\n\n\(paragraph)\n\n## Second\n\n\(paragraph)"
+        let chunks = Chunker().chunk(body, title: "Doc")
+        #expect(chunks.count >= 2)
+        #expect(chunks.contains { $0.headingPath.contains("First") })
+        #expect(chunks.contains { $0.headingPath.contains("Second") })
+    }
+
     @Test("a tiny trailing section is merged back rather than embedded alone")
     func tinyTailMerges() {
         let body = """

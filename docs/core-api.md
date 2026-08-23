@@ -381,6 +381,267 @@ Notes for the UI layer:
 
 ---
 
+## Semantic search — `Chunker`, `Indexer`, `VectorStore`, `HybridSearch` (M3-01…04)
+
+Four pieces, in the order data flows through them:
+
+| Type | Kind | Owns |
+|---|---|---|
+| `Chunker` | value | Splitting a note body into embeddable pieces. |
+| `Indexer` | actor | The `chunks` + `embeddings` tables; the dirty-note queue. |
+| `VectorStore` | actor | The in-memory Float16 matrix and cosine top-k. |
+| `HybridSearch` | actor | Query → vectors ∪ BM25 → RRF → ranked chunks and notes. |
+
+Plus `EmbedderFactory` (which model is live), `TemporalQueryParser` (FR-5.3) and
+`RecencyPrior`. Everything here is **offline**: no Claude, no network. The
+answer-extraction step is M3-05 and consumes `SemanticResults.promptChunks`.
+
+### Wiring it up
+
+```swift
+let (embedder, active) = await EmbedderFactory.default()   // off the main actor
+settings.embedderRow = active                              // "bge-small-en-v1.5 (bundled)"
+
+guard let embedder else { /* keyword-only mode, FR-5.5 */ return }
+let vectors = VectorStore(reader: metadata.reader,
+                          modelID: embedder.identifier,
+                          dimension: embedder.dimension)
+let indexer = Indexer(metadata: metadata, embedder: embedder, vectorStore: vectors,
+                      isExcluded: exclusions.isExcluded(path:))
+let hybrid  = HybridSearch(metadata: metadata, embedder: embedder, vectorStore: vectors)
+
+try await indexer.synchronizeModel()   // model swap → re-embed
+try await indexer.catchUp()            // index whatever is stale
+await indexer.start()                  // 2 s debounce loop
+
+// …and from then on:
+await indexer.markDirty(note.id)                  // after every autosave
+Task { for await change in changes { await indexer.apply([change]) } }
+```
+
+`VectorStore` loads lazily, so a user who only ever uses ⌘K never pays for it.
+
+### `EmbedderFactory` (M3-01)
+
+```swift
+static func `default`(computeUnits: MLComputeUnits = .all,
+                      cacheDirectory: URL? = nil,
+                      allowNaturalLanguage: Bool = false)
+    async -> (embedder: (any Embedder)?, active: ActiveEmbedder)
+
+struct ActiveEmbedder { let kind: Kind          // .coreML | .nlContextual | .nlSentence | .unavailable
+                        let identifier: String  // stored next to every vector
+                        let dimension: Int
+                        let displayName, detail: String
+                        var supportsSemanticSearch: Bool }
+```
+
+The bundled model lives in the `FilawayCore` resource bundle
+(`BundledEmbeddingModel.packageURL`) and is compiled on first launch by
+`CompiledModelStore` (47–86 ms, cached in Application Support). Loading costs
+~45 ms warm and 1.5–3 s the *very* first time, so do it off the main actor.
+
+`allowNaturalLanguage` defaults to **false**: ADR-012 measured the
+`NLEmbedding`/`NLContextualEmbedding` rungs at 4/20 against 16/20 for plain
+BM25, so the real degradation path is keyword-only, not a worse model.
+
+`Embedder.embedQuery(_:)` applies `queryPrefix` — bge wants
+`"Represent this sentence for searching relevant passages: "` in front of a
+*question* and nothing in front of a passage. It never touches stored vectors,
+so it is deliberately not part of `identifier`.
+
+### `Chunker` (M3-02)
+
+```swift
+Chunker(configuration: .init(maxTokens: 220, minTokens: 64, contextTokens: 60,
+                             maxChunks: 400, includeHeadingPath: true),
+        countTokens: ((String) -> Int)? = nil)
+
+func chunk(_ body: String, title: String? = nil) -> [NoteChunk]
+func chunk(_ note: NoteText) -> [NoteChunk]
+
+struct NoteChunk { let ordinal: Int
+                   let kind: ChunkKind        // .prose | .code
+                   let headingPath: [String]  // title first
+                   let range: MatchRange      // UTF-16, whole lines, into the body
+                   let text: String           // what gets embedded
+                   let language: String?      // fenced info string
+                   let textHash: String }     // the incremental diff key
+```
+
+The rules:
+
+* **A heading starts a chunk** — unless the run in progress is under
+  `minTokens`, in which case it keeps accumulating. Notes made of one-line
+  sections would otherwise produce dozens of 30-token chunks, and the model runs
+  at a *fixed* 256-token sequence (ADR-012), so a small chunk costs exactly as
+  much to embed as a large one.
+* **Every code block is its own chunk**, carrying its language, its heading path
+  and the nearest preceding paragraph as context. That is FR-5.2's unit: "the
+  curl command to fetch documents" must match the fence, not the essay round it.
+* **Long sections split at paragraph boundaries**, and a single paragraph over
+  budget splits at line boundaries.
+* **Ranges are whole lines in UTF-16**, so scroll-to never lands mid-grapheme.
+
+`TokenEstimate.wordPiece(_:)` is the model-free default counter; pass
+`CoreMLEmbedder.tokenCount` when exact budgeting matters.
+
+### `Indexer` (M3-02, FR-5.4)
+
+```swift
+init(metadata: MetadataStore, embedder: any Embedder, chunker: Chunker = Chunker(),
+     vectorStore: VectorStore? = nil, configuration: Configuration = .init(),
+     isExcluded: @Sendable (String) -> Bool = { _ in false })
+
+func markDirty(_ id: NoteID)                     // autosave
+func apply(_ changes: [LibraryChange]) async     // LibraryWatcher
+func observe(_ changes: AsyncStream<LibraryChange>) -> Task<Void, Never>
+func start() / func stop()                       // the debounce loop
+func drain() async throws -> IndexReport         // process the queue now
+func index(noteID: NoteID) async throws -> IndexReport
+func catchUp(limit: Int = 5_000) async throws -> IndexReport
+func rebuildAll() async throws -> IndexReport     // Settings → Rebuild index
+func synchronizeModel() async throws -> Bool      // model swap → re-embed
+func purge(noteID: NoteID) async throws -> Int
+var status: IndexStatus                           // .idle | .indexing(n, of:) | .reindexing
+func statusStream() -> AsyncStream<IndexStatus>
+func staleNoteIDs(limit: Int) async throws -> [NoteID]
+func chunkCount() / func embeddingCount() async throws -> Int
+```
+
+Per note: **read → chunk → embed → write**. Only the write is a transaction, and
+only chunks whose `textHash` changed are embedded — inserting a paragraph at the
+top of a note renumbers every ordinal and re-embeds nothing. Embedding happens
+outside the transaction, so a 5,000-note rebuild never holds the database writer
+for more than a few milliseconds at a time. Everything is cancellable.
+
+Two things the app layer must know:
+
+* **`MetadataStore.rebuild(from:)` deletes the semantic index**, because `chunks`
+  cascades from `notes`. That is correct — a full rebuild *is* a full rebuild —
+  but it means a `rebuild` must be followed by `catchUp()` or `rebuildAll()`.
+  The incremental paths (`upsert`, `apply`) leave chunks alone.
+* **Excluded folders are never indexed** (FR-4.5), and excluding a folder later
+  purges what was already there. Nothing in an excluded folder can therefore
+  reach a prompt through retrieval.
+
+### `VectorStore` (M3-03)
+
+```swift
+init(reader: any DatabaseReader, modelID: String, dimension: Int)
+
+func ensureLoaded() throws / func reload() throws / func unload()
+func topK(_ query: [Float], k: Int,
+          allow: (@Sendable (NoteID) -> Bool)? = nil) throws -> [VectorNeighbor]
+func referenceTopK(_ query: [Float], k: Int) throws -> [VectorNeighbor]  // brute force, for tests
+func apply(upserts: [Upsert], deletedChunkIDs: [Int64] = [])
+func remove(chunkIDs: [Int64]) / func removeNotes(_ ids: [NoteID])
+func memory() -> MemoryReport      // vectorCount, slotCount, dimension, bytes
+var count: Int / var loaded: Bool
+```
+
+One flat Float16 matrix plus `chunkIDs`/`noteIDs` side arrays; a query is a
+blocked `vDSP_mmul` over a Float32 window and a fixed-capacity min-heap. Brute
+force is right at this size — 20,000 notes at ~4 chunks each is 15 MB of halves,
+and an ANN index would add a rebuild, a recall cliff and a dependency for no
+measurable win (`sqlite-vec` stays the Phase-2 escape hatch).
+
+Vectors are carried as `UInt16` bit patterns converted with vImage
+(`HalfVector.encode/decode`), **not** Swift's `Float16`, which does not exist on
+x86_64 macOS and would have broken the universal build NFR-5 still wants.
+
+Deletes tombstone a slot; the next upsert reuses it, so a note being edited
+never memmoves the matrix.
+
+### `TemporalQueryParser` and `RecencyPrior` (M3-04, FR-5.3)
+
+```swift
+TemporalQueryParser(calendar: Calendar = .current)
+func parse(_ query: String, now: Date = Date()) -> TemporalQuery
+func split(_ query: String, now: Date = Date()) -> (strippedQuery: String, range: DateRange?)
+
+struct TemporalQuery { let original, strippedQuery: String
+                       let range: DateRange?          // a hard filter
+                       let boostWindow: TimeInterval? // "recently" — a bias, not a filter
+                       let matchedPhrase: String? }   // for a UI chip
+```
+
+Recognised: `yesterday`, `today`, `last night`, `this morning`,
+`N days|weeks|months|years ago` (digits or words), `last|this week|month|year`,
+weekday names, `in <month>`, `<month> <day>`, `<day> <month>`, and
+`recently`/`lately`/`the other day`.
+
+It is deliberately **conservative** — a false positive silently hides the note
+the user wanted. Every pattern needs an anchor, so `"two days"` without `"ago"`
+is a duration, a bare `"may"` is a modal verb, `"the august release"` is not a
+month, and `"1.2.3"` is a version.
+
+`RecencyPrior` is the soft half: a bounded multiplier (`1 ... 1 + maxBoost`,
+30-day half-life, +20% ceiling), switched off entirely when a hard range
+applies, and sharpened to a 7-day curve for "recently".
+
+### `HybridSearch` (M3-03, FR-5.1/5.3/5.5)
+
+```swift
+init(metadata: MetadataStore, embedder: (any Embedder)?, vectorStore: VectorStore?,
+     parser: TemporalQueryParser = TemporalQueryParser())
+
+func semanticCandidates(_ query: String,
+                        options: Options = Options(),
+                        now: Date = Date()) async -> SemanticResults
+func invalidate()
+var supportsVectors: Bool
+
+struct Options { var candidateLimit = 50, chunkLimit = 20, noteLimit = 10
+                 var rrfK = 60.0
+                 var recencyPrior = RecencyPrior.default
+                 var exclusions = ExclusionFilter.none
+                 var folderPath: String?
+                 var dateRange: DateRange? }          // overrides the parsed one
+
+struct SemanticResults { let query, strippedQuery: String
+                         let dateRange: DateRange?
+                         let chunks: [RankedChunk]     // best first
+                         let notes: [RankedNote]       // one entry per note
+                         let usedVectors, usedKeywords: Bool
+                         var promptChunks: [RankedChunk] }   // top 8 → M3-05
+
+struct RankedChunk { let id: Int64; let noteID: NoteID
+                     let title, relativePath: String; let modified: Date
+                     let kind: ChunkKind; let headingPath: [String]
+                     let range: MatchRange             // FR-5.2 scroll-to
+                     let language: String?; let text: String
+                     let score: Double
+                     let vectorRank, keywordRank: Int?; let vectorScore: Float?
+                     var isConsensus: Bool }
+
+struct RankedNote { let id: NoteID; let title, relativePath: String
+                    let modified: Date; let score: Double
+                    let bestChunk: RankedChunk; let matchingChunks: Int }
+```
+
+The pipeline: parse the time phrase out, embed the rest (with the model's query
+prefix), take vector top-50 and FTS5 BM25 top-50, fuse with **RRF (k = 60)**,
+apply the recency prior when no hard range was found, then aggregate to notes
+keeping the best chunk of each.
+
+Notes for the UI layer:
+
+* **`semanticCandidates` never throws.** A failed vector arm degrades to
+  BM25-only and sets `usedVectors == false` — that is the FR-5.5 banner. A
+  cancelled search returns an empty result, not a stale one.
+* **The keyword arm ORs its terms**, unlike `SearchService.keyword`, which ANDs
+  them. A question shares only a few words with the note that answers it.
+* **A parsed date range filters *inside* the vector top-k**, so a search
+  restricted to "yesterday" cannot come back empty because fifty newer chunks
+  filled the list first.
+* **`bestChunk.range` is where to scroll**, in the same coordinates as
+  `KeywordHit.matchRange`.
+* **`promptChunks` is the M3-05 hand-off** — top eight, each with its note,
+  heading path and text.
+
+---
+
 ## `LaunchTimer` (M1-07)
 
 ```swift

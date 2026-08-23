@@ -86,8 +86,9 @@ public struct Chunker: Sendable {
         /// Upper bound for a chunk, in tokens. 220 leaves room under the
         /// model's 256 for `[CLS]`/`[SEP]` and the heading-path preamble.
         public var maxTokens: Int
-        /// A trailing chunk smaller than this is merged back into the previous
-        /// one when they belong to the same section.
+        /// The floor for a chunk worth embedding on its own. A section smaller
+        /// than this keeps accumulating across the next heading, and a trailing
+        /// chunk smaller than this is merged back into the previous one.
         public var minTokens: Int
         /// Token budget for the context a code chunk carries.
         public var contextTokens: Int
@@ -98,7 +99,7 @@ public struct Chunker: Sendable {
 
         public init(
             maxTokens: Int = 220,
-            minTokens: Int = 16,
+            minTokens: Int = 64,
             contextTokens: Int = 60,
             maxChunks: Int = 400,
             includeHeadingPath: Bool = true
@@ -165,6 +166,9 @@ extension Chunker {
         /// Blocks waiting to become a prose chunk: (first line, last line).
         private var pending: [(first: Int, last: Int)] = []
         private var pendingTokens = 0
+        /// The heading path in force when the pending run started — a chunk
+        /// that spans two small sections is filed under the first of them.
+        private var pendingHeadingPath: [String] = []
         /// Text of the most recent paragraph — a code block's context line.
         private var lastParagraph: String?
         private var chunks: [NoteChunk] = []
@@ -193,8 +197,18 @@ extension Chunker {
 
                 switch block {
                 case let heading as Heading:
-                    flushPending()
+                    // A heading normally starts a chunk — but only if the one
+                    // in progress is worth embedding on its own. Notes full of
+                    // one-line sections (release notes, command scratchpads)
+                    // would otherwise produce dozens of 30-token chunks, each
+                    // costing a full 256-token inference (ADR-012).
+                    if pendingTokens >= configuration.minTokens { flushPending() }
                     push(heading: heading.plainText, level: heading.level)
+                    // When the run in progress was too small to flush, whatever
+                    // follows this heading is the chunk's real subject, so the
+                    // breadcrumb follows the heading rather than the scrap
+                    // above it.
+                    if !pending.isEmpty { pendingHeadingPath = fullHeadingPath }
                     // The heading line itself opens the next prose chunk, so a
                     // section with nothing but a heading is still findable.
                     append(span)
@@ -251,21 +265,25 @@ extension Chunker {
                 // One block bigger than the whole budget: split it by lines so
                 // a 4,000-word paragraph does not become a single truncated
                 // chunk (the model would silently drop everything past 256).
-                for piece in splitByLines(span) { emitProse(span: piece) }
+                let path = fullHeadingPath
+                for piece in splitByLines(span) { emitProse(span: piece, headingPath: path) }
                 return
             }
+            if pending.isEmpty { pendingHeadingPath = fullHeadingPath }
             pending.append((span.first, span.last))
             pendingTokens += tokens
         }
 
         private mutating func flushPending() {
             guard let first = pending.first, let last = pending.last else { return }
-            emitProse(span: LineSpan(first: first.first, last: last.last))
+            emitProse(
+                span: LineSpan(first: first.first, last: last.last), headingPath: pendingHeadingPath
+            )
             pending.removeAll(keepingCapacity: true)
             pendingTokens = 0
         }
 
-        private mutating func emitProse(span: LineSpan) {
+        private mutating func emitProse(span: LineSpan, headingPath path: [String]) {
             let source = lines.text(span)
             guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             // A tail too small to say anything on its own is folded back into
@@ -273,14 +291,16 @@ extension Chunker {
             if countTokens(source) < configuration.minTokens,
                let previous = chunks.last,
                previous.kind == .prose,
-               previous.headingPath == fullHeadingPath,
+               previous.headingPath == path,
                previous.range.upperBound <= lines.location(ofLine: span.first) {
                 let merged = LineSpan(first: lines.line(containingLocation: previous.range.location), last: span.last)
                 chunks.removeLast()
-                emit(kind: .prose, span: merged, text: decorated(lines.text(merged)), language: nil)
+                emit(kind: .prose, span: merged, text: decorated(lines.text(merged), path: path),
+                     language: nil, headingPath: path)
                 return
             }
-            emit(kind: .prose, span: span, text: decorated(source), language: nil)
+            emit(kind: .prose, span: span, text: decorated(source, path: path),
+                 language: nil, headingPath: path)
         }
 
         private func splitByLines(_ span: LineSpan) -> [LineSpan] {
@@ -322,19 +342,22 @@ extension Chunker {
                 kind: .code,
                 span: span,
                 text: text,
-                language: language.flatMap { $0.isEmpty ? nil : $0.lowercased() }
+                language: language.flatMap { $0.isEmpty ? nil : $0.lowercased() },
+                headingPath: fullHeadingPath
             )
         }
 
         // MARK: Emission
 
-        private mutating func emit(kind: ChunkKind, span: LineSpan, text: String, language: String?) {
+        private mutating func emit(
+            kind: ChunkKind, span: LineSpan, text: String, language: String?, headingPath: [String]
+        ) {
             guard chunks.count < configuration.maxChunks else { return }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             chunks.append(NoteChunk(
                 ordinal: chunks.count,
                 kind: kind,
-                headingPath: fullHeadingPath,
+                headingPath: headingPath,
                 range: lines.range(of: span),
                 text: text,
                 language: language
@@ -354,9 +377,9 @@ extension Chunker {
             }
         }
 
-        private func decorated(_ source: String) -> String {
-            guard configuration.includeHeadingPath, !fullHeadingPath.isEmpty else { return source }
-            let breadcrumb = fullHeadingPath.joined(separator: " › ")
+        private func decorated(_ source: String, path: [String]) -> String {
+            guard configuration.includeHeadingPath, !path.isEmpty else { return source }
+            let breadcrumb = path.joined(separator: " › ")
             // A chunk that already opens with its own heading does not need it
             // twice; the ancestors still help.
             return breadcrumb + "\n" + source
