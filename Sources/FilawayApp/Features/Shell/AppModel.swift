@@ -137,6 +137,7 @@ final class AppModel: ObservableObject {
             let metadata = try await Task.detached(priority: .userInitiated) {
                 try MetadataStore(library: library)
             }.value
+            LaunchClock.mark("dbOpen")  // M4-07: GRDB open + migrations are done.
             let watcher = LibraryWatcher(store: store, metadata: metadata)
 
             self.store = store
