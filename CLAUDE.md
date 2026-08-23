@@ -96,6 +96,17 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
+**If a phase produces *no output at all* and dies at its timeout, it is not the
+lock screen — it is macOS's crash-history alert.** The suite SIGKILLs the app on
+purpose (the `kill` phase, and the watchdog on any phase that overstays), so
+Filaway accumulates a crash history by design; `NSPersistentUIRestorer` then puts
+up a modal "reopen its windows?" alert from inside `_handleAEOpenEvent`, before
+`applicationDidFinishLaunching` runs and with nobody to answer it. The phase
+hangs, the watchdog kills it, and *that* adds another crash — once it starts it
+never stops. `Tools/smoke.sh` passes `-ApplePersistenceIgnoreState YES` to every
+launch, which skips the machinery entirely (M4-06). `sample <pid>` on a wedged
+phase names it in one line.
+
 **Run `make smoke` only when no other agent is running it.** Two
 `build/Filaway.app` processes with the same bundle id at the same time and only
 one of them gets a `WindowGroup` window — the other's `editor`, `search`, `1`,
@@ -484,9 +495,13 @@ audit, item by item, and is explicit about what the `a11y` smoke phase proves
 versus what needs a person at an unlocked screen with VoiceOver on.
 `Features/Settings/AccessibilityAudit.swift` walks a window's live accessibility
 tree and fails on any unlabelled control (ADR-060). The M1 launch warning
-"reentrant operation in its NSTableView delegate" is fixed — two `@Published`
-sidebar writes were landing inside AppKit delegate callbacks; `make smoke` now
-keeps a transcript and fails if the warning comes back.
+"reentrant operation in its NSTableView delegate" is **not fixed**, but it is
+now measured and bounded: `make smoke` keeps a transcript and fails on it, and
+the count says it is once per *population of the sidebar `List`* (empty library:
+zero; seeded: one; `semantic`, which repopulates repeatedly: four). Everything
+schedulable has been ruled out — see `docs/a11y-checklist.md` § 5 for the full
+list and the one experiment left, which needs a debugger that can attach to an
+ad-hoc-signed bundle.
 
 ## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
 

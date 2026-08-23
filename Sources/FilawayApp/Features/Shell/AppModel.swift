@@ -187,21 +187,18 @@ final class AppModel: ObservableObject {
             // Paint from the database alone — no disk scan — so the sidebar and
             // the last note are up before the launch reconcile runs. The yield
             // keeps the first paint out of the SwiftUI update that `.task`
-            // started, so AppKit never sees a reentrant table edit.
+            // started.
+            //
+            // It does **not** silence AppKit's "reentrant operation in its
+            // NSTableView delegate" warning, and neither does a full run-loop
+            // turn here, before `restoreLastNote()`, or inside
+            // `refreshSidebarNow()` — all three were measured (M4-06). See
+            // `docs/a11y-checklist.md` § 5 for what the warning is actually
+            // tied to and everything that has been ruled out.
             await Task.yield()
             await refreshSidebarNow()
             isLoaded = true
             LaunchClock.mark("libraryOpen")
-            // A second, stronger yield before the selection moves (M4-06).
-            //
-            // `Task.yield()` hands control back to the cooperative pool, which
-            // is enough to get the *first* paint out of the SwiftUI update that
-            // `.task` started — but it does not wait for AppKit. `restoreLastNote`
-            // writes `selection`, which is the sidebar `List`'s own binding, and
-            // writing it while `NSTableView` is still laying itself out is the
-            // reentrant edit AppKit warns about ("will become an assert in the
-            // future"). One turn of the *run loop* puts it after that layout.
-            await MainActor.nextRunLoopTurn()
             await restoreLastNote()
 
             // M2 (FR-3.1, FR-4.x): sessions, plans, Activity, Undo, the offline
@@ -602,21 +599,5 @@ final class AppModel: ObservableObject {
         // Deleted while dirty: `resolveExternalChange` writes the buffer back.
         if await autosave.externalChangeSeen(noteID: open.id) { return }
         closeOpenNote()
-    }
-}
-
-extension MainActor {
-    /// Waits for the main *run loop* to come round again, not merely for the
-    /// cooperative pool to reschedule us.
-    ///
-    /// The difference matters wherever main-actor work has to land *after*
-    /// AppKit has finished a layout pass: `Task.yield()` may resume inside the
-    /// same run-loop iteration, `DispatchQueue.main.async` cannot. Used to keep
-    /// programmatic sidebar changes out of `NSTableView`'s delegate callbacks
-    /// (M4-06 — see ``AppModel/bootstrap()``).
-    static func nextRunLoopTurn() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
     }
 }

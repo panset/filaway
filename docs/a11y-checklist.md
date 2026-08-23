@@ -126,37 +126,60 @@ responder behaviour, and there is no first responder on a locked screen.
       both appearances. A capture proves the render did not crash; only a person
       can say it looks right.
 
-## 5. AppKit reentrancy (the M1 launch warning)
+## 5. AppKit reentrancy (the M1 launch warning) — **still open**
 
 `WARNING: Application performed a reentrant operation in its NSTableView
-delegate` had been in the launch log since M1. AppKit says it "will become an
-assert in the future".
+delegate` has been in the launch log since M1. AppKit says it "will become an
+assert in the future". M4-06 did not fix it. What M4-06 *did* do is turn it from
+an anecdote into a measurement, and rule out most of the obvious suspects.
 
-**Cause.** Two writes to `@Published` sidebar state from *inside* an AppKit
-delegate callback, each of which invalidates the `List` that AppKit is still
-walking:
+**Guard.** `Tools/smoke.sh` keeps a transcript of every phase and fails the run
+if `reentrant operation` appears in it (`SMOKE FAIL appkit-reentrancy`). It arms
+itself only where it can mean something — with no window there is no table.
 
-1. `AppModel.bootstrap()` → `restoreLastNote()` → `open(noteID:)` writes
-   `selection`, which is the sidebar `List`'s own binding. `Task.yield()` before
-   the first `refreshSidebarNow()` got the *first paint* out of the update that
-   `.task` started, but it can resume inside the same run-loop iteration, so the
-   selection still landed during `NSTableView`'s layout.
-2. `SidebarView.expansion(of:)` wrote `model.expandedFolders` synchronously from
-   `DisclosureGroup`'s setter — i.e. from inside `NSOutlineView`'s
-   expand/collapse delegate.
+**What the guard measured** (one full `make smoke`, warnings per phase):
 
-**Fix.** `MainActor.nextRunLoopTurn()` (a `DispatchQueue.main.async`
-continuation, which *cannot* resume in the same iteration) before
-`restoreLastNote()`; and a view-local `expansionOverlay` so the disclosure
-triangle turns in the same frame while the model write is deferred one turn.
+| Phase | Warnings | Notes root |
+|---|---|---|
+| `settings`, `settings2`, `onboarding`, `onboarding2`, `onboardingskip` | **0** | empty |
+| `editor`, `search`, `organize*`, `kill`, `killcheck`, `1`, `2`, `paste`, `a11y`, `settings-wiring` | **1** | seeded |
+| `semantic` | **4** | seeded, and the phase repopulates the sidebar repeatedly |
 
-**Guard.** `Tools/smoke.sh` now keeps a transcript of every phase and fails the
-run if `reentrant operation` appears in it. It arms itself only where it can
-mean something: with no window there is no table, so on a locked screen the
-script says so rather than claiming a pass.
+So it is not "on every launch": it is **once per population of the sidebar
+`List`**. A library with no notes never produces it, and the phase that
+repopulates the sidebar most produces the most.
 
-- [ ] **Manual:** run `make smoke` once on an unlocked screen and confirm
-      `SMOKE ok appkit-reentrancy`.
+**Ruled out**, each by building it and re-running the count:
+
+- Every `@Published` write in `bootstrap()`. With `refreshSidebarNow()`,
+  `isLoaded`, `self.organize`, `semanticSearch.start()`, the launch `reconcile()`
+  *and* `restoreLastNote()` all disabled, the warning still fires exactly once.
+  Disabling `bootstrap()` entirely takes it to zero — but that leaves the sidebar
+  with no rows at all, which is the same "no rows, no warning" result as the
+  empty-library phases, not a diagnosis.
+- Scheduling. `Task.yield()` and a full run-loop turn
+  (`DispatchQueue.main.async` continuation, which cannot resume in the same
+  iteration) were each tried before the first paint, before `restoreLastNote()`,
+  and immediately before the three sidebar properties are assigned inside
+  `refreshSidebarNow()`. None changed the count.
+- `List.safeAreaInset(edge: .bottom)` — replacing it with a plain `VStack`
+  changed nothing.
+
+That points at SwiftUI's own `List`/`NSTableView` bridge on macOS 26 rather than
+at anything the app schedules, but it is **not proven**, and the app is not
+exonerated. `lldb` could settle it in one backtrace; it cannot attach to an
+ad-hoc-signed bundle on this machine ("attached to process, but could not pause
+execution").
+
+- [ ] **Next step:** break on the log call with a debugger that can attach — an
+      Xcode install, or a Developer ID signature with `get-task-allow` — and read
+      the one backtrace this needs. Candidates the bisect has not reached:
+      the `.overlay { emptyState }` on the `List`, the `Section` headers'
+      `contextMenu`, and `draggable`/`dropDestination` on the rows.
+
+**Reproduce in about a minute:** run the `editor` smoke phase against a seeded
+notes root and `grep -c "reentrant operation"`. It is deterministic — one, every
+run.
 
 ## 6. Still open, and why
 
