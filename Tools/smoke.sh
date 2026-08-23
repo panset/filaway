@@ -7,6 +7,9 @@
 # throwaway preferences domain:
 #
 #   editor  the M1-10 editor checks, on a note read back from disk
+#   search  the M1-12 ⌘K checks on a three-note corpus seeded *before* launch:
+#           as-you-type hits, ↑/↓/⏎/Esc, open-scrolled-to-match, fuzzy titles,
+#           recents on an empty query
 #   1       empty sidebar → ⌘N → type → autosave lands → rename renames the
 #           file → an external edit reaches the sidebar → quit mid-burst
 #   2       relaunch on the same root: last note restored, last burst survived
@@ -33,9 +36,53 @@ STAMP="$(date +%s)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
 EDITOR_ROOT="$WORK/EditorNotes"
+SEARCH_ROOT="$WORK/SearchNotes"
 SUPPORT="$WORK/Support"
 SUITE="com.tejaspanse.filaway.smoke.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT"
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT"
+
+# Three notes on disk before the app ever runs, so the search phase also proves
+# a cold launch indexes a library Filaway has never seen. Titles and the tail
+# phrase are asserted in Features/Search/SearchSmokeCheck.swift — keep in step.
+seed_search_corpus() {
+  local root="$1"
+  mkdir -p "$root/Commands"
+  {
+    echo "Notes from the staging spike."
+    echo
+    # ~160 lines of filler: the code block below has to start well past one
+    # screenful, so "the editor scrolled to the match" is a real assertion.
+    i=1
+    while [ "$i" -le 160 ]; do
+      echo "Line $i — background on the staging environment and its quirks."
+      i=$((i + 1))
+    done
+    echo
+    echo "curl to fetch docs from staging:"
+    echo
+    echo '```bash'
+    echo 'curl -H "Auth: Bearer $TOK" https://api.st.app/v2/docs'
+    echo '```'
+    echo
+    echo "remember: token expires hourly"
+  } > "$root/Commands/Staging docs.md"
+
+  {
+    echo "The 401 only happens after the bearer token rotates."
+    echo
+    echo "- [ ] rotate the staging token"
+    echo "- [ ] check the refresh window"
+  } > "$root/Auth API debug.md"
+
+  {
+    echo "Handy container commands."
+    echo
+    echo '```bash'
+    echo 'curl -fsS http://localhost:8080/healthz'
+    echo '```'
+  } > "$root/Docker cheats.md"
+}
+seed_search_corpus "$SEARCH_ROOT"
 
 failures=0
 app_pid=""
@@ -59,6 +106,7 @@ run_phase() {
   local phase="$1" limit="$2" status
   local root="$ROOT"
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
+  [ "$phase" = "search" ] && root="$SEARCH_ROOT"
   echo
   echo "=== smoke phase: $phase ==============================================="
   FILAWAY_SMOKE="$phase" \
@@ -86,6 +134,7 @@ run_phase() {
 }
 
 run_phase editor 90
+run_phase search 120
 run_phase 1 90
 run_phase 2 60
 

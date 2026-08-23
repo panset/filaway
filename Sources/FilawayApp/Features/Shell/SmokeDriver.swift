@@ -16,6 +16,7 @@ import FilawayCore
 /// | Phase | What it proves |
 /// |---|---|
 /// | `editor` | The M1-10 editor checks, now against a note read from disk. |
+/// | `search` | The M1-12 ⌘K checks against a corpus seeded on disk before launch: as-you-type hits, keyboard nav, open-scrolled-to-match, fuzzy titles, recents, Escape. |
 /// | `1` | Empty sidebar → ⌘N → type → autosave lands on disk → rename renames the file → an external edit reaches the sidebar → a final burst is flushed by terminate. |
 /// | `2` | Relaunch on the same root restores the last note *and* the burst typed immediately before quit (FR-1.5, FR-2.3). |
 @MainActor
@@ -38,6 +39,7 @@ enum SmokeDriver {
             await settle(seconds: 1.0)
             switch phase {
             case "editor": await runEditorPhase()
+            case "search": await runSearchPhase()
             case "2": await runRelaunchPhase()
             default: await runCapturePhase()
             }
@@ -166,6 +168,18 @@ enum SmokeDriver {
               model.recents.map(\.note.title).joined(separator: ", "))
         print("SMOKE info launch \(LaunchClock.summary)")
         print("SMOKE phase=2 result failures=\(failures)")
+        finish()
+    }
+
+    // MARK: - Phase: search (M1-12)
+
+    /// The corpus is already on disk when the app starts (`Tools/smoke.sh`
+    /// seeds it), so this also covers "a cold launch on an unknown library
+    /// indexes it".
+    private static func runSearchPhase() async {
+        header()
+        failures += await SearchSmokeCheck.run()
+        print("SMOKE phase=search result failures=\(failures)")
         finish()
     }
 
