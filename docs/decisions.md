@@ -1040,3 +1040,59 @@ pessimistic, free.
 - The FR-4.5 gate shows up as a property of the fixtures: the scenario whose
   session touched an excluded note hashes to the *same request* as the one
   without it.
+
+---
+
+## ADR-033 — One `PlanApplying` / `BaselineStore` contract, owned by the implementer
+
+**Date:** 2026-08-23 · **Task:** M2-05 / M2-07 integration · **Status:** accepted
+
+**Context.** M2-05 (organizer) and M2-07/M2-08 (applier, activity log) were
+written in parallel, and each declared the seam between them: two `PlanApplying`
+protocols, two `AppliedPlan` structs, two apply-error enums, and two
+`BaselineStore` protocols over two baseline value types. Merged, the package did
+not compile — every name was ambiguous. ADR-030 predicted the shape of the seam
+correctly; it did not say who gets to name it.
+
+**Decision.** One of each, and the side that *implements* a contract owns its
+definition, while the side that calls it names what it needs:
+
+* **`PlanApplying`, `AppliedPlan`, `ApplyError`** live in
+  `Organize/ApplyModel.swift`, beside `PlanApplier`. `AppliedPlan` is the rich
+  one — `eventID`, per-action `outcomes`, `createdNotes`, `createdFolders`,
+  `trashedNotes`, `changedPaths` — because the card and the Activity row need
+  all of it and the organizer needs none of it. It gains one field the organizer
+  does own: `sessionID`, stamped after a successful apply, and one derived
+  `removedNoteIDs` (the trashed notes) so a baseline can be dropped rather than
+  advanced.
+* **The error kept is `ApplyError`**, the applier's, because it is what 61 tests
+  and every throw site already say. M2-05's `PlanApplyError` is gone; its
+  `preconditionFailed` maps onto `ApplyError.preconditionFailed(_:)` (same
+  meaning, no argument label) and its `io(String)` catch-all was added to
+  `ApplyError` for whatever a third-party `PlanApplying` might throw.
+  `conflict(String)` was dropped: `invalidPlan` and `noteMissing` already say it.
+  **The organizer's semantics are unchanged** — a precondition failure is still
+  `OrganizerEvent.stale`, still writes nothing, still leaves the baseline where
+  it was.
+* **`BaselineStore` and `OrganizedBaseline`** live in `Session/BaselineStore.swift`,
+  keeping the four-method protocol the organizer actually uses (batch read and
+  `removeBaseline` included) and the value type that carries `sessionID` and
+  derives its own hash. `ActivityLog` and `DatabaseBaselineStore` conform;
+  `Activity/ActivityEvent.swift`'s `NoteBaseline` and its two-method protocol are
+  gone. A column-shaped `setBaseline(noteID:hash:text:at:)` stays as a protocol
+  extension, so callers holding a hash need not rebuild the value.
+
+**Consequences.**
+- `Organizer` + the real `PlanApplier` + `ActivityLog`-as-`BaselineStore` +
+  `UndoService` are exercised together in
+  `Tests/FilawayCoreTests/OrganizeIntegrationTests.swift`, on a temp library:
+  auto mode end to end, and ask mode through propose → accept → applied → undo
+  with a byte-identical tree at the end. That test is the thing that would have
+  caught the divergence on day one.
+- `note_baselines` has no session column, so a baseline round-tripped through the
+  database loses `OrganizedBaseline.sessionID`. It labels the last advance; no
+  delta is computed from it. Adding the column can wait for a migration that has
+  another reason to exist.
+- The app wiring (M2-10) has one name for each thing: `PlanApplier` as the
+  `PlanApplying`, `ActivityLog` (or `DatabaseBaselineStore`) as the
+  `BaselineStore`, `InMemoryPendingSessionStore` until M2-09.

@@ -119,71 +119,10 @@ public struct ProposedPlan: Sendable, Hashable, Identifiable {
 }
 
 // MARK: - Apply
-
-/// What ``PlanApplying`` reports back (M2-07 fills it in for real).
-public struct AppliedPlan: Sendable, Hashable {
-    public var sessionID: SessionID?
-    public var summary: String
-    public var promptVersion: PromptVersion
-    public var appliedAt: Date
-    /// Content hash of every note the apply wrote, after writing.
-    public var noteHashes: [NoteID: String]
-    /// Notes the plan brought into existence.
-    public var createdNoteIDs: [NoteID]
-    /// Notes that no longer exist (an emptied `moveSegment` source that went to
-    /// the Trash). Their baselines are removed rather than advanced.
-    public var removedNoteIDs: [NoteID]
-    /// The Activity-log event, for "View changes" and Undo (FR-4.3).
-    public var activityEventID: String?
-
-    public init(
-        sessionID: SessionID? = nil,
-        summary: String,
-        promptVersion: PromptVersion = .organize,
-        appliedAt: Date,
-        noteHashes: [NoteID: String] = [:],
-        createdNoteIDs: [NoteID] = [],
-        removedNoteIDs: [NoteID] = [],
-        activityEventID: String? = nil
-    ) {
-        self.sessionID = sessionID
-        self.summary = summary
-        self.promptVersion = promptVersion
-        self.appliedAt = appliedAt
-        self.noteHashes = noteHashes
-        self.createdNoteIDs = createdNoteIDs
-        self.removedNoteIDs = removedNoteIDs
-        self.activityEventID = activityEventID
-    }
-}
-
-/// Why an apply did not happen.
-public enum PlanApplyError: Error, Sendable, Equatable {
-    /// FR-3.2's compare-and-swap: a note moved under the plan. **The whole plan
-    /// is discarded** — never partially applied — and the baseline does not
-    /// advance, so the next session covers the same delta again.
-    case preconditionFailed(noteIDs: [NoteID])
-    /// The library changed shape in a way the plan cannot be applied to (the
-    /// target note is gone, a path is taken).
-    case conflict(String)
-    case io(String)
-}
-
-/// Applying a plan to the library (M2-07).
-///
-/// Defined here because the organizer's state machine is meaningless without
-/// it, and implemented elsewhere: the real applier is transactional, journalled
-/// and writes the Activity log. The contract is:
-///
-/// * **All or nothing.** Every note in ``OrganizationPlan/preconditions`` is
-///   checked against its current content hash first; one mismatch throws
-///   ``PlanApplyError/preconditionFailed(noteIDs:)`` and nothing is written.
-/// * **Never destructive.** ``PlanAction/neverDeletesUserText`` is a property of
-///   the type; apply keeps it true on disk (FR-4.4).
-/// * **Undoable.** One plan is one Activity event and one Undo step (FR-4.3).
-public protocol PlanApplying: Sendable {
-    func apply(_ plan: OrganizationPlan) async throws -> AppliedPlan
-}
+//
+// ``PlanApplying``, ``AppliedPlan`` and ``ApplyError`` live with the applier
+// itself, in `Organize/ApplyModel.swift` (ADR-033): one contract, defined by the
+// side that implements it, named by the side that calls it.
 
 // MARK: - The offline queue (FR-6.4)
 
@@ -304,7 +243,7 @@ public enum OrganizeFailure: Sendable, Equatable {
     /// The plan did not survive validation. Carries the issues, for the log.
     case invalidPlan(PlanValidation)
     /// The applier refused or failed.
-    case apply(PlanApplyError)
+    case apply(ApplyError)
     /// The queue gave up after ``OrganizerSettings/maxQueueAttempts``.
     case abandoned(String)
 

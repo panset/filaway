@@ -188,6 +188,28 @@ enum OrganizerEvent {
 `ProposedPlan` carries the plan, its validation (warnings are worth showing), the
 actions that were dropped, and the plan-time text of every session note.
 
+### The apply seam (M2-05 ↔ M2-07)
+
+M2-05 and M2-07 were written in parallel and each defined the contract between
+them. There is now exactly one of each (ADR-033), and it lives with the applier:
+
+| Type | Where | Note |
+|---|---|---|
+| `PlanApplying` | `Organize/ApplyModel.swift` | `apply(_:) async throws -> AppliedPlan` |
+| `AppliedPlan` | `Organize/ApplyModel.swift` | the applier's rich result: `eventID`, per-action `outcomes`, `createdNotes`, `createdFolders`, `trashedNotes`, `changedPaths`, plus the `sessionID` the organizer stamps |
+| `ApplyError` | `Organize/ApplyModel.swift` | `preconditionFailed` / `invalidPlan` / `noteMissing` / `io` (+ the two test-hook cases) |
+| `BaselineStore`, `OrganizedBaseline` | `Session/BaselineStore.swift` | `ActivityLog` and `DatabaseBaselineStore` are the durable implementations |
+| `PendingSessionStore`, `PendingSession` | `Organize/OrganizerTypes.swift` | in-memory only, until M2-09 |
+
+`ApplyError.preconditionFailed(_:)` is what the organizer turns into
+`.stale(_:noteIDs:)`: the CAS semantics are M2-05's, the enum is M2-07's.
+The real `PlanApplier` checks every hash in `plan.preconditions` — plus every
+`moveSegment` segment, verbatim — before it touches a file, which is exactly what
+the organizer's race matrix assumes.
+
+`AppliedPlan.removedNoteIDs` (the trashed notes) is what makes a baseline
+disappear rather than advance; `createdNotes` is what gives a brand-new note one.
+
 ---
 
 ## The prompt and the context (M2-06)
@@ -300,6 +322,13 @@ committed fixtures:
 | `invalid-action-dropped` | risk #6 — the good action survives |
 | `summary-no-longer-matches` | risk #6 — the whole plan goes instead |
 
+`Tests/FilawayCoreTests/OrganizeIntegrationTests.swift` is the other end of the
+same rope: the `Organizer`, the **real** `PlanApplier`, the `ActivityLog` as the
+`BaselineStore` and `UndoService`, over a temp library on disk with a
+`MockProvider` for the model — auto mode end to end, and ask mode all the way
+through propose → accept → applied → undo, asserting the tree comes back
+byte-identical.
+
 The **responses** are hand-authored (no key on this machine); the **requests**
 are captured from the real builder:
 
@@ -328,9 +357,11 @@ FILAWAY_AI_MODE=record       swift test --filter "Organize goldens"   # when a k
 4. `organizer.noteEdited(noteID)` on every edit, for the supersede rules.
 5. An `OrganizeLibrarySource` over `MetadataStore` (snapshot) and `NoteStore`
    (bodies).
-6. A `PlanApplying` (M2-07) and the GRDB `BaselineStore` / `PendingSessionStore`
-   (M2-08's `note_baselines`; until then the in-memory ones are correct, just
-   forgetful).
+6. The `PlanApplier` actor as the `PlanApplying`, and the `ActivityLog` (or the
+   `DatabaseBaselineStore` façade over it) as the `BaselineStore` — both real
+   since M2-07/M2-08, over `note_baselines` in `filaway.sqlite`.
+   `PendingSessionStore` is still in-memory (`InMemoryPendingSessionStore`),
+   which is correct, just forgetful, until M2-09.
 7. `organizer.aiStatusChanged(_:)` whenever the status pill changes, and
    `setSettings` whenever Settings does.
 8. The card (M2-10) from `.proposed` / `.applied`, taken down on `.withdrawn`

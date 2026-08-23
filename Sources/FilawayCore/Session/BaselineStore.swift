@@ -28,6 +28,17 @@ public struct OrganizedBaseline: Sendable, Hashable, Codable {
         self.sessionID = sessionID
     }
 
+    /// The stored form, with the hash as it was written. Used when reading a row
+    /// back out of `note_baselines`, where the hash is a column rather than
+    /// something to recompute.
+    public init(noteID: NoteID, contentHash: String, text: String, updatedAt: Date, sessionID: SessionID? = nil) {
+        self.noteID = noteID
+        self.contentHash = contentHash
+        self.text = text
+        self.updatedAt = updatedAt
+        self.sessionID = sessionID
+    }
+
     /// The baseline of a note the AI has never seen.
     public static func creation(_ noteID: NoteID, at now: Date = Date()) -> OrganizedBaseline {
         OrganizedBaseline(noteID: noteID, text: "", updatedAt: now)
@@ -41,6 +52,10 @@ public struct OrganizedBaseline: Sendable, Hashable, Codable {
 /// Behind a protocol because the durable implementation is a GRDB table
 /// (`note_baselines`, migration `v4-activity`) owned by the apply/activity work,
 /// and neither ``Organizer`` nor its tests may depend on a database being there.
+///
+/// This is the *only* baseline contract (ADR-033). ``ActivityLog`` and
+/// ``DatabaseBaselineStore`` are the durable implementations;
+/// ``InMemoryBaselineStore`` is the reference one.
 public protocol BaselineStore: Sendable {
     func baseline(for noteID: NoteID) async throws -> OrganizedBaseline?
     func baselines(for noteIDs: [NoteID]) async throws -> [NoteID: OrganizedBaseline]
@@ -62,6 +77,13 @@ public extension BaselineStore {
     func advance(_ noteID: NoteID, to text: String, at now: Date, sessionID: SessionID? = nil) async throws {
         try await setBaseline(
             OrganizedBaseline(noteID: noteID, text: text, updatedAt: now, sessionID: sessionID)
+        )
+    }
+
+    /// Column-shaped convenience, for callers that already hold the hash.
+    func setBaseline(noteID: NoteID, hash: String, text: String, at now: Date = Date()) async throws {
+        try await setBaseline(
+            OrganizedBaseline(noteID: noteID, contentHash: hash, text: text, updatedAt: now)
         )
     }
 }

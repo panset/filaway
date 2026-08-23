@@ -440,14 +440,14 @@ public actor Organizer {
             // the text the plan itself wrote is never mistaken for new material
             // in the next session.
             await refreshBaselines(
-                for: proposal.noteIDs + applied.createdNoteIDs,
+                for: proposal.noteIDs + applied.createdNotes,
                 removed: applied.removedNoteIDs,
                 sessionID: proposal.sessionID,
                 fallback: proposal.snapshotTexts
             )
             log.info("applied plan for session \(proposal.sessionID.uuidString, privacy: .public)")
             emit(.applied(applied))
-        } catch let error as PlanApplyError {
+        } catch let error as ApplyError {
             switch error {
             case let .preconditionFailed(noteIDs):
                 // FR-3.2: the note moved under the plan. Nothing was written and

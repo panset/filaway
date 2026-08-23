@@ -423,7 +423,7 @@ if result.outcome == .partial { banner("Some changes needed a conflict block.") 
 ### `PlanApplier` (FR-4.2, FR-4.4, NFR-3)
 
 ```swift
-protocol PlanApplying: Sendable {
+protocol PlanApplying: Sendable {                         // the one apply contract (ADR-033)
     func apply(_ plan: OrganizationPlan) async throws -> AppliedPlan
 }
 
@@ -458,7 +458,12 @@ status to `applied`.
 `AppliedPlan` gives the card everything it needs: `eventID`, a `summary` built
 from what actually happened, per-action `outcomes` (kind, status, final path,
 previous path), `createdNotes`, `createdFolders`, `trashedNotes` (with their
-Trash URLs) and `changedPaths`.
+Trash URLs), `changedPaths`, and `removedNoteIDs` (the trashed ones, for the
+baselines). `Organizer` stamps `sessionID` on it on the way past — it is the
+only party that knows which session the plan came from. There is exactly one
+`AppliedPlan` and one `ApplyError` in Core; M2-05's `PlanApplyError` was folded
+into `ApplyError`, whose `io(String)` case carries anything that is not one of
+the applier's own failures (ADR-033).
 
 ### Crash recovery
 
@@ -489,8 +494,10 @@ func recordDismissed(plan:summary:sessionText:at:) throws -> ActivityEventID
 @discardableResult
 func prune(olderThan: TimeInterval = 30 days, now: Date, keepingUndoDepth: Int = 10) throws -> ActivityPruneReport
 
-func baseline(for: NoteID) throws -> NoteBaseline?              // BaselineStore
+func baseline(for: NoteID) throws -> OrganizedBaseline?         // BaselineStore
+func setBaseline(_ baseline: OrganizedBaseline) throws          // BaselineStore
 func setBaseline(noteID:hash:text:at:) throws
+func removeBaseline(for: NoteID) throws                         // BaselineStore
 ```
 
 * **`events(...)` does not load note text.** A page of images would be
@@ -502,8 +509,12 @@ func setBaseline(noteID:hash:text:at:) throws
   `NoteDiff.created` / `.trashed` / `.wasRelocated` cover the rest.
 * Retention (FR-4.4): `prune(olderThan:)` drops raw session text past 30 days,
   and images only for events Undo can no longer reach. Event rows stay forever.
-* It is also the GRDB `BaselineStore` (`note_baselines`); `DatabaseBaselineStore`
-  is the façade to hand `SessionTracker`.
+* It is also the GRDB `BaselineStore` (`note_baselines`), the single baseline
+  contract `Organizer` takes (ADR-033); `DatabaseBaselineStore` is the same
+  thing as a value type, for wiring the organizer without handing it the log.
+  The value type is `OrganizedBaseline` (note id, content hash, text, when, and
+  the session that advanced it — `note_baselines` has no session column, so a
+  round trip through the database drops `sessionID`).
 
 ### `UndoService` (FR-4.3)
 

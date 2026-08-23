@@ -234,6 +234,8 @@ final class FakeApplier: PlanApplying, @unchecked Sendable {
     /// reads what an apply would really have written.
     var effect: (@Sendable (OrganizationPlan, FakeLibrary) async -> Void)?
     var appliedAt = Date(timeIntervalSince1970: 1_756_000_500)
+    /// The Activity event the real applier would have written.
+    var eventID = ActivityEventID()
 
     init(library: FakeLibrary? = nil) {
         self.library = library
@@ -260,25 +262,30 @@ final class FakeApplier: PlanApplying, @unchecked Sendable {
                 let actual = await library.contentHash(id)
                 if actual != expected { missed.append(id) }
             }
-            guard missed.isEmpty else { throw PlanApplyError.preconditionFailed(noteIDs: missed.sorted { $0.uuidString < $1.uuidString }) }
+            guard missed.isEmpty else { throw ApplyError.preconditionFailed(missed.sorted { $0.uuidString < $1.uuidString }) }
             await effect?(plan, library)
         }
 
         locked { appliedPlans.append(plan) }
 
-        var hashes: [NoteID: String] = [:]
-        if let library {
-            for id in plan.preconditions.noteIDs {
-                if let hash = await library.contentHash(id) { hashes[id] = hash }
-            }
-        }
         return AppliedPlan(
+            eventID: eventID,
             summary: plan.summary,
-            promptVersion: plan.promptVersion,
-            appliedAt: appliedAt,
-            noteHashes: hashes,
-            activityEventID: "activity-1"
+            outcomes: plan.actions.enumerated().map { index, action in
+                ActionOutcome(index: index, kind: action.kind, detail: "\(action.kind.rawValue) applied")
+            },
+            changedPaths: changedPaths(plan),
+            appliedAt: appliedAt
         )
+    }
+
+    /// The final path of every note the plan named, as the real applier reports
+    /// it. Only its keys matter to the organizer: they are the notes whose
+    /// baselines advance.
+    private func changedPaths(_ plan: OrganizationPlan) -> [NoteID: String] {
+        var out: [NoteID: String] = [:]
+        for id in plan.preconditions.noteIDs { out[id] = id.uuidString }
+        return out
     }
 }
 

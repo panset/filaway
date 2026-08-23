@@ -238,31 +238,10 @@ public struct NoteDiff: Sendable, Hashable, Codable, Identifiable {
     }
 }
 
-/// The organized baseline of a note (FR-3.2): the content the last accepted
-/// plan was computed against.
-public struct NoteBaseline: Sendable, Hashable, Codable {
-    public var noteID: NoteID
-    public var contentHash: String
-    public var text: String
-    public var updatedAt: Date
-
-    public init(noteID: NoteID, contentHash: String, text: String, updatedAt: Date) {
-        self.noteID = noteID
-        self.contentHash = contentHash
-        self.text = text
-        self.updatedAt = updatedAt
-    }
-}
-
-/// Where a note's organized baseline lives.
-///
-/// `SessionTracker` (M2-03/M2-05) needs "what did this note look like when the
-/// AI last saw it?" without caring whether that is a database or a dictionary.
-/// ``ActivityLog`` is the production implementation, in `note_baselines`.
-public protocol BaselineStore: Sendable {
-    func baseline(for noteID: NoteID) async throws -> NoteBaseline?
-    func setBaseline(noteID: NoteID, hash: String, text: String) async throws
-}
+// The organized baseline of a note (FR-3.2) is ``OrganizedBaseline``, and the
+// store it lives in is ``BaselineStore`` — both in `Session/BaselineStore.swift`
+// (ADR-033). ``ActivityLog`` and ``DatabaseBaselineStore`` implement that
+// protocol over `note_baselines`.
 
 /// What ``ActivityLog/prune(olderThan:now:keepingUndoDepth:)`` removed.
 public struct ActivityPruneReport: Sendable, Hashable, Codable {

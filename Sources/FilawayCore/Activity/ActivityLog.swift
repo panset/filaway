@@ -398,14 +398,19 @@ public actor ActivityLog {
 
     // MARK: - Baselines (FR-3.2)
 
-    public func baseline(for noteID: NoteID) throws -> NoteBaseline? {
+    /// The stored baseline, or `nil` when the AI has never seen this note.
+    ///
+    /// `note_baselines` has no session column, so the round trip drops
+    /// ``OrganizedBaseline/sessionID`` — which is a label on the last advance,
+    /// not something the delta is computed from.
+    public func baseline(for noteID: NoteID) throws -> OrganizedBaseline? {
         try dbQueue.read { db in
             guard let row = try Row.fetchOne(
                 db,
                 sql: "SELECT * FROM note_baselines WHERE note_id = ?",
                 arguments: [noteID.uuidString]
             ) else { return nil }
-            return NoteBaseline(
+            return OrganizedBaseline(
                 noteID: noteID,
                 contentHash: row["content_hash"],
                 text: row["text"],
@@ -532,8 +537,13 @@ public actor ActivityLog {
 // MARK: - BaselineStore
 
 extension ActivityLog: BaselineStore {
-    public func setBaseline(noteID: NoteID, hash: String, text: String) throws {
-        try setBaseline(noteID: noteID, hash: hash, text: text, at: Date())
+    public func setBaseline(_ baseline: OrganizedBaseline) throws {
+        try setBaseline(
+            noteID: baseline.noteID,
+            hash: baseline.contentHash,
+            text: baseline.text,
+            at: baseline.updatedAt
+        )
     }
 }
 
@@ -546,11 +556,15 @@ public struct DatabaseBaselineStore: BaselineStore {
         self.log = log
     }
 
-    public func baseline(for noteID: NoteID) async throws -> NoteBaseline? {
+    public func baseline(for noteID: NoteID) async throws -> OrganizedBaseline? {
         try await log.baseline(for: noteID)
     }
 
-    public func setBaseline(noteID: NoteID, hash: String, text: String) async throws {
-        try await log.setBaseline(noteID: noteID, hash: hash, text: text)
+    public func setBaseline(_ baseline: OrganizedBaseline) async throws {
+        try await log.setBaseline(baseline)
+    }
+
+    public func removeBaseline(for noteID: NoteID) async throws {
+        try await log.removeBaseline(for: noteID)
     }
 }

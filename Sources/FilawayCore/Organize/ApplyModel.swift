@@ -2,8 +2,21 @@ import Foundation
 
 /// Applying a validated ``OrganizationPlan`` to the library.
 ///
-/// The protocol exists so `Organizer` (M2-05) can be tested against an
-/// in-memory double while the app wires up the real ``PlanApplier``.
+/// The one contract between ``Organizer`` (M2-05, which calls it) and
+/// ``PlanApplier`` (M2-07, which implements it) — see ADR-033. The protocol
+/// exists so the organizer's race-matrix tests can run against an in-memory
+/// double, and so nothing in the pipeline depends on a database being there.
+///
+/// The contract:
+///
+/// * **All or nothing.** Every note in ``OrganizationPlan/preconditions`` is
+///   checked against its current content hash first; one mismatch throws
+///   ``ApplyError/preconditionFailed(_:)`` and nothing is written. The organizer
+///   turns that into ``OrganizerEvent/stale(_:noteIDs:)`` and leaves the
+///   baseline where it was, so the next session covers the same delta again.
+/// * **Never destructive.** ``PlanAction/neverDeletesUserText`` is a property of
+///   the type; apply keeps it true on disk (FR-4.4).
+/// * **Undoable.** One plan is one Activity event and one Undo step (FR-4.3).
 public protocol PlanApplying: Sendable {
     /// Applies the plan, or changes nothing at all.
     ///
@@ -15,6 +28,10 @@ public protocol PlanApplying: Sendable {
 }
 
 /// Why an apply refused.
+///
+/// The single apply-error type (ADR-033): M2-05's `PlanApplyError` was folded
+/// into this one, keeping its ``io(_:)`` catch-all for anything the organizer
+/// sees that is not an `ApplyError` at all.
 public enum ApplyError: Error, Equatable, Sendable, CustomStringConvertible {
     /// Compare-and-swap miss: these notes changed after the plan was made, or
     /// a `moveSegment` segment is no longer in its source verbatim. Nothing was
@@ -29,6 +46,9 @@ public enum ApplyError: Error, Equatable, Sendable, CustomStringConvertible {
     /// The failure hook simulated a power cut: the applier stopped and left the
     /// journal row `inProgress` for ``PlanApplier/recoverIncompleteEvents()``.
     case simulatedCrash(String)
+    /// Anything else that stopped the apply — a filesystem error, or an error
+    /// from a ``PlanApplying`` that is not this applier. Content-free (NFR-4).
+    case io(String)
 
     public var description: String {
         switch self {
@@ -42,6 +62,8 @@ public enum ApplyError: Error, Equatable, Sendable, CustomStringConvertible {
             "Injected failure at \(step)."
         case let .simulatedCrash(step):
             "Simulated crash at \(step)."
+        case let .io(detail):
+            "The plan could not be applied (\(detail))."
         }
     }
 }
@@ -106,9 +128,17 @@ public struct TrashedNote: Sendable, Hashable, Codable {
 }
 
 /// The result of a successful apply (FR-4.2's card, FR-4.3's Activity row).
+///
+/// The one apply result (ADR-033): the per-action ``outcomes`` are what the card
+/// lists, and ``eventID`` is what "View changes" and Undo take. ``Organizer``
+/// stamps ``sessionID`` on the way past, because only it knows which session the
+/// plan came from.
 public struct AppliedPlan: Sendable, Hashable, Codable, Identifiable {
     /// The Activity event, which is also the journal record.
     public var eventID: ActivityEventID
+    /// The session the plan was made for. Set by ``Organizer``; `nil` when a
+    /// plan was applied outside the session pipeline.
+    public var sessionID: SessionID?
     /// One plain sentence, built from what actually happened rather than from
     /// what the model said it would do.
     public var summary: String
@@ -132,9 +162,11 @@ public struct AppliedPlan: Sendable, Hashable, Codable, Identifiable {
         createdFolders: [String] = [],
         trashedNotes: [TrashedNote] = [],
         changedPaths: [NoteID: String] = [:],
-        appliedAt: Date = Date()
+        appliedAt: Date = Date(),
+        sessionID: SessionID? = nil
     ) {
         self.eventID = eventID
+        self.sessionID = sessionID
         self.summary = summary
         self.outcomes = outcomes
         self.createdNotes = createdNotes
@@ -146,6 +178,11 @@ public struct AppliedPlan: Sendable, Hashable, Codable, Identifiable {
 
     /// `true` when every action ran.
     public var isComplete: Bool { outcomes.allSatisfy { $0.status == .applied } }
+
+    /// Notes that no longer exist after the apply — only ever a `moveSegment`
+    /// source the plan emptied and sent to the Trash. Their baselines are
+    /// removed rather than advanced.
+    public var removedNoteIDs: [NoteID] { trashedNotes.map(\.noteID) }
 }
 
 /// A point in the apply where a test can inject a failure — the only way to
