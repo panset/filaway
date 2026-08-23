@@ -29,7 +29,12 @@ let package = Package(
             // `PromptLibrary`. SwiftPM resources must live inside the target
             // directory, so these sit here rather than in a top-level
             // `Prompts/` folder as plan §2.7 sketched — see docs/decisions.md.
-            resources: [.copy("AI/Prompts")],
+            // `Resources/Models` carries the bundled Core ML embedder (M3-01):
+            // the 63.5 MB fp16 bge-small `.mlpackage`, its descriptor JSON and
+            // the WordPiece vocabulary. `.copy` keeps the `.mlpackage`
+            // directory intact — `MLModel.compileModel(at:)` needs it verbatim
+            // — and `EmbedderFactory` resolves it through `Bundle.module`.
+            resources: [.copy("AI/Prompts"), .copy("Resources/Models")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // Thin SwiftUI/AppKit shell. Swift 5 mode for AppKit interop, with

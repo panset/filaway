@@ -23,7 +23,7 @@ import GRDB
 /// | `v4-activity` | M2-08 | `activity_events`, `undo_events`, `note_baselines` |
 public enum DatabaseSchema {
     /// Bumped whenever the *last* migration changes; mirrored into `meta`.
-    public static let version = 3
+    public static let version = 4
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -107,6 +107,53 @@ public enum DatabaseSchema {
             }
             for sql in ftsTriggerStatements { try db.execute(sql: sql) }
         }
+
+        // M3-02 (FR-5.4). The semantic index: `chunks` holds the units the
+        // chunker produced, `embeddings` holds one vector per (chunk, model).
+        //
+        // * `source_hash` is the note's `content_hash` at the time it was
+        //   chunked, so "is this note up to date?" is one indexed query and no
+        //   third table is needed.
+        // * `text_hash` is the diff key: editing one paragraph re-embeds one
+        //   chunk, not the note (M3-02's incremental test).
+        // * `embeddings.model_id` is `Embedder.identifier`. Swapping models
+        //   costs a re-embed but never a re-read of the notes folder: the
+        //   chunk text is unchanged, and the old model's vectors are deleted
+        //   in the same pass.
+        // * `vector` is a Float16 BLOB — half the memory of Float32 at no
+        //   measurable ranking cost (ADR-023), stored as raw IEEE 754 binary16
+        //   so it is architecture-independent.
+        // Both tables cascade from `notes`, so every existing delete path
+        // (reconcile, folder removal, rebuild) unindexes for free.
+        migrator.registerMigration("v3-chunks") { db in
+            try db.execute(sql: """
+                CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY,
+                    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                    ordinal INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    heading_path TEXT NOT NULL DEFAULT '',
+                    language TEXT,
+                    range_start INTEGER NOT NULL,
+                    range_length INTEGER NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    text TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: "CREATE UNIQUE INDEX chunks_on_note_ordinal ON chunks(note_id, ordinal)")
+            try db.execute(sql: "CREATE INDEX chunks_on_note_hash ON chunks(note_id, text_hash)")
+
+            try db.execute(sql: """
+                CREATE TABLE embeddings (
+                    chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                    model_id TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    PRIMARY KEY (chunk_id, model_id)
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX embeddings_on_model ON embeddings(model_id)")
 
         // M2-07 / M2-08 (FR-4.3, FR-4.4, NFR-3). One table does double duty:
         // `activity_events` is both the user-visible Activity log *and* the

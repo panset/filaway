@@ -63,10 +63,26 @@ public struct EmbeddingModelDescriptor: Codable, Sendable, Equatable {
         self = try JSONDecoder().decode(Self.self, from: data)
     }
 
+    /// Version of the *identifier scheme* below. Bumping it forces every
+    /// library to re-embed even when the model itself did not change — the
+    /// escape hatch for "we changed how text reaches the model" (a new
+    /// chunk-context convention, a pooling fix in `convert.py`, a tokenizer
+    /// bug). It is not the model's version; that is ``model``/``name``.
+    public static let identifierVersion = 1
+
     /// Identifier stored next to every vector: changing any of these fields
-    /// changes the numbers, so it must invalidate the index.
+    /// changes the numbers, so it must invalidate the index (M3-02 re-embeds
+    /// every chunk whose `embeddings.model_id` differs from the active one).
     public var embedderIdentifier: String {
-        "coreml:\(name)/\(pooling)/\(dimension)d/s\(maxSequenceLength)/\(precision)"
+        "coreml:\(name)/\(pooling)/\(dimension)d/s\(maxSequenceLength)/\(precision)/v\(Self.identifierVersion)"
+    }
+
+    /// The query prefix this model family expects, or `""`.
+    ///
+    /// `bge-*-en-v1.5` is an asymmetric retriever; MiniLM and the
+    /// NaturalLanguage models are symmetric.
+    public var queryPrefix: String {
+        name.hasPrefix("bge-") ? "Represent this sentence for searching relevant passages: " : ""
     }
 
     /// Tokenizer settings implied by this model.

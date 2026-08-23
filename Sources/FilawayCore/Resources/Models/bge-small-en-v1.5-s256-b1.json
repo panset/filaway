@@ -1,0 +1,17 @@
+{
+  "model": "BAAI/bge-small-en-v1.5",
+  "fp16SafeMask": true,
+  "name": "bge-small-en-v1.5",
+  "dimension": 384,
+  "pooling": "cls",
+  "maxSequenceLength": 256,
+  "batchSize": 1,
+  "precision": "fp16",
+  "normalized": true,
+  "lowercase": true,
+  "vocabSize": 30522,
+  "packageBytes": 66577242,
+  "vocabBytes": 231508,
+  "coremltools": "9.0",
+  "torch": "2.7.0"
+}

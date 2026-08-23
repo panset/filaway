@@ -1205,3 +1205,176 @@ check costs nothing to repeat.
 - A smoke run gets an `InMemorySecretStore`. An unsigned bundle querying the
   real Keychain can prompt or fail, and a scripted run has no business writing
   the user's credential.
+
+## ADR-037 — The bge-small `.mlpackage` is committed as a `FilawayCore` resource
+
+**Date:** 2026-08-23 · **Task:** M3-01 · **Status:** accepted
+
+**Context.** ADR-012 chose `BAAI/bge-small-en-v1.5` and settled on shipping the
+`.mlpackage` (not a `.mlmodelc`) compiled at first launch. It did not settle how
+the 63.5 MB package *reaches* the app. The spike suggested a `make model` step
+that copies `Tools/embedder/out/` into a resource folder at build time, keeping
+the blob out of git.
+
+**Decision.** Commit the package. `Package.swift` gains
+`.copy("Resources/Models")` on the `FilawayCore` target, and
+`Sources/FilawayCore/Resources/Models/` holds three files:
+`bge-small-en-v1.5-s256-b1.mlpackage` (63.5 MB), its `EmbeddingModelDescriptor`
+JSON, and `bge-small-en-v1.5.vocab.txt`. `BundledEmbeddingModel` resolves them
+through `Bundle.module`; `Tools/embedder/install-model.sh` refreshes them after
+a re-conversion.
+
+A build-time copy step would have meant that a fresh clone does not build a
+working app, that CI cannot run the Core ML tests without a 3 GB PyTorch
+install, and that "which weights are in this build?" has no answer in the
+repository. One binary that changes only when `convert.py` changes is the
+cheaper problem.
+
+**Consequences.**
+- The repository gains ~64 MB, once. Every clone pays it; every later commit
+  does not, because the file only changes on a re-conversion. Git LFS is the
+  escape hatch if the model starts changing per release — it is not needed for a
+  file that has changed twice.
+- `swift build` now copies 64 MB into `.build`, and `Tools/make_app.sh` already
+  copies SwiftPM resource bundles into `Contents/Resources`, so the app picks it
+  up with no change.
+- The Core ML tests in CI stop being conditional: `EmbedderFactoryTests` asserts
+  the resource is present, so a build that loses the model fails loudly instead
+  of silently degrading to keyword-only. `EmbeddingsTests` keeps its
+  `Tools/embedder/out` skip, because that path also measures MiniLM.
+- Palettization (8-bit ≈ 33 MB) remains the lever if the DMG gets too big, still
+  gated on an M3-07 quality re-run.
+
+**Regeneration.** `Tools/embedder/regenerate.sh` was re-run for this task:
+torch↔Core ML cosine 0.999983–0.999988, over ADR-012's 0.999 gate.
+
+## ADR-038 — Vectors are binary16 bytes, converted with vImage, not Swift `Float16`
+
+**Date:** 2026-08-23 · **Task:** M3-03 · **Status:** accepted
+
+**Context.** Plan §1 stores embeddings as "vectors as BLOBs in SQLite + an
+in-memory Float16 matrix". The obvious Swift spelling is `[Float16]`. But
+`Float16` is **unavailable on x86_64 macOS** — the standard library guards it
+out — and plan §1 keeps Intel in scope (NFR-5, universal builds once Xcode is
+installed). Code that compiles on this arm64 machine would have failed the first
+universal build, months later, in a file nobody was looking at.
+
+**Decision.** Carry halves as `UInt16` bit patterns. `HalfVector.encode/decode`
+converts with `vImageConvert_PlanarFtoPlanar16F` /
+`vImageConvert_Planar16FtoPlanarF`, which exist on both architectures and are
+vectorised on both. `VectorStore` holds one hand-managed
+`UnsafeMutablePointer<UInt16>` (wrapped in a small class so the `deinit` is
+legal on an actor) and converts a block at a time into a Float32 scratch buffer
+for `vDSP_mmul`.
+
+`vDSP_mmul` rather than `cblas_sgemv`: the CBLAS entry points are deprecated
+without the ILP64 headers, and it is the same BLAS kernel underneath.
+
+**Consequences.**
+- Half the memory of Float32 for no measurable ranking cost: binary16 rounds at
+  the third decimal, which can swap two chunks whose cosines are within 5e-3.
+  `VectorStoreTests` asserts the *scores* match a Float32 brute-force reference
+  rather than the exact id order, which is the honest invariant.
+- The buffer is grown by doubling for incremental upserts and sized **exactly**
+  on a load — doubling on a 20,000-row load would have left 10 MB of slack and
+  made the memory report a lie.
+- Deletes tombstone a slot and the next upsert reuses it, so a note being edited
+  repeatedly never memmoves the matrix.
+- Measured: 20,000 chunks × 384-d = 15.4 MB resident, including the side arrays
+  and the chunk-id map; a real 20,000-note library on the synthetic corpus's
+  chunk density (340,000 chunks) is 273 MB, which is over NFR-2's ~200 MB. See
+  ADR-039 for why that density is a worst case and what the levers are.
+- Loading is lazy, so a user who only ever uses ⌘K keyword search pays none of
+  it — which is also what keeps the NFR-1 2 s launch budget intact.
+
+## ADR-039 — A heading starts a chunk only when the run in progress is big enough
+
+**Date:** 2026-08-23 · **Task:** M3-02 · **Status:** accepted
+
+**Context.** The obvious chunker splits at every heading and at every fence. Run
+that over a real corpus and the chunk count explodes: `filaway-bench index`
+produced **22 chunks per 2 KB note**, most of them 20–40 tokens. Because the
+bundled model is traced at a *fixed* sequence length of 256 (ADR-012), a
+40-token chunk costs exactly as much to embed as a 250-token one — so the
+explosion is a straight multiplier on index-build time and on the resident
+matrix.
+
+**Decision.**
+
+1. **A heading starts a new chunk only if the run in progress has reached
+   `minTokens` (64).** Otherwise the heading is absorbed and the run keeps
+   growing. A chunk that spans several small sections is filed under the heading
+   that introduces the bulk of it, and its text still contains every heading it
+   covers. This took the same corpus from 22 to 17 chunks per note, and a
+   changelog-shaped note from 9 chunks to 2.
+2. **Every fenced code block is still its own chunk**, unconditionally, with its
+   language, its heading path and the nearest preceding paragraph as context.
+   That is the FR-5.2 retrieval unit and is not negotiable for size.
+3. **Ranges are whole lines, in UTF-16.** swift-markdown reports columns as
+   UTF-8 byte offsets, which would need a second mapping to reach the editor's
+   coordinates; whole lines need only a line table, and a chunk boundary can
+   never land inside a grapheme.
+
+**Consequences.**
+- On the synthetic corpus (a code fence every fifth block — far denser than real
+  prose) 5,000 notes produce ~87,000 chunks. Real notes are nearer the plan's
+  ~4 per note. If a user's library really is that command-dense, the next levers
+  are raising `minTokens`, folding a sub-`minTokens` prose run into the code
+  chunk that follows it, and the seq-64 package for short chunks (2× throughput,
+  measured in the spike).
+- `maxChunks` (400) caps one pathological note; a 4,000-section note is
+  truncated rather than allowed to fill the index.
+- A chunk's `headingPath` is a breadcrumb and a weak retrieval signal, not an
+  index key — nothing depends on it being the deepest heading in the chunk.
+
+## ADR-040 — Hybrid ranking is RRF, and a date range filters before the top-k cut
+
+**Date:** 2026-08-23 · **Task:** M3-03 · **Status:** accepted
+
+**Context.** Plan §1 specifies "RRF(FTS5 BM25, vector) + temporal filter +
+recency prior". Two details it does not settle: why RRF rather than a weighted
+sum of normalised scores, and where in the pipeline the temporal filter goes.
+
+**Decision.**
+
+1. **RRF with k = 60**, over the *positions* in each candidate list. A cosine in
+   [-1, 1] and a BM25 score in (-∞, 0] are not on the same scale, and their
+   distributions move with every query — any fixed weighting is tuned to one
+   corpus and wrong on the next. RRF needs no normalisation and no per-corpus
+   tuning, and it gives a document both retrievers rank highly a win over one
+   that either ranks first alone, which is the whole point of a hybrid index.
+2. **The keyword arm ORs its terms**, where `SearchService.keyword` ANDs them
+   with a prefix on the last. As-you-type search is a *filter*; a
+   natural-language question is a *bag of evidence* that shares only a few words
+   with the note answering it. ANDing "what was the curl command for documents"
+   returns nothing, always.
+3. **A parsed date range is applied inside `VectorStore.topK`**, as an admission
+   filter, not after the cut. Filtering afterwards makes "the thing I edited
+   yesterday" come back empty whenever fifty newer chunks scored higher — the
+   exact query FR-5.3 exists for. The same gate carries FR-4.5's excluded
+   folders and any folder scope, so nothing excluded can reach M3-05's prompt.
+4. **The recency prior is a bounded multiplier and is off inside a hard range.**
+   `1 ... 1.2` on a 30-day half-life; inside a date range every note is equally
+   "when the user meant", so the prior would only add noise. "recently" swaps in
+   a 7-day curve with a 1.6 ceiling and no filter.
+5. **Note-level score is the best chunk's**, times a small bonus for extra
+   matching chunks (+8% each, capped at three). Three matching sections is
+   better evidence than one, but never enough to overturn a clearly better
+   single answer.
+
+**Consequences.**
+- `SemanticResults.usedVectors` is the FR-5.5/FR-6.4 signal. With no embedder
+  the whole path still works on BM25 alone, and says so.
+- The admission gate is resolved **once per note, into a `Set<NoteID>`**, not
+  evaluated per chunk. The first implementation called
+  `ExclusionFilter.isExcluded(path:)` — and therefore `PathRules.normalize` —
+  inside the vector scan, once per resident row: a date-filtered query over
+  20,000 notes took **580 ms**, of which 500 ms was string normalisation, against
+  80 ms for the same query unfiltered. Anything added to that gate must stay a
+  hash lookup.
+- `HybridSearch` caches note identity (title, path, mtime) against the
+  `notes_generation` counter, the way `SearchService` caches titles: the vector
+  arm needs every note's mtime *before* the cut, and one query per candidate
+  would be worse than one query per generation.
+- `promptChunks` (top 8) is the contract M3-05 builds `answer.v1` on; nothing
+  else about the shape of `RankedChunk` is load-bearing for it.

@@ -19,17 +19,34 @@ public protocol Embedder: Sendable {
     /// Dimension of every vector returned by ``embed(_:)``.
     var dimension: Int { get }
 
+    /// Text the model wants prepended to a **query** (never to a document).
+    ///
+    /// `bge-*-en-v1.5` is trained asymmetrically: passages are embedded raw,
+    /// questions with `"Represent this sentence for searching relevant
+    /// passages: "`. Because it only ever touches the query side, it does *not*
+    /// belong in ``identifier`` — stored vectors are unaffected, so turning it
+    /// on or off never invalidates the index (M3-01; M3-07 measures both).
+    var queryPrefix: String { get }
+
     /// Embeds `texts` in order. The result has one vector per input.
     func embed(_ texts: [String]) async throws -> [[Float]]
 }
 
 extension Embedder {
+    /// Most models are symmetric and want no prefix at all.
+    public var queryPrefix: String { "" }
+
     /// Convenience for the single-text case.
     public func embed(_ text: String) async throws -> [Float] {
         guard let vector = try await embed([text]).first else {
             throw EmbedderError.emptyResult
         }
         return vector
+    }
+
+    /// Embeds `text` as a *search query*, applying ``queryPrefix``.
+    public func embedQuery(_ text: String) async throws -> [Float] {
+        try await embed(queryPrefix + text)
     }
 }
 

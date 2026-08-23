@@ -58,6 +58,17 @@ public actor MetadataStore {
     /// `DatabasePool`.
     public nonisolated var reader: any DatabaseReader { dbQueue }
 
+    /// A write handle onto the same database, for subsystems that own their own
+    /// tables and their own transaction shapes.
+    ///
+    /// ``Indexer`` (M3-02) writes `chunks`/`embeddings` through this: it must
+    /// batch, cancel and back off on its own schedule, and routing that through
+    /// this actor's mailbox would put a 5,000-note reindex in front of every
+    /// autosave. GRDB still serialises the two on one connection, so the rule
+    /// for anyone using this is the same as for ``reader``: keep each
+    /// transaction short.
+    public nonisolated var writer: any DatabaseWriter { dbQueue }
+
     /// Opens (creating if needed) the database for a library and migrates it.
     ///
     /// - Parameter textLoader: how the store fetches a note's body when it needs

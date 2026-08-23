@@ -20,6 +20,9 @@ public actor CoreMLEmbedder: Embedder {
     public nonisolated let maxSequenceLength: Int
     /// Fixed batch dimension of the underlying package.
     public nonisolated let modelBatchSize: Int
+    public nonisolated let queryPrefix: String
+    /// The descriptor the package was converted with.
+    public nonisolated let descriptor: EmbeddingModelDescriptor
 
     private let model: MLModel
     private let tokenizer: WordPieceTokenizer
@@ -44,6 +47,8 @@ public actor CoreMLEmbedder: Embedder {
         dimension = descriptor.dimension
         maxSequenceLength = descriptor.maxSequenceLength
         modelBatchSize = descriptor.batchSize
+        queryPrefix = descriptor.queryPrefix
+        self.descriptor = descriptor
     }
 
     /// What the app does at first launch: compile the `.mlpackage` if the cache
