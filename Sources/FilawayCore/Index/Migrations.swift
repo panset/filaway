@@ -154,6 +154,7 @@ public enum DatabaseSchema {
                 )
                 """)
             try db.execute(sql: "CREATE INDEX embeddings_on_model ON embeddings(model_id)")
+        }
 
         // M2-07 / M2-08 (FR-4.3, FR-4.4, NFR-3). One table does double duty:
         // `activity_events` is both the user-visible Activity log *and* the
