@@ -19,7 +19,8 @@ Requirement IDs refer to `docs/spec/functional-spec.html`; amendments refer to
 | `Organizer` | actor | FR-3.2 — baselines, in-flight, pending, dirty, the queue |
 | `OrganizeContextBuilder` | struct | the user half of the prompt, inside a token budget |
 | `OrganizeRequestBuilder` | enum | the `AIRequest` (model, tool, effort, timeout) |
-| `TitleOverlapCandidateFinder` | struct | Phase-1 merge-target ranking (M3-08 replaces it) |
+| `TitleOverlapCandidateFinder` | struct | M2 merge-target ranking, from titles and folders alone |
+| `HybridCandidateFinder` | struct | M3-08 — the same ranking through the semantic index |
 | `BaselineStore`, `PendingSessionStore`, `PlanApplying`, `OrganizeLibrarySource`, `CandidateFinder` | protocols | everything the pipeline needs from other milestones |
 
 ---
@@ -288,6 +289,52 @@ losing one costs a possible merge, while losing session text costs the plan.
 
 Every reduction is recorded in `OrganizeRequestContext.truncations`, so a prompt
 that is quietly running hot is visible in a test rather than in a bill.
+
+### Finding candidates (M3-08)
+
+`CandidateFinder` is the seam. Two implementations ship:
+
+```swift
+Organizer(…, candidateFinder: TitleOverlapCandidateFinder())          // M2 default
+Organizer(…, candidateFinder: HybridCandidateFinder(hybrid: hybrid))  // M3-08
+```
+
+`TitleOverlapCandidateFinder` scores word overlap between the session text and
+each note's title, folder and tags. It needs no index, so it works on first
+launch and before M3 exists — but a scratch note full of `kubectl` will never
+find `Commands/Kubernetes` unless the word is in the title.
+
+`HybridCandidateFinder` asks the same `HybridSearch` actor ⌘K uses: the session
+text (titles first, capped at `queryCharacterLimit`, since the embedder runs at
+a fixed 256-token sequence) goes in, ranked notes come back. The recency prior
+is switched off — "two days ago" written *inside* someone's notes is not a
+filter — and the context's own `ExclusionFilter` is applied on top of the fact
+that excluded folders are never indexed (FR-4.5, twice over). Only notes present
+in the `OrganizeContext` are returned, so a stale index row can never become an
+`.unknownNote` in a plan.
+
+**An empty or unavailable index falls through to `fallback`** (the title finder
+by default) rather than to an empty list. Returning nothing would leave the
+model with no merge targets at all and start it creating near-duplicates — the
+exact sprawl FR-4.6 exists to prevent.
+
+**Injecting it.** The organizer takes it at construction, so the app wires it
+where it builds the `Organizer`:
+
+```swift
+let finder = hybrid.map { HybridCandidateFinder(hybrid: $0) } ?? nil
+let organizer = Organizer(
+    provider: provider, source: source, baselines: baselines, applier: applier,
+    candidateFinder: finder ?? TitleOverlapCandidateFinder(),
+    settings: organizerSettings
+)
+```
+
+In `FilawayApp` the `HybridSearch` instance is
+`AppModel.shared.semanticSearch.hybrid`, which is `nil` until the retrieval
+stack has finished loading — so read it at the point the organizer is built, and
+keep the `TitleOverlapCandidateFinder()` default for the case where it is not up
+yet.
 
 ### The request
 

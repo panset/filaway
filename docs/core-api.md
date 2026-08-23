@@ -657,6 +657,202 @@ Notes for the UI layer:
 
 ---
 
+## Answers — `AnswerExtractor`, `SemanticSearchService` (M3-05, FR-5.2/5.5)
+
+Retrieval above is entirely offline and ends at `SemanticResults.promptChunks`.
+This is the step that turns those eight chunks into Figure 2b's **best-match
+answer card**, and the one place in search that talks to Claude.
+
+| Type | Kind | Owns |
+|---|---|---|
+| `AnswerSelection` | namespace | The strict tool, its schema and its decoder. |
+| `AnswerPrompt` | namespace | Rendering `promptChunks` into the user message. |
+| `AnswerHeuristic` | value | The offline card (FR-5.5). |
+| `AnswerExtractor` | actor | One answer: request, budget, fallback, ledger. |
+| `SemanticSearchService` | actor | The façade the ⌘K panel calls. |
+
+### Wiring it up
+
+```swift
+let extractor = AnswerExtractor(
+    provider: try AIProviderFactory.make(mode: .current(), store: store, keySource: keys),
+    ledger: ledger,
+    configuration: .init(model: settings.effectiveSearchModel)   // claude-haiku-4-5
+)
+let search = SemanticSearchService(
+    hybrid: hybrid,
+    extractor: extractor,
+    gate: .init(isEnabled: { settings.semanticSearchEnabled },
+                isProviderReady: { status == .connected })
+)
+
+let outcome = await search.search("curl command to fetch documents")
+outcome.card?.snippetText        // the command, verbatim
+outcome.card?.chunkRange         // FR-5.2 scroll-to
+outcome.availability.notice      // nil, or the FR-5.5 line
+```
+
+### `AnswerExtractor` (M3-05)
+
+```swift
+init(provider: any AIProvider, ledger: AIUsageLedger? = nil,
+     configuration: Configuration = .init(), clock: any AIClock = SystemClock())
+
+struct Configuration { var model = AIModel.defaultSearch      // claude-haiku-4-5
+                       var promptVersion = PromptVersion.answer
+                       var maxTokens = 600
+                       var timeout: TimeInterval = 5          // NFR-1
+                       var promptsDirectory: URL?
+                       var heuristic = AnswerHeuristic() }
+
+func extract(query: String, results: SemanticResults, now: Date = Date()) async -> AnswerResult
+func request(query: String, chunks: [RankedChunk]) throws -> AIRequest
+func setModel(_:) / func setTimeout(_:)
+static func localAnswer(query:results:reason:heuristic:latency:) -> AnswerResult
+```
+
+```swift
+struct AnswerResult { let card: AnswerCard?
+                      let rankedNotes: [RankedNote]
+                      let source: AnswerSource            // .claude | .localHeuristic | .none
+                      let confidence: AnswerConfidence    // .low | .medium | .high
+                      let latency: TimeInterval
+                      let unavailable: SemanticUnavailable?
+                      let promptVersion: PromptVersion?; let model: AIModel? }
+
+struct AnswerCard { let noteID: NoteID
+                    let title, relativePath: String; let modified: Date
+                    let chunkID: Int64; let chunkRange: MatchRange
+                    let snippetText: String                // what Copy copies
+                    let language: String?; let isCode: Bool
+                    let headingPath: [String]
+                    var sourceLabel: String }              // "Commands / curl"
+```
+
+The request is fixed by `AnswerExtractor.request(query:chunks:)`:
+
+| Field | Value | Why |
+|---|---|---|
+| `model` | `effectiveSearchModel`, default `claude-haiku-4-5` | keeps the card under 5 s (NFR-1) |
+| `system` | `answer.v1` | §9 prompt versioning |
+| `messages` | the numbered chunks, `[1]…[8]` | `AnswerPrompt.userMessage` |
+| `tools` | `AnswerSelection.tool`, `strict: true` | the model must not answer in prose |
+| `maxTokens` | 600 | a card is small; a truncated one is unusable |
+| `thinking` / `effort` | **omitted** for Haiku | pre-4.6 `budget_tokens` contract |
+| `timeout` | 5 s, configurable | raced here, not left to the provider |
+
+Five properties the UI layer can rely on:
+
+* **`extract` never throws and always returns inside the budget.** The provider
+  races a sleeping task; a loss is `AnswerSource.localHeuristic`, not an error.
+  Offline, rate limited, refused, truncated, a missing recording, a hallucinated
+  chunk number — all of them land on the same local arm and report why through
+  `AnswerResult.unavailable`.
+* **A cancelled search returns `.none`, not a stale card.**
+* **It never invents a command.** A `snippet` the model reports is used only
+  when `AnswerSnippet.isVerbatim` finds it in the chunk the model chose;
+  otherwise the chunk's own fenced body is shown. That is the one assertion
+  worth keeping if the prompt is ever rewritten.
+* **Chunk ids in the prompt are 1-based positions, not database rows.** Short
+  integers are counted more reliably, and a reindex cannot move a fixture key.
+  Anything outside `1...chunkCount` is dropped rather than trusted.
+* **The card's own note never repeats in `rankedNotes`**, and notes the model
+  did not rank keep their retrieval order at the end — a short ranking never
+  loses results.
+
+Usage is recorded against `AIPurpose.search` (FR-6.6), with the provider's own
+identifier, so replayed and mocked calls stay out of billed totals.
+
+### `AnswerHeuristic` — the offline card (FR-5.5)
+
+```swift
+AnswerHeuristic(scoreMargin: 0.15, wordCoverage: 0.6, maxSnippetLines: 24)
+func card(query: String, chunks: [RankedChunk]) -> AnswerCard?
+func accepts(query:chunks:) -> Bool / func margin(of:) / func coverage(of:in:)
+```
+
+The top chunk becomes a card when **either** it is a code chunk that beat the
+runner-up by `scoreMargin`, **or** `wordCoverage` of the query's content words
+appear in it. Everything else is `nil` — "No good match" above the list. A wrong
+card reads as an answer; a missing one reads as "look at the list", so guessing
+is the more expensive mistake.
+
+`AnswerSnippet` does the trimming: `fencedBody(in:)` strips the fences and the
+context paragraph the chunker glued on for the embedder's benefit, `limit(_:lines:)`
+caps it, and `isVerbatim(_:in:)` is the never-invent check.
+
+### `SemanticSearchService`
+
+```swift
+init(hybrid: HybridSearch, extractor: AnswerExtractor?,
+     options: HybridSearch.Options = .init(), gate: Gate = .open,
+     heuristic: AnswerHeuristic = .init(), clock: any AIClock = SystemClock())
+
+func candidates(_ query: String, now: Date = Date()) async -> SemanticResults
+func answer(for query: String, results: SemanticResults, now: Date = Date())
+    async -> (answer: AnswerResult, availability: SemanticAvailability)
+func search(_ query: String, now: Date = Date()) async -> SemanticSearchOutcome
+func setExclusions(_:) / func setOptions(_:) / func setGate(_:)
+```
+
+```swift
+enum SemanticAvailability { case online, offline(SemanticUnavailable)
+                            var notice: String? }
+enum SemanticUnavailable { case semanticSearchDisabled, notConfigured, noProvider,
+                                network, rateLimited, timedOut, providerError
+                           var notice: String }
+```
+
+`search(_:)` is retrieval then the answer step, for tests and the bench. **The
+UI calls the two halves separately**: `candidates` lands in tens of milliseconds
+and the panel paints the ranked list immediately, then `answer` upgrades it to a
+card. Nothing on screen ever waits for Claude.
+
+`Gate` is evaluated per search, so the Settings toggle and a key change take
+effect without a restart. Blocked gates skip the network entirely and answer
+from `AnswerHeuristic`, which is why FR-5.5's "keyword search works offline"
+extends to semantic *retrieval* working offline too.
+
+`SemanticUnavailable.notice` is the exact string the panel shows:
+`"Connect your AI in Settings to get answers"` when it is actionable,
+`"Semantic answers unavailable offline — showing local matches"` when it is not.
+
+### FR-4.5, structurally
+
+Excluded folders are never indexed, so nothing in one can reach `promptChunks`,
+so nothing in one can reach a prompt. `SemanticSearchServiceTests` asserts it end
+to end — index a note under `Private/`, search for its distinctive text, and
+check both `promptChunks` and the encoded request body. `AnswerGoldenTests`
+greps every committed `search/` fixture for the same string.
+
+### Prompt and fixtures
+
+`Sources/FilawayCore/AI/Prompts/answer.v1.txt`, loaded through `PromptLibrary`
+like `organize.v1`. Five committed replay fixtures live in
+`Tests/Fixtures/ai-recordings/search/`:
+
+| Scenario | What it pins |
+|---|---|
+| `curl-code-card` | Figure 2b — the command comes back as the card's snippet |
+| `temporal-auth` | FR-5.3 — a date-filtered query with no snippet: prose card + ranking |
+| `no-answer` | `best_chunk_id: null` is a real answer, and the list still stands |
+| `trimmed-snippet` | a three-line fence trimmed to the one line asked about |
+| `invented-snippet` | a command that is not in the chunk never reaches the card |
+
+The requests are captured from the real builder; the responses are
+hand-authored, because this machine has no key.
+
+```bash
+FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter "regenerate the answer goldens"
+FILAWAY_AI_MODE=record       swift test --filter "Answer goldens"   # once a key exists
+```
+
+Timeout, offline, rate-limit, refusal and cancellation are **not** fixtures —
+they are provider behaviours, and live on `MockProvider` in
+`AnswerFallbackTests`.
+
+---
+
 ## `LaunchTimer` (M1-07)
 
 ```swift

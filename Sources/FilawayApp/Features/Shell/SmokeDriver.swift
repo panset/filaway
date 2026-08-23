@@ -38,6 +38,7 @@ enum SmokeDriver {
         Task { @MainActor in
             // Let the scene build and `AppModel.bootstrap()` finish.
             await settle(seconds: 1.0)
+            await openLibraryIfTheSceneDidNot()
             switch phase {
             case "editor": await runEditorPhase()
             case "search": await runSearchPhase()
@@ -48,6 +49,31 @@ enum SmokeDriver {
             default: await runCapturePhase()
             }
         }
+    }
+
+    /// `ShellView.task` is what normally calls `AppModel.bootstrap()`, and it
+    /// only runs once SwiftUI has built the scene — which needs a window, which
+    /// needs a session that can talk to the window server.
+    ///
+    /// A smoke run launched from a detached shell (ssh, a CI step with no Aqua
+    /// session, an agent's terminal) never gets one, and every phase then fails
+    /// on an unopened library rather than on the thing it is testing. Opening it
+    /// here is idempotent — `bootstrap()` returns early once the store exists —
+    /// so on a normal launch this is a no-op, and on a headless one it recovers
+    /// everything that does not need a view (plan §8: the harness has to work
+    /// on a locked screen).
+    private static func openLibraryIfTheSceneDidNot() async {
+        let model = AppModel.shared
+        guard model.store == nil else { return }
+        print("SMOKE info scene-not-up — opening the library from the driver")
+        await model.bootstrap()
+        _ = await poll(seconds: 15) { model.isLoaded }
+    }
+
+    /// `true` when SwiftUI actually built a window. The view-level assertions
+    /// (editor scrolling, first responder) cannot mean anything without one.
+    static var hasWindow: Bool {
+        NSApp.windows.contains { $0.contentView != nil }
     }
 
     /// Called from `applicationWillTerminate` so the exit status reflects the

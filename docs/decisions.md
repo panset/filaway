@@ -1378,3 +1378,154 @@ sum of normalised scores, and where in the pipeline the temporal filter goes.
   would be worse than one query per generation.
 - `promptChunks` (top 8) is the contract M3-05 builds `answer.v1` on; nothing
   else about the shape of `RankedChunk` is load-bearing for it.
+
+---
+
+## ADR-041 — The answer card has a local arm, and the Claude arm is raced against a clock
+
+**Date:** 2026-08-23 · **Task:** M3-05 · **Status:** accepted
+
+**Context.** NFR-1 gives semantic search a 5 s budget and FR-5.5 says keyword
+search must work when the provider does not. The naive reading — "call Haiku,
+show the card, show an error if it fails" — fails both: a slow call blows the
+budget, and an outage turns a search that has perfectly good local results into
+an error sheet.
+
+**Decision.**
+
+1. **`AnswerExtractor.extract` never throws and always returns.** Every failure
+   — offline, 401, 429, a refusal, a `max_tokens` truncation, a missing replay
+   fixture, a hallucinated chunk number, the prompt resource being unreadable —
+   produces an `AnswerResult` from the local arm with `unavailable` set. There is
+   no error path for a caller to handle.
+2. **The provider races a sleeping task**, `configuration.timeout` (5 s), inside
+   the extractor. The provider's own timeout is a backstop; a `ReplayProvider` or
+   a `MockProvider` has none, and the budget is a property of the *feature*, not
+   of the transport.
+3. **The local arm is `AnswerHeuristic`**: the top chunk becomes a card when it
+   is a code chunk that beat the runner-up by a relative margin of 0.15, or when
+   0.6 of the query's content words appear in it. Otherwise there is no card.
+   Guessing badly is the more expensive mistake — a wrong card reads as an
+   answer, a missing one reads as "look at the list".
+4. **`SemanticSearchService` splits retrieval from the answer**, and the UI calls
+   the halves separately. The ranked list is painted from `candidates` in tens of
+   milliseconds; the card upgrades it when `answer` returns. Nothing on screen
+   ever waits for Claude, so the 5 s budget is a ceiling on the *card*, not on
+   the search.
+5. **A blocked gate skips the network entirely.** Semantic search off, no key, no
+   provider — all three answer from the heuristic without a request, and report
+   which through `SemanticAvailability`, whose `notice` string is what the panel
+   renders.
+
+**Consequences.**
+- Timeout, offline, rate-limit, refusal and cancellation are tested on
+  `MockProvider`, not as fixtures: they are transport behaviours, exactly as
+  ADR-… had it for the 429 path in M2-02.
+- `AnswerSource` is on every result, so the panel (and a later Activity entry)
+  can tell a Claude card from a local one without inspecting `unavailable`.
+- Cancellation is the one failure that produces `.none` rather than a local
+  card: a cancelled search has been superseded, and a stale card is worse than
+  nothing.
+- The heuristic is a real fallback, not a stub, which means it needs its own
+  tests — and it gets them on synthetic chunk lists where the margins are
+  chosen, not measured.
+
+---
+
+## ADR-042 — Prompt chunks are numbered, and a reported snippet must be verbatim
+
+**Date:** 2026-08-23 · **Task:** M3-05 · **Status:** accepted
+
+**Context.** `answer.v1` has to name the chunk it chose and hand back the exact
+text to put in Figure 2b's code block. Two ways to identify a chunk: its
+`chunks.id` row, or its position in the list the prompt shows. And one hard
+requirement from the spec's own wording — the card is a command someone will
+paste into a terminal.
+
+**Decision.**
+
+1. **Chunks are addressed by 1-based position in the prompt**, `[1]…[8]`, not by
+   row id. Models count short integers far more reliably than six-digit ones; a
+   6-digit id costs tokens in both directions; and — decisively — a replay
+   fixture's key is a hash of the rendered request, so row ids would move the key
+   every time a note was reindexed. Anything outside `1...chunkCount` is dropped
+   rather than trusted, so a hallucinated number is a missing card, never a card
+   pointing at the wrong note.
+2. **A `snippet` the model reports is shown only if it is in the chunk.**
+   `AnswerSnippet.isVerbatim` compares after stripping indentation and blank
+   lines; a miss falls back to the chunk's own fenced body and logs. The prompt
+   says "never write a command that is not in the chunk" — this is the part that
+   does not depend on the prompt being obeyed.
+3. **The prompt renders `edited:` as an ISO-8601 instant.** It is the only field
+   that makes the request non-deterministic, and it earns its place: FR-5.3
+   queries are about *when*, and the model has to be able to say which of two
+   near-identical chunks is the one from Tuesday.
+4. **The goldens are built from hand-written `SemanticResults`, not from a live
+   index.** A fixture key derived from a real index moves whenever the chunker,
+   the embedder or a file's mtime moves, and the test would then be pinning the
+   index rather than the answer. Retrieval has its own end-to-end suites.
+
+**Consequences.**
+- `AnswerPrompt.userMessage` is part of the fixture key by construction: a
+  layout change is a fixture miss, which is the intended behaviour (plan §9).
+- The card's `snippetText` is what Copy puts on the pasteboard, and it is
+  guaranteed to exist somewhere in the note. That is a property a user can rely
+  on, and one the `invented-snippet` golden pins.
+- Chunk text is clipped at 1,400 characters so eight chunks cannot blow Haiku's
+  budget on a note that is one enormous fence.
+
+---
+
+## ADR-043 — ⏎ is the semantic trigger, and the answer card is the first selectable item
+
+**Date:** 2026-08-23 · **Task:** M3-06 · **Status:** accepted
+
+**Context.** FR-5.1 wants one search bar with two behaviours and "no
+mode-switching friction", and leaves the trigger heuristics to the design spec.
+ADR-034 left `SearchMode.semantic` as a declared seam with the panel as a pure
+function of `SearchCoordinator`'s state.
+
+**Decision.**
+
+1. **Typing is always keyword. ⏎ is the semantic trigger** — on a query that
+   ends in "?", starts with a wh-word, or simply has two or more words. Anything
+   else opens the selected hit, as in M1. The heuristic is deliberately generous:
+   a semantic search the user did not mean still shows the same notes, and Find
+   is one click away.
+2. **A visible Find/Ask segmented toggle** in the panel header is the explicit
+   override, remembered for the session (not persisted — the toggle should stick
+   while the user is in a rhythm and reset on the next launch). Switching keeps
+   the text and re-runs in the new mode. A "Press ⏎ to ask" hint appears in the
+   caption while a multi-word query sits in Find mode.
+3. **The answer card is item 0 of the selection**, not a header above the list.
+   ↑/↓ walk it, ⏎ opens the note scrolled to `chunkRange`, and ⌘C copies the
+   snippet. Anything else would make the most useful result the one thing the
+   keyboard cannot reach.
+4. **Two-stage publication.** `runSemantic` publishes the local hybrid ranking as
+   soon as retrieval returns, then replaces it with the model's ranking and the
+   card. The generation counter that made "latest wins" true for keyword search
+   guards both stages.
+5. **Typing in Ask mode retires the answer** but does not run a new one. A
+   partial question is not a question, and each one costs money.
+6. **`semanticSearchEnabled == false` hides Ask entirely** — no toggle, and ⏎
+   opens the selection. The setting is read per query, so it takes effect
+   without a restart.
+
+**Consequences.**
+- `SearchCoordinator.selectedIndex` now indexes `items`, a union of the card and
+  the rows, rather than `results`. `selectedHit` stayed keyword-only so the M1
+  smoke assertions still mean what they meant.
+- `SemanticSearchCoordinator` is a separate object from `AppModel`: the shell
+  only has to start it and tell it when a note changed. It also resolves
+  `SettingsModel.shared` **lazily** — `AppModel` is constructed before
+  `NSApplicationMain`, and reaching for the settings there drags a `Library`, a
+  Keychain-backed connection manager and the ledger's SQLite file onto the launch
+  path (NFR-1).
+- The `semantic` smoke phase scripts the provider rather than replaying a
+  fixture. A replay key hashes the rendered prompt, which contains the *indexed*
+  chunks, so a committed fixture would break the first time the chunker or the
+  embedder moved. The scripted provider reads the prompt it is given and answers
+  from it, which tests the rendering too; the prompt→tool contract itself is
+  pinned offline by `AnswerGoldenTests`.
+
+---

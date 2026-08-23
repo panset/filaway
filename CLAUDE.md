@@ -44,6 +44,10 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  clamps; AIConnectionManager walks
 #                                  notConfigured -> connected -> notConfigured
 # -> === smoke phase: settings2 ==  relaunch: those preferences persisted
+# -> === smoke phase: semantic === ⌘K Ask on a corpus with fixed mtimes: ⏎ →
+#                                  answer card, Copy → pasteboard, ⏎ → note
+#                                  scrolled to the chunk, the temporal filter,
+#                                  and the offline notice (M3-06)
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
@@ -64,7 +68,8 @@ and state restoration. Add a `check(...)` line for each new UI behaviour that
 cannot be unit-tested: shell behaviour in
 `Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
 `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, search behaviour in
-`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`.
+`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`, semantic search in
+`Sources/FilawayApp/Features/Search/SemanticSmokeCheck.swift`.
 
 CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
@@ -209,10 +214,18 @@ pure function of that state. Full rationale in ADR-034.
   `AppModel.reveal`, which `ShellView` turns into
   `MarkdownEditorController.scrollTo(range:)`. Hits inside the note already open
   work the same way. A title-only hit (`matchRange == nil`) opens at the top.
-- **`SearchMode.semantic` is a declared, unimplemented extension point for
-  M3-06.** Nothing in M1 sets it. The answer card and Find/Ask toggle belong at
-  the `// MARK: - Extension point (M3-06)` marker in `SearchResultsPanel`.
-  Keyword search must keep working with no AI and no network at all (FR-5.5).
+- **`SearchMode.semantic` is live (M3-06).** Typing is always keyword; ⏎ on a
+  multi-word query, one ending in "?" or starting with a wh-word switches to Ask
+  and runs it, and a Find/Ask toggle in the panel header is the explicit
+  override (remembered for the session). Ask is two-staged — the local hybrid
+  ranking paints immediately, the answer card upgrades it when the extractor
+  returns — so nothing ever blocks on Claude. The card is *item 0* of the
+  selection: ↑/↓ walk it, ⏎ opens the note scrolled to its chunk, ⌘C copies the
+  snippet. Keyword search keeps working with no AI and no network at all
+  (FR-5.5), and so does semantic *retrieval*: only the card needs a provider.
+  `SemanticSearchCoordinator` owns the embedder/index/vectors/hybrid/extractor
+  stack and is fed from autosave, the watcher and `excludedFolders`. See
+  ADR-041…043.
 
 ## Current state
 
@@ -230,10 +243,16 @@ are blocked on Developer Program enrolment + Xcode (M4-05); the visual Figure-1/
 Figure-2b and VoiceOver passes need an unlocked screen (M4-06); launch timing at
 5k/20k notes is unmeasured (M4-07).
 
-Next up: **M2** (AI organize) and **M3** (semantic search, which fills
-`SearchMode.semantic`). The onboarding folder picker is M4-01, so the notes root
-is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a
-bookmark.
+**M3-05/06/08 are in.** `FilawayCore/Search/Answer*.swift` turns
+`SemanticResults.promptChunks` into Figure 2b's answer card via `answer.v1` and
+the strict `answer_selection` tool on Haiku 4.5, inside a 5 s budget with a
+local heuristic behind it; `SemanticSearchService` is the façade the ⌘K panel
+calls, and `Organize/HybridCandidateFinder` swaps the organizer's merge-target
+retrieval onto the same hybrid ranker (M3-08). See `docs/core-api.md`
+§ "Answers" and `docs/organize.md` § "Finding candidates".
+
+The onboarding folder picker is M4-01, so the notes root is `~/Notes` (override
+with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
 
 **M2-11 Settings** is in: a `Settings` scene (⌘,) with General / AI / Activity,
 the AI pane built to Figure 4, and `FilawayCore/Settings/` holding `AppSettings`
@@ -245,8 +264,17 @@ rewrite files other agents own:
 - **`AIStatusPill`** exists in `Features/Settings/` and is not in the toolbar.
   One line in `ShellView`: `ToolbarItem(placement: .status) { AIStatusPill(status:
   …) }`, fed from `AIConnectionManager.statusChanges()`.
-- **Nothing reads the preferences yet.** The Organizer, `SessionTracker` and the
-  Indexer should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
+- **`Settings → Rebuild index` is not wired.**
+  `SemanticSearchCoordinator.rebuildAll()` exists and does the whole job
+  (rebuild, reload vectors, invalidate the ranker); the Settings pane just has
+  to call it (FR-5.4).
+- **The Organizer does not take `HybridCandidateFinder` yet.** Whoever builds
+  the `Organizer` passes
+  `AppModel.shared.semanticSearch.hybrid.map(HybridCandidateFinder.init(hybrid:))`,
+  keeping `TitleOverlapCandidateFinder()` as the default for the window before
+  the retrieval stack is up. One line — see `docs/organize.md`.
+- **Nothing reads the preferences yet.** The Organizer and `SessionTracker`
+  should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
   the app's own `AppSettings` shadows it, ADR-035) and subscribe with
   `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
   `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
