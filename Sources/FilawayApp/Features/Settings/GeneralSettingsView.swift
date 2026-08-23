@@ -39,6 +39,19 @@ struct GeneralSettingsView: View {
                 }
             }
 
+            Section("Editing") {
+                SettingsRow(
+                    title: "Paste intelligence",
+                    detail: "When something you paste looks like a shell command or code, "
+                        + "offer to wrap it in a code block (⌘⇧K). The text is always pasted first."
+                ) {
+                    Toggle("Paste intelligence", isOn: model.pasteIntelligenceEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .accessibilityLabel("Offer to wrap pasted commands in a code block")
+                }
+            }
+
             Section("Index") {
                 SettingsRow(
                     title: "Rebuild index",

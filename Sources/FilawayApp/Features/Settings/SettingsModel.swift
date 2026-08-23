@@ -95,6 +95,11 @@ final class SettingsModel: ObservableObject {
         binding({ $0.semanticSearchEnabled }, { $0.semanticSearchEnabled = $1 })
     }
 
+    /// FR-2.4's switch (M4-03).
+    var pasteIntelligenceEnabled: Binding<Bool> {
+        binding({ $0.pasteIntelligenceEnabled }, { $0.pasteIntelligenceEnabled = $1 })
+    }
+
     var advancedModelOverride: Binding<Bool> {
         binding({ $0.advancedModelOverride }, { $0.advancedModelOverride = $1 })
     }
