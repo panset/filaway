@@ -466,7 +466,7 @@ A live failure (`offline`, `rateLimited`) is more specific than "the key
 validates", so a `connected` report only clears `notConfigured` / `invalidKey`.
 Nothing is rebuilt when the key changes — `APIKeySource` reads the Keychain on
 every request — but `Organizer.aiStatusChanged(_:)` is told, and it drains the
-queue as soon as the status is usable. ADR-058.
+queue as soon as the status is usable. ADR-059.
 
 Queued sessions live in `pending_sessions` and are retried on a 60 s loop, on
 `aiStatusChanged(.connected)`, and once at launch. No modal alert anywhere, and
