@@ -96,6 +96,11 @@ public struct ProposedPlan: Sendable, Hashable, Identifiable {
     /// Text of each session note when the plan was made. Dismissing advances
     /// the baseline to exactly this (the user said "no" to *this* content).
     public var snapshotTexts: [NoteID: String]
+    /// What the user actually wrote in this session — the union of every
+    /// delta's `addedText`, in note order. Carried this far so the apply can
+    /// file it with the Activity event (FR-4.4); `nil` when the plan did not
+    /// come from a session.
+    public var sessionText: String?
 
     public init(
         id: ProposalID = ProposalID(),
@@ -105,8 +110,10 @@ public struct ProposedPlan: Sendable, Hashable, Identifiable {
         droppedActions: [PlanIssue] = [],
         proposedAt: Date,
         noteIDs: [NoteID],
-        snapshotTexts: [NoteID: String]
+        snapshotTexts: [NoteID: String],
+        sessionText: String? = nil
     ) {
+        self.sessionText = sessionText
         self.id = id
         self.sessionID = sessionID
         self.plan = plan

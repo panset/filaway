@@ -476,14 +476,28 @@ nothing on this path can block a keystroke.
 it lived in is now `Features/Organize/OrganizeNotifications.swift` and holds only
 the notification names.
 
-### Known gap
+### Raw session text (FR-4.4) — closed in M4-08
 
-The organizer calls `PlanApplying.apply(_:)`, which has no room for the session's
-raw text, so **FR-4.4's raw session text is not recorded on the automatic path**
-— `PlanApplier.apply(_:sessionText:)` supports it and `ActivityLog` stores and
-prunes it, but nothing between the tracker and the applier carries the text. The
-Activity window shows the disclosure only when a row has it. Closing this needs
-either a second parameter on the apply contract (ADR-033) or a setter on the log.
+The organizer used to call `PlanApplying.apply(_:)`, which had no room for the
+session's raw text, so FR-4.4's "the original raw session text remains
+recoverable" had nothing to recover on the automatic path. Closed by the second
+of the two options this note listed:
+
+* `PlanApplying` gained `apply(_:sessionText:)`, with a **default implementation
+  that drops the text and calls `apply(_:)`** — an in-memory double in a
+  race-matrix test has nowhere to put it, and the organizer must not have to
+  know which kind of applier it holds.
+* `ProposedPlan.sessionText` carries it from the request context to the apply,
+  so the ask path and the auto path file the same string.
+* The string is `SessionDelta.rawSessionText(of:)`: the session's **added**
+  material only, never the note it was typed into and never the baseline. One
+  note gives its `addedText` unadorned; several get a `## <title>` heading each,
+  so the Activity window's disclosure says which note a paragraph came from.
+* `ActivityLog.prune(olderThan:)` keeps it for 30 days, and
+  `MaintenanceScheduler` in `OrganizeCoordinator.start()` is what makes the
+  prune actually run — once a day, off a durable stamp.
+
+Asserted end to end in `ReliabilityRetentionTests`, both modes.
 
 ## What the app layer has to wire
 

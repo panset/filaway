@@ -356,21 +356,28 @@ struct IndexerTests {
 
     @Test("the debounce loop coalesces a burst of saves")
     func debounceCoalescesSaves() async throws {
-        // The real 2 s debounce, so the "not yet" window is wide enough to
-        // survive a loaded machine running the whole suite in parallel.
-        let fixture = try Fixture(debounce: .seconds(2))
+        // A 5 s debounce against a ~100 ms burst — a 50× margin, so the "not
+        // yet" window survives the whole suite running in parallel (M4-08).
+        let debounce = Duration.seconds(5)
+        let fixture = try Fixture(debounce: debounce)
         let note = try await fixture.addNote("Commands/curl.md", Self.curlNote)
         let indexer = fixture.indexer
         await indexer.start()
 
+        let started = ContinuousClock.now
         for _ in 0 ..< 5 {
             await indexer.markDirty(note.id)
             try await Task.sleep(for: .milliseconds(20))
         }
-        // Five saves in ~100 ms, well inside one debounce window: the queue
-        // holds exactly one note and nothing has been written.
-        #expect(await indexer.pendingCount == 1)
-        #expect(try await indexer.chunkCount() == 0)
+        // Five saves inside one debounce window: the queue holds exactly one
+        // note and nothing has been written. Only assert that while the window
+        // demonstrably *is* still open — a machine so loaded that a 100 ms
+        // burst outlasts 5 s has nothing to say about coalescing, and a
+        // deadline check is the difference between a test and a coin toss.
+        if started.duration(to: .now) < debounce - .seconds(1) {
+            #expect(await indexer.pendingCount == 1)
+            #expect(try await indexer.chunkCount() == 0)
+        }
 
         let indexed = await waitUntil(timeout: 15) {
             ((try? await indexer.chunkCount()) ?? 0) > 0

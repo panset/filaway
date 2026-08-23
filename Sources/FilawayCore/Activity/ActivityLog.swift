@@ -25,6 +25,13 @@ public actor ActivityLog {
     public let library: Library
     private let dbQueue: DatabaseQueue
 
+    /// Where an unreadable `filaway.sqlite` was moved before this log opened a
+    /// fresh one — `nil` in the normal case (NFR-3, ADR-049).
+    ///
+    /// Unlike the derived index, the history in here is **not** rebuildable, so
+    /// the file is kept rather than deleted and the app says so.
+    public let recoveredFromCorruption: URL?
+
     /// FR-4.4: raw session text is recoverable for at least 30 days.
     public static let sessionTextRetention: TimeInterval = 30 * 24 * 60 * 60
     /// FR-4.3: Undo reaches at least the last 10 organization events.
@@ -33,14 +40,18 @@ public actor ActivityLog {
     public init(library: Library) throws {
         self.library = library
         try FileManager.default.createDirectory(at: library.supportDirectory, withIntermediateDirectories: true)
-        dbQueue = try DatabaseQueue(path: library.databaseURL.path, configuration: Self.configuration())
-        try DatabaseSchema.migrator.migrate(dbQueue)
+        let opened = try DatabaseFile.open(at: library.databaseURL, configuration: Self.configuration()) { queue in
+            try DatabaseSchema.migrator.migrate(queue)
+        }
+        dbQueue = opened.queue
+        recoveredFromCorruption = opened.movedAside
     }
 
     /// In-memory database, for tests and previews.
     public init(inMemoryFor library: Library) throws {
         self.library = library
         dbQueue = try DatabaseQueue(configuration: Self.configuration())
+        recoveredFromCorruption = nil
         try DatabaseSchema.migrator.migrate(dbQueue)
     }
 

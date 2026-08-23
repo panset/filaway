@@ -17,6 +17,7 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make bench ARGS="corpus generate"` | Regenerates the committed dev corpus from `DevCorpusContent` |
 | `make bench ARGS="index --notes 5000"` | Semantic index build cost (add `--embed-batch`/`--min-tokens` to probe the levers) |
 | `make bench ARGS="semantic --notes 5000"` | Offline semantic query p50/p95 and the resident matrix |
+| `make bench ARGS="churn --root DIR --seconds 60"` | M4-08 DS-4 stress: the real watcher against a folder `Tools/fs_churn.sh` is hammering; non-zero on loss, duplicates, untracked moves or a stray file |
 | `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
 | `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
@@ -196,6 +197,8 @@ Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
 Sources/FilawayApp/
   Features/Updates/        # UpdaterMenu.swift — UpdaterProviding + Sparkle 2
                            #   "Check for Updates…" (M4-04)
+  Features/Diagnostics/    # DiagnosticsMenu.swift — Help ▸ "Export
+                           #   Diagnostics…" + save panel (M4-08)
 Tools/                     # lib.sh (versions/release.env/Sparkle paths/identity),
                            #   make_app.sh, make_dmg.sh, notarize.sh, release.sh,
                            #   smoke.sh, sparkle/{generate_keys,make_appcast}.sh,
@@ -206,12 +209,15 @@ VERSION                    # CFBundleShortVersionString fallback
 docs/plan.md               # Phase 1 plan (authoritative)
 docs/release.md            # signing/notarization/Sparkle setup + release flow
 docs/decisions.md          # ADR-lite — append every notable decision
+docs/diagnostics.md        # what Filaway tells you about itself (NFR-4, M4-08)
+docs/verification/         # per-milestone DoD walk-throughs, with numbers
 docs/spec/                 # functional spec
 ```
 
 Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index`,
 `Search`, `Session`, `Organize`, `AI`, `Embeddings`, `Activity`, `Settings`,
-`Import`, `Util`.
+`Import`, `Util`. Plus `Diagnostics/` (M4-08) — the NFR-4 export, its redactor, and
+`MaintenanceScheduler`.
 Plus `Bench/` — the M3-07 development corpus and retrieval benchmark. It lives
 in Core, not in `FilawayBench`, because a SwiftPM executable target cannot be
 imported by a test target and the CI gate must measure exactly what the CLI
@@ -235,8 +241,16 @@ measures (ADR-011, ADR-042).
    `feat(storage): atomic note write and front-matter codec (DS-1, DS-2)`.
    Task IDs from the plan (`M1-03`) are welcome too.
 7. **Never log note content.** NFR-4 is zero-content telemetry; interpolate user
-   text into `Logger` only with `privacy: .private`.
-8. Bundle id and OSLog subsystem are both `com.tejaspanse.filaway`
+   text into `Logger` only with `privacy: .private`. **A path is a title**
+   (DS-1 makes the filename the title), so a path under the notes root is note
+   content too — `DiagnosticsRedactor` collapses them to `<notes-root>/…`. See
+   `docs/diagnostics.md`.
+8. **No fixed sleeps in tests.** Waiting for something to appear is
+   `waitUntil`; proving something did *not* appear is a barrier through the same
+   queue. Perf budgets are best-of-N, because NFR-1/NFR-2 describe the machine,
+   not the worst moment of a parallel test run. `swift test` five times in a row
+   is the bar (M4-08).
+9. Bundle id and OSLog subsystem are both `com.tejaspanse.filaway`
    (`FilawayCore.subsystem`).
 
 ## Environment caveats (plan §8 — this machine, 2026-08)
@@ -368,7 +382,7 @@ one after the first paint. Full wiring diagram in `docs/organize.md`.
   `Rate limited` / `Connect AI`. Clicking it posts `.filawayOpenAISettings`,
   which `SettingsWindow.observeOpenRequests()` turns into Settings → AI. No
   modal alerts anywhere; queued sessions retry on their own and survive a
-  relaunch (ADR-058).
+  relaunch (ADR-059).
 - **Settings** are read through `OrganizeSettingsSource`, whose only
   implementation is now `CoreOrganizeSettings` over `CoreSettings` (M4-02). The
   coordinator's `observe(_:)` subscription pushes every change at
@@ -406,9 +420,9 @@ records a diff and Undo restores every byte — proved headlessly by the
 `organize`, `organize-auto` and `organize-offline` smoke phases against a
 committed replay fixture. Settings feeds it live (M4-02, below).
 
-One known gap: FR-4.4's **raw session text is not recorded** on the automatic
-path — `PlanApplying.apply(_:)` has no room for it, so nothing between the
-tracker and the applier carries the text (`docs/organize.md`, "Known gap").
+That gap is closed: FR-4.4's raw session text now reaches the Activity row on
+both paths (`PlanApplying.apply(_:sessionText:)` with a dropping default;
+`docs/organize.md`).
 
 The onboarding folder picker is M4-01, so the notes root is `~/Notes` (override
 with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
@@ -425,6 +439,18 @@ the archived app declares `SUPublicEDKey`, and it derives
 `sparkle:hardwareRequirements` from the slices in the archive, so an arm64-only
 release is never offered to Intel Macs (ADR-046).
 
+**M4-08 reliability hardening is in.** Crash tests for `NoteStore` (a `kill -9`
+between the staged write and the rename), `PlanApplier` and `UndoService`; a
+`filaway.sqlite` whose bytes are not a database is quarantined as
+`<name>.corrupt-<ts>` by `DatabaseFile.open` and the derived half rebuilt from
+the folder (**but the Activity history in that same file is not derived** —
+ADR-049); 1,200 fuzz cases proving a rejected plan writes nothing and an
+accepted one undoes to a byte-identical tree; `MaintenanceScheduler` running
+FR-4.4's prune once a day; and Help ▸ **Export Diagnostics…**, whose NFR-4 test
+plants a sentinel in a note body, a note filename, a setting, a log line and a
+crash report and asserts it is in no file of the zip. Numbers, the two bugs it
+found, and the remaining gaps: `docs/verification/M4-reliability.md`.
+
 **Settings is complete and wired (M2-11 + M4-02).** A `Settings` scene (⌘,) with
 General / AI / Activity, the AI pane built to Figure 4, and
 `FilawayCore/Settings/` holding `AppSettings` (every FR-8.1 preference, typed,
@@ -440,12 +466,12 @@ and M2-12 left open — **there is no longer a UserDefaults stand-in anywhere**:
   `OrganizeCoordinator.organizerSettingsProbe()` / `sessionConfigurationProbe()`.
 - The toolbar carries `AIStatusPill`, fed by `OrganizeCoordinator.status` (which
   folds in `AIConnectionManager.statusChanges()`) plus the queue depth.
-  `AIStatusIndicator` is gone — ADR-058.
+  `AIStatusIndicator` is gone — ADR-059.
 - `.filawayOpenAISettings` has one listener,
   `SettingsWindow.observeOpenRequests()`, which opens Settings on the AI tab.
   Address a tab from outside with `SettingsWindow.open(tab:)`.
 - Settings → General: notes-folder **Change…** (`AppModel.reopenLibrary(at:)` —
-  it *opens* a library and moves nothing, ADR-057), Show in Finder, FR-5.4's
+  it *opens* a library and moves nothing, ADR-058), Show in Finder, FR-5.4's
   Rebuild index with progress off `IndexStatus`.
 - Settings → Activity embeds the last five events and opens the ⌥⌘A window.
 - `semanticSearchEnabled` off parks the indexer and drops ⌘K out of Ask mode;
@@ -457,7 +483,7 @@ and M2-12 left open — **there is no longer a UserDefaults stand-in anywhere**:
 audit, item by item, and is explicit about what the `a11y` smoke phase proves
 versus what needs a person at an unlocked screen with VoiceOver on.
 `Features/Settings/AccessibilityAudit.swift` walks a window's live accessibility
-tree and fails on any unlabelled control (ADR-059). The M1 launch warning
+tree and fails on any unlabelled control (ADR-060). The M1 launch warning
 "reentrant operation in its NSTableView delegate" is fixed — two `@Published`
 sidebar writes were landing inside AppKit delegate callbacks; `make smoke` now
 keeps a transcript and fails if the warning comes back.

@@ -173,7 +173,7 @@ Dependencies use task IDs. Two tracks per milestone can run in parallel sub-agen
 | M4-05 | Release pipeline: universal build, sign, notarize, staple, DMG, GitHub Release + appcast publish (`make release`) | M 8 | M1-02, 04 | §3 distribution |
 | M4-06 | HIG/a11y pass: SF Symbols for all placeholder glyphs, VoiceOver labels on every control, full keyboard nav audit (sidebar/editor/search/card), dynamic type where feasible, dark mode audit | M 10 | all UI | NFR-6, NFR-7 |
 | M4-07 | Performance pass: Instruments cold-launch profile (<2 s: lazy DB/index/embedder load), 20k degrade behaviour | M 8 | M3-09 | NFR-1, NFR-2 |
-| M4-08 | Reliability hardening: autosave/apply crash tests, malformed-plan fuzz (validator rejects), retention pruning, diagnostics export (no content) | M 8 | M2-07/08 | NFR-3, NFR-4 |
+| M4-08 | **DONE** — Reliability hardening: autosave/apply/undo crash tests, quarantined databases (`DatabaseFile`, ADR-049), 1,200-case malformed-plan and wire fuzz, FR-4.4 raw session text on the auto path, `MaintenanceScheduler` retention, diagnostics export (no content), timing de-flake, 60 s `fs_churn` run. See `docs/verification/M4-reliability.md` and `docs/diagnostics.md`. | M 8 | M2-07/08 | NFR-3, NFR-4 |
 | M4-09 | Prompt freeze: run golden + retrieval suites live once, re-record fixtures, tag `organize.v1`/`answer.v1`; document per-session cost estimate | S 4 | M2-06, M3-05 | §9 prompt versioning |
 | M4-10 | Deferred stubs: `Importer` protocol + hidden Apple Notes item; `_assets/` convention documented; FR-4.7 cut noted in `docs/decisions.md` | S 2 | — | FR-7.2, FR-2.5 |
 | M4-11 | Success-criteria dry run: clean-user install → typing <3 min (stopwatch); start 1-week personal dogfood with retrieval log (`Help → Log retrieval outcome`) | S 4 | 05 | §8 |
@@ -184,7 +184,13 @@ Dependencies use task IDs. Two tracks per milestone can run in parallel sub-agen
 - Sparkle: update N→N+1 succeeds on a notarized build (manual, once per release).
 - NFR-6/7: VoiceOver walk of main window, search, card; light/dark screenshots reviewed (manual checklist in `docs/a11y-checklist.md`).
 - NFR-1: launch <2 s measured on M-series (metric test); §8 “typing within 3 minutes” stopwatch pass.
-- All CI suites green (unit, replay e2e, retrieval ≥90%, keyword perf).
+- NFR-3/NFR-4: crash tests for `NoteStore`, `PlanApplier` and `UndoService`; a
+  corrupt `filaway.sqlite` is quarantined and the index rebuilt; the fuzz suite
+  proves a rejected plan writes nothing and an accepted one undoes exactly; a
+  diagnostics export carries no note text, title, path under the notes root,
+  prompt or key (**M4-08 done** — `docs/verification/M4-reliability.md`).
+- All CI suites green (unit, replay e2e, retrieval ≥90%, keyword perf), and
+  `swift test` five times in a row (M4-08's de-flake bar).
 
 ---
 

@@ -60,17 +60,30 @@ public struct AIUsageTotals: Sendable, Equatable {
 public actor AIUsageLedger {
     private let dbQueue: DatabaseQueue
 
+    /// The ledger's file inside a library's Application Support directory.
+    public static func url(in library: Library) -> URL {
+        library.supportDirectory.appendingPathComponent("ai-usage.sqlite", isDirectory: false)
+    }
+
+    /// Where an unreadable `ai-usage.sqlite` was moved before this ledger opened
+    /// a fresh one — `nil` in the normal case. Losing it costs a month of
+    /// counters, never a note (NFR-3, ADR-049).
+    public let recoveredFromCorruption: URL?
+
     /// Opens (creating if needed) `<supportDirectory>/ai-usage.sqlite`.
     public init(library: Library) throws {
         try FileManager.default.createDirectory(at: library.supportDirectory, withIntermediateDirectories: true)
-        let url = library.supportDirectory.appendingPathComponent("ai-usage.sqlite", isDirectory: false)
-        dbQueue = try DatabaseQueue(path: url.path)
-        try AIUsageLedger.migrator.migrate(dbQueue)
+        let opened = try DatabaseFile.open(at: Self.url(in: library), configuration: Configuration()) { queue in
+            try AIUsageLedger.migrator.migrate(queue)
+        }
+        dbQueue = opened.queue
+        recoveredFromCorruption = opened.movedAside
     }
 
     /// In-memory ledger, for tests and `filaway-bench`.
     public init(inMemory: Bool = true) throws {
         dbQueue = try DatabaseQueue()
+        recoveredFromCorruption = nil
         try AIUsageLedger.migrator.migrate(dbQueue)
     }
 

@@ -190,6 +190,8 @@ keys keep their exact bytes and their position in the block.
 init(library: Library) throws            // opens + migrates <supportDirectory>/filaway.sqlite
 init(inMemoryFor library: Library) throws
 
+let recoveredFromCorruption: URL?        // where an unreadable file was quarantined (M4-08)
+
 func rebuild(from snapshot: LibrarySnapshot) throws
 func apply(_ changes: [LibraryChange]) throws
 func upsert(_ note: NoteSummary) throws
@@ -978,6 +980,58 @@ the applier's own failures (ADR-033).
 
 Call it once at launch, before `watcher.reconcile()`. It is idempotent.
 
+### Databases that are not databases (`DatabaseFile`, M4-08)
+
+Every SQLite open in Filaway goes through `DatabaseFile.open(at:configuration:prepare:)`.
+SQLite recovers from a torn write on its own — that is what the WAL is for — but
+not from a file whose header no longer says `SQLite format 3`, which is what a
+truncated restore or a cloud-sync conflict produces. On `SQLITE_NOTADB` /
+`SQLITE_CORRUPT` the file and its `-wal` / `-shm` sidecars are moved aside as
+`<name>.corrupt-<timestamp>` and the open is retried once against an empty file.
+
+```swift
+enum DatabaseFile {
+    static func open(at: URL, configuration: Configuration, fileManager: FileManager = .default,
+                     now: Date = Date(), prepare: (DatabaseQueue) throws -> Void) throws -> Opened
+    static func moveAside(_ url: URL, at: Date = Date(), fileManager: FileManager = .default) throws -> URL
+    static func isCorruption(_ error: any Error) -> Bool
+}
+```
+
+`MetadataStore`, `ActivityLog` and `AIUsageLedger` each expose
+`recoveredFromCorruption: URL?` — non-`nil` means the store is empty and the
+caller owes it a rebuild.
+
+> **The file is moved, never deleted.** `Migrations.swift` still says everything
+> in `filaway.sqlite` is derived and rebuildable; that stopped being true at
+> `v4-activity`. `activity_events`, `activity_note_images` and `note_baselines`
+> live in the same file and are **not** derived from the notes folder, so
+> quarantining a corrupt database costs the user their Activity history. Keeping
+> the bytes leaves a salvage path. Splitting the non-derived tables out is a
+> migration and is not done — ADR-057.
+
+### `MaintenanceScheduler` (FR-4.4, M4-08)
+
+Retention that nothing calls is a comment. The scheduler keeps a durable stamp
+in `<supportDirectory>/maintenance.json` and lets a job through at most once per
+`interval` (a day by default), with an injected clock.
+
+```swift
+actor MaintenanceScheduler {
+    enum Job: String { case activityPrune }
+    init(library: Library, interval: TimeInterval = 86_400, clock: @escaping @Sendable () -> Date = { Date() })
+    func isDue(_ job: Job) -> Bool
+    func lastRun(_ job: Job) -> Date?
+    func markRan(_ job: Job)
+    @discardableResult func runIfDue(_ job: Job, _ work: @Sendable () async -> Void) async -> Bool
+    func reset()
+}
+```
+
+A stamp in the *future* (a restored backup, a timezone fix) counts as due rather
+than as a lockout; an unreadable stamp file means "never ran". Wired in
+`OrganizeCoordinator.start()`, which is where the `ActivityLog` is built.
+
 ### `ActivityLog` (FR-4.3, FR-4.4)
 
 ```swift
@@ -1008,6 +1062,14 @@ func removeBaseline(for: NoteID) throws                         // BaselineStore
   `NoteDiff.created` / `.trashed` / `.wasRelocated` cover the rest.
 * Retention (FR-4.4): `prune(olderThan:)` drops raw session text past 30 days,
   and images only for events Undo can no longer reach. Event rows stay forever.
+  A row still marked `inProgress` is never stripped: those images are the only
+  thing recovery can put the files back from.
+* **The raw session text reaches the row on both paths** (M4-08).
+  `PlanApplying.apply(_:sessionText:)` has a default implementation that drops
+  the text and calls `apply(_:)`, so a test double needs no change;
+  `PlanApplier` files it. `ProposedPlan.sessionText` carries it from the
+  organizer, built by `SessionDelta.rawSessionText(of:)` out of the session's
+  *added* material only — never the note it was typed into.
 * It is also the GRDB `BaselineStore` (`note_baselines`), the single baseline
   contract `Organizer` takes (ADR-033); `DatabaseBaselineStore` is the same
   thing as a value type, for wiring the organizer without handing it the log.
@@ -1367,7 +1429,7 @@ that produced them: `docs/verification/M3-retrieval.md`.
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 624 tests, ~23 s (the M3 suites dominate).
+`Tests/FilawayCoreTests` — 675 tests, ~26 s (the M3 suites dominate).
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -1397,6 +1459,25 @@ that produced them: `docs/verification/M3-retrieval.md`.
   per-note diffs, 30-day retention with an injected clock, baselines, ten
   stacked undos restoring byte-identical trees, the reverse patch after a user
   edit, the conflict block, LIFO blocking.
+* `ReliabilityCrashTests` (M4-08, NFR-3) — `kill -9` between `NoteStore`'s
+  staged write and its rename (the original stays whole, nothing stray in the
+  root); a crash between two segment removals and after an emptied source
+  reached the Trash; a crash part-way through **Undo** (the event stays
+  undoable and the retry restores every byte); garbage written into
+  `filaway.sqlite` / `ai-usage.sqlite` (quarantined with its sidecars, rebuilt
+  from the folder, quarantined once and not once per connection).
+* `ReliabilityFuzzTests` (M4-08, risk #6) — 400 hostile plans, 400 malformed
+  tool inputs, 400 malformed wire responses, from a seeded PRNG. The property is
+  not "the validator rejects everything" but: a rejected plan writes nothing and
+  the tree is byte-identical; an accepted plan **undoes** to a byte-identical
+  tree; nothing traps.
+* `ReliabilityRetentionTests` (M4-08, FR-4.4) — session text at day 30 and day
+  31, images kept while undoable, `inProgress` rows never stripped, and
+  `MaintenanceScheduler`'s once-a-day stamp across simulated launches. Also the
+  end-to-end assertion that an applied event can hand back its raw session text.
+* `ReliabilityDiagnosticsTests` (M4-08, NFR-4) — one sentinel planted in a note
+  body, a note *filename*, an excluded-folder setting, an OSLog line and a crash
+  report; the export is built, unzipped and every file searched for it.
 * `SettingsTests` / `SettingsConnectionTests` — defaults, clamping in both
   directions, per-library exclusions, the persistence round-trip against an
   isolated suite, observer and stream delivery; and the connection matrix
@@ -1443,3 +1524,32 @@ whole pipeline whether or not Core ML is usable on the runner.
 `FILAWAY_SKIP_SLOW_TESTS=1 swift test` skips the churn, scale and FSEvents
 suites. `Tools/fs_churn.sh --root ~/Notes -n 500` is the manual counterpart:
 external churn against a running app, for watching the sidebar.
+
+**Timing rules, so the suite means something** (M4-08). Never a fixed sleep:
+waiting for something to *appear* is `waitUntil`, and proving something did
+*not* appear is a barrier through the same queue. `WatcherTests` opens with a
+sentinel file, because `FSEventStreamStart` returning `true` does not mean the
+stream is delivering yet, and it asserts on the collector with `waitUntil` —
+"the database row is written" is not "the change stream is drained". Perf
+budgets are best-of-N (2 for the highlighter, 3 for the 5,000-note scan): NFR-1
+and NFR-2 are statements about the machine, not about the worst moment of a
+saturated runner. `swift test` five times in a row is the check.
+
+`swift run filaway-bench churn --root <dir> --seconds 60` is the automated half
+of the DS-4 stress: the real `LibraryWatcher` and `MetadataStore` against a
+folder `fs_churn.sh` is hammering, asserting no loss, no duplicates, moves
+tracked and nothing stray, with a bounded quiesce phase at the end. Results in
+`docs/verification/M4-reliability.md`.
+
+## Diagnostics (NFR-4, M4-08)
+
+`FilawayCore/Diagnostics/` — `DiagnosticsExporter`, `DiagnosticsRedactor`,
+`DiagnosticsEnvironment` (injectable, so the NFR-4 tests need no `log show` and
+no logging permission) and `MaintenanceScheduler`. Help ▸ **Export
+Diagnostics…** is `FilawayApp/Features/Diagnostics/DiagnosticsMenu.swift`.
+
+The bundle carries versions, settings (with `excludedFolders` as a *count*),
+`sqlite_master` DDL plus a row `COUNT` per table, the Application Support
+inventory, a `log show` excerpt and 30 days of `Filaway*.ips` — and never a
+note, a title, a path under the notes root, a prompt or the key. Full page:
+`docs/diagnostics.md`.
