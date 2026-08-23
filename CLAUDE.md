@@ -30,7 +30,10 @@ Headless UI smoke tests (no Xcode/XCTest needed, no synthetic key events —
 but **the screen must be unlocked**: on macOS 26 a newly launched app gets no
 window while the screen is locked, SwiftUI never builds the scene, and every
 phase fails at `library-open` with no `SMOKE window …` lines. `Tools/smoke.sh`
-detects it and says so):
+detects it and says so. `SmokeDriver` opens the library itself when the scene
+never arrives, so everything that does not need a view — search, semantic,
+settings — still runs; only the phases that type into the live `NSTextView`
+fail):
 
 ```
 make smoke          # or: Tools/smoke.sh [--keep]
@@ -71,14 +74,15 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-`Tools/smoke.sh` runs `build/Filaway.app` nine times against throwaway notes
+`Tools/smoke.sh` runs `build/Filaway.app` twelve times against throwaway notes
 roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
 overstays, and never leaves the app running. `editor`, `search`,
-`kill`/`killcheck` and each `organize*` phase get their own notes root (the
-organize phases get their own Application Support too, so baselines and the
-Activity journal start empty); `1` and `2` share one so the relaunch has state
-to restore. Every phase runs with `FILAWAY_AI_MODE=replay` and
+`kill`/`killcheck`, `semantic` and each `organize*` phase get their own notes
+root (the organize phases get their own Application Support too, so baselines
+and the Activity journal start empty); `1` and `2` share one so the relaunch has
+state to restore. The `semantic` corpus is seeded with **fixed mtimes**, so
+FR-5.3's "two days ago" has exactly one note to find. Every phase runs with `FILAWAY_AI_MODE=replay` and
 `FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
 network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. A single
 phase directly:
