@@ -406,3 +406,132 @@ Full measurements: `docs/spikes/embedder.md`.
   matrix holds; `sqlite-vec` stays a Phase-2 option.
 - The spike corpus (40 notes / 20 queries) is directional only. The ≥90% top-1
   gate remains M3-07's job on a generated 5k/20k corpus.
+
+## ADR-013 — AI usage lives in its own SQLite file, not in `filaway.sqlite`
+
+**Date:** 2026-08-22 · **Task:** M2-01 · **Status:** accepted
+
+**Context.** FR-6.6 wants a monthly token/request indicator in Settings. The
+obvious home is a migration on `MetadataStore`, but `DatabaseSchema.migrator`
+already reserves `v2-fts` (M1-06), `v3-chunks` (M3-02) and `v4-activity`
+(M2-08) — three milestones being built in parallel worktrees, all appending to
+the same registry. More importantly, `filaway.sqlite` is *derived*: `Settings →
+Rebuild index` may delete it wholesale, and usage history is not rebuildable
+from the notes folder.
+
+**Decision.** `AIUsageLedger` opens
+`<supportDirectory>/ai-usage.sqlite` with its own one-migration registry
+(`v1-ai-usage`). One table: timestamp, model, purpose, provider, the four token
+counts, request id.
+
+**Consequences.**
+- Rebuilding the index cannot lose the user's spend history.
+- Two database files in the support directory instead of one; both are opened
+  lazily and neither blocks launch.
+- Replayed and mocked traffic is recorded with its own `provider` value and
+  excluded from billed totals by default, so a test run cannot inflate the
+  counter.
+
+---
+
+## ADR-014 — Versioned prompts are `FilawayCore` resources, not a top-level `Prompts/`
+
+**Date:** 2026-08-22 · **Task:** M2-01 · **Status:** accepted
+
+**Context.** Plan §2.7 sketches a repository-root `Prompts/` folder "copied as
+Core resources". SwiftPM can only declare resources that live *inside* the
+target directory, and plan §8 removed the build step (Xcode) that would have
+done the copying.
+
+**Decision.** Prompt text lives in `Sources/FilawayCore/AI/Prompts/` as
+`<id>.v<N>.txt`, declared with the package's single `resources: [.copy(…)]`
+entry and loaded by `PromptLibrary.text(_:in:)` from `Bundle.module`. An
+explicit directory argument or `$FILAWAY_PROMPTS_DIR` overrides the bundle, so
+`filaway-bench prompts --live` can iterate on wording without a rebuild.
+`PromptVersion` (`organize.v1`) is the identity recorded on every plan.
+
+**Consequences.**
+- M2-06 writes `Sources/FilawayCore/AI/Prompts/organize.v1.txt`; M3-05 writes
+  `answer.v1.txt`. No `Package.swift` change is needed for either.
+- `plan-format.v1.txt` ships now: it states the closed-action-set contract that
+  `OrganizationPlan.toolSchema` encodes, and `organize.v1` will include it.
+
+---
+
+## ADR-015 — Replay fixtures are keyed by a canonical request hash and store wire bodies
+
+**Date:** 2026-08-22 · **Task:** M2-02 · **Status:** accepted
+
+**Context.** CI must exercise the whole organize pipeline with no API key
+(plan §4), and a fixture that silently goes stale after a prompt edit would be
+worse than no fixture.
+
+**Decision.** `FILAWAY_AI_MODE` is `replay` (default) | `record` | `live`. A
+fixture lives at `Tests/Fixtures/ai-recordings/<purpose>/<key>.json`, where
+`key` is a 16-hex digest of the canonicalised request — model, system,
+messages, tools, tool choice, sorted-key JSON. Token caps, thinking depth,
+effort and timeouts are deliberately *not* in the digest: they are execution
+knobs, not part of what was asked. The file holds the decoded `AIRequest`, the
+exact wire request body, and the exact wire **response** body.
+
+**Consequences.**
+- Editing a prompt changes the key, so replay misses loudly
+  (`AIError.missingRecording` names the file and the command to record it)
+  rather than replaying an answer to a different question.
+- Hand-authored fixtures exercise the real decoder, because what is stored is
+  the API's JSON, not our model.
+- Storing the request body is what makes the FR-4.5 assertion possible: a test
+  greps every committed fixture for excluded note titles and text.
+
+---
+
+## ADR-016 — Merge is `moveSegment`, and the plan carries the segment text verbatim
+
+**Date:** 2026-08-22 · **Task:** M2-04 · **Status:** accepted (implements plan §1 amendment 1)
+
+**Context.** FR-4.1 asks for "append/merge session content into an existing
+note"; FR-4.4 forbids deleting user content. Plan §1 amendment 1 resolves this
+as "merge = move segment", but leaves open how apply can be sure it is moving
+what the model actually saw.
+
+**Decision.** `PlanAction.moveSegment` carries the segment **text**, an optional
+SHA-256 of it, and an advisory character range. `PlanValidator` requires the
+segment to appear byte-for-byte in the source note's body; if the body was not
+loaded, the check downgrades to a warning and M2-07's apply re-runs it. The
+whole closed action set is additive by construction — there is no case that
+deletes or replaces text — and `PlanAction.neverDeletesUserText` switches
+exhaustively so a future destructive case cannot be added by accident.
+
+**Consequences.**
+- A paraphrased segment fails validation instead of silently rewriting a note.
+- Apply (M2-07) locates the segment by search, not by the offsets, so an edit
+  elsewhere in the note does not misplace the cut.
+- The plan also carries `preconditions: [NoteID: contentHash]` for the M2-07
+  compare-and-swap; the validator rejects a plan that touches a note without
+  one, or with one that no longer matches.
+
+---
+
+## ADR-017 — The plan tool schema is a discriminated `anyOf`
+
+**Date:** 2026-08-22 · **Task:** M2-04 · **Status:** accepted (verify live in M2-06)
+
+**Context.** Strict tool use needs `strict: true`, `additionalProperties:
+false` and `required` on every object. Seven actions with different fields have
+to share one `actions` array.
+
+**Decision.** `OrganizationPlan.toolSchema` is generated from
+`Organize/PlanSchema.swift` as an `anyOf` of seven closed objects, each pinning
+`action` to a one-value `enum`. `required` lists only the genuinely required
+fields rather than every property, which is ordinary JSON Schema and reads far
+better to the model. A test lints the document (every object closed, every
+`required` name defined) and validates every encoded `PlanAction` against it,
+so schema and codec cannot drift.
+
+**Consequences.**
+- **Unverified without an API key**: if strict mode rejects `anyOf` or insists
+  that every property be `required`, M2-06's first live call will 400 and the
+  fix is local to `PlanSchema.swift` (flatten to one object with nullable
+  fields). Nothing above the schema changes.
+- Adding an action means a `PlanAction.Kind` case, a payload struct and a
+  schema branch; the closed-set test fails until all three agree.

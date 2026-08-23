@@ -25,6 +25,11 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Markdown", package: "swift-markdown"),
             ],
+            // Versioned prompt text (M2-01/M2-06/M3-05), loaded through
+            // `PromptLibrary`. SwiftPM resources must live inside the target
+            // directory, so these sit here rather than in a top-level
+            // `Prompts/` folder as plan §2.7 sketched — see docs/decisions.md.
+            resources: [.copy("AI/Prompts")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // Thin SwiftUI/AppKit shell. Swift 5 mode for AppKit interop, with
