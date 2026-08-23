@@ -11,6 +11,22 @@ import FilawayCore
 /// ```
 /// FILAWAY_SMOKE=1 build/Filaway.app/Contents/MacOS/Filaway
 /// ```
+/// Records what the shell received through `onEditorActivity` / `onTextChange`,
+/// so the smoke check can prove the callback chain the session tracker (M2-03)
+/// and autosave (M1-11) will hang off actually fires.
+@MainActor
+enum EditorCallbackLog {
+    static var activity: [EditorActivity] = []
+    static var textChanges = 0
+
+    static func record(_ event: EditorActivity) { activity.append(event) }
+    static func recordTextChange() { textChanges += 1 }
+    static func reset() {
+        activity.removeAll()
+        textChanges = 0
+    }
+}
+
 enum EditorSmokeCheck {
 
     @MainActor
@@ -40,6 +56,7 @@ enum EditorSmokeCheck {
         check("source-is-markdown", editor.text == SampleNote.markdown)
 
         // 2 — programmatic typing through the normal insertion path.
+        EditorCallbackLog.reset()
         let appended = "\nsmoke test line with **bold**\n"
         editor.scrollTo(range: NSRange(location: (editor.text as NSString).length, length: 0))
         editor.insertText(appended)
@@ -47,6 +64,13 @@ enum EditorSmokeCheck {
             "insert-text", editor.text.hasSuffix(appended),
             "tail=\(String(editor.text.suffix(30)).debugDescription)"
         )
+
+        // 2b — the shell's callbacks fired (M1-11 autosave, M2-03 session).
+        print("SMOKE info callbacks activity=\(EditorCallbackLog.activity) "
+            + "textChanges=\(EditorCallbackLog.textChanges)")
+        check("onEditorActivity-typing", EditorCallbackLog.activity.contains(.typing))
+        check("onEditorActivity-selection", EditorCallbackLog.activity.contains(.selection))
+        check("onTextChange-fired", EditorCallbackLog.textChanges > 0)
 
         // 3 — checkbox toggle edits the source, not a rendered layer.
         let nsText = editor.text as NSString

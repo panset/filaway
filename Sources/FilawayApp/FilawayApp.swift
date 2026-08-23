@@ -66,9 +66,11 @@ struct ShellView: View {
                 },
                 onTextChange: { _ in
                     // M1-11 autosave hooks in here (750 ms debounce).
+                    EditorCallbackLog.recordTextChange()
                 },
-                onEditorActivity: { _ in
+                onEditorActivity: { activity in
                     // M2-03 session tracker hooks in here.
+                    EditorCallbackLog.record(activity)
                 }
             )
         }

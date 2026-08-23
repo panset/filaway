@@ -153,6 +153,14 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
         onActivity?(.typing)
     }
 
+    /// Covers typing, paste, dictation and IME commits — anything that reaches
+    /// the text through AppKit's insertion path, including programmatic
+    /// `MarkdownEditorController.insertText`.
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        super.insertText(string, replacementRange: replacementRange)
+        onActivity?(.typing)
+    }
+
     override func setSelectedRanges(
         _ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool
     ) {
