@@ -39,6 +39,11 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  mid-burst
 # -> === smoke phase: 2 ===        relaunch: last note and that last burst are
 #                                  back (FR-1.5, FR-2.3)
+# -> === smoke phase: settings === ⌘, opens Settings; the Figure 4 rows write
+#                                  through AppSettings; the idle interval
+#                                  clamps; AIConnectionManager walks
+#                                  notConfigured -> connected -> notConfigured
+# -> === smoke phase: settings2 ==  relaunch: those preferences persisted
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
@@ -65,6 +70,12 @@ CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
 `Tools/smoke.sh`.
 
+`Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, Settings in
+`Sources/FilawayApp/Features/Settings/SettingsSmokeCheck.swift` (its phases are
+dispatched from `AppDelegate`). `FILAWAY_SMOKE_SHOTS=<dir>` writes the rendered
+Settings pane to a PNG — `screencapture` needs screen-recording permission this
+machine has not granted.
+
 ## Layout
 
 ```
@@ -78,6 +89,9 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
   Features/Editor/         # TextKit 2 editor, AutosaveController
   Features/Search/         # toolbar field, SearchCoordinator, ⌘K results panel
                            #   (Figure 2b, FR-1.3, FR-5.1/5.2)
+
+  Features/Settings/       # Settings scene (⌘,): General / AI (Figure 4) /
+                           #   Activity, AIStatusPill, SettingsSmokeCheck
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
 Tools/                     # make_app.sh, make_dmg.sh, notarize.sh, smoke.sh
@@ -220,3 +234,20 @@ Next up: **M2** (AI organize) and **M3** (semantic search, which fills
 `SearchMode.semantic`). The onboarding folder picker is M4-01, so the notes root
 is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a
 bookmark.
+
+**M2-11 Settings** is in: a `Settings` scene (⌘,) with General / AI / Activity,
+the AI pane built to Figure 4, and `FilawayCore/Settings/` holding `AppSettings`
+(every FR-8.1 preference, typed, clamped, observable — see `docs/core-api.md`)
+and `AIConnectionManager` (key validation, Keychain, `AIStatus`, monthly usage).
+Two seams are left for the integration pass, both deliberate so this task did not
+rewrite files other agents own:
+
+- **`AIStatusPill`** exists in `Features/Settings/` and is not in the toolbar.
+  One line in `ShellView`: `ToolbarItem(placement: .status) { AIStatusPill(status:
+  …) }`, fed from `AIConnectionManager.statusChanges()`.
+- **Nothing reads the preferences yet.** The Organizer, `SessionTracker` and the
+  Indexer should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
+  the app's own `AppSettings` shadows it, ADR-035) and subscribe with
+  `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
+  `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
+  `effectiveSearchModel`. `SettingsModel.shared` owns the app's instances.

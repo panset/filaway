@@ -17,6 +17,9 @@
 #   1       empty sidebar → ⌘N → type → autosave lands → rename renames the
 #           file → an external edit reaches the sidebar → quit mid-burst
 #   2       relaunch on the same root: last note restored, last burst survived
+#   settings   ⌘, opens Settings; the Figure 4 rows write through AppSettings;
+#              the idle interval clamps; AIConnectionManager walks
+#   settings2  relaunch: every one of those preferences came back
 #
 # Exits non-zero on any failure. Never leaves the app running.
 #
@@ -42,9 +45,13 @@ ROOT="$WORK/Notes"
 EDITOR_ROOT="$WORK/EditorNotes"
 SEARCH_ROOT="$WORK/SearchNotes"
 KILL_ROOT="$WORK/KillNotes"
+SETTINGS_ROOT="$WORK/SettingsNotes"
 SUPPORT="$WORK/Support"
 SUITE="com.tejaspanse.filaway.smoke.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT"
+# The settings phases need their own defaults domain: they write preferences the
+# capture phases must not inherit, and phase `settings2` reads them back.
+SETTINGS_SUITE="com.tejaspanse.filaway.smoke.settings.$STAMP"
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT"
 
 # Three notes on disk before the app ever runs, so the search phase also proves
 # a cold launch indexes a library Filaway has never seen. Titles and the tail
@@ -97,7 +104,9 @@ cleanup() {
     kill -9 "$app_pid" 2>/dev/null
   fi
   defaults delete "$SUITE" >/dev/null 2>&1
+  defaults delete "$SETTINGS_SUITE" >/dev/null 2>&1
   rm -f "$HOME/Library/Preferences/$SUITE.plist"
+  rm -f "$HOME/Library/Preferences/$SETTINGS_SUITE.plist"
   if [ "$KEEP" = "1" ]; then
     echo "smoke: kept $WORK"
   else
@@ -109,16 +118,19 @@ trap cleanup EXIT INT TERM
 # run_phase <name> <timeout-seconds>
 run_phase() {
   local phase="$1" limit="$2" status
-  local root="$ROOT"
+  local root="$ROOT" suite="$SUITE"
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
   [ "$phase" = "killcheck" ] && root="$KILL_ROOT"
+  case "$phase" in
+    settings|settings2) root="$SETTINGS_ROOT"; suite="$SETTINGS_SUITE" ;;
+  esac
   echo
   echo "=== smoke phase: $phase ==============================================="
   FILAWAY_SMOKE="$phase" \
   FILAWAY_NOTES_ROOT="$root" \
   FILAWAY_SUPPORT_ROOT="$SUPPORT" \
-  FILAWAY_DEFAULTS_SUITE="$SUITE" \
+  FILAWAY_DEFAULTS_SUITE="$suite" \
     "$APP" 2>&1 &
   app_pid=$!
 
@@ -183,6 +195,8 @@ run_kill_phase
 run_phase killcheck 60
 run_phase 1 90
 run_phase 2 60
+run_phase settings 90
+run_phase settings2 60
 
 echo
 echo "SMOKE result failures=$failures"

@@ -543,6 +543,87 @@ the original non-undoable (no redo in Phase 1). The other errors are
 
 ---
 
+## Settings (M2-11 — FR-8.1, FR-6.1…6.6, FR-4.2, FR-4.5)
+
+`Sources/FilawayCore/Settings/`. Two types: the preference store and the
+connection the AI settings pane drives.
+
+### `AppSettings`
+
+```swift
+let settings = AppSettings(defaults: .standard, libraryKey: library.key)
+settings.idleInterval = 42               // stored as 15 — clamped
+let token = settings.observe { key in … } // live changes, no Combine
+for await key in settings.changes() { … }
+```
+
+`UserDefaults`-backed with an injectable suite, so tests get a throwaway domain
+and the smoke driver gets `FILAWAY_DEFAULTS_SUITE`. Every accessor is typed and
+range-checked; nothing above it reads a raw defaults key.
+
+| Property | Type | Default | Key | Scope |
+|---|---|---|---|---|
+| `organizationMode` | `OrganizationMode` | `.askBeforeFiling` | `organize.mode` | app |
+| `idleInterval` | `Int` (minutes) | `3`, clamped to `1…15` | `organize.idleMinutes` | app |
+| `semanticSearchEnabled` | `Bool` | `true` | `search.semanticEnabled` | app |
+| `excludedFolders` | `[String]` | `[]` | `ai.excludedFolders.<libraryKey>` | **library** |
+| `organizeModel` | `AIModel` | `claude-sonnet-5` | `ai.model.organize` | app |
+| `searchModel` | `AIModel` | `claude-haiku-4-5` | `ai.model.search` | app |
+| `advancedModelOverride` | `Bool` | `false` | `ai.model.advancedOverride` | app |
+| `notesRootBookmark` | `Data?` | `nil` (→ `~/Notes`) | `library.rootBookmark` | app |
+| `aiConnectionSkipped` | `Bool` | `false` | `ai.connectionSkipped` | app |
+| `usageMonthStart` | `Date?` | `nil` | `ai.usageMonthStart` | app |
+
+Three things to know:
+
+* **Clamping is on both sides.** `idleInterval` is clamped on write *and* on
+  read, so a hand-edited plist cannot make the organizer fire every 300 minutes.
+* **Send `effectiveOrganizeModel` / `effectiveSearchModel`, not
+  `organizeModel` / `searchModel`.** The pickers keep the user's choice, but the
+  house defaults ship until `advancedModelOverride` is on (FR-6.2).
+* **`excludedFolders` is per library and already normalised** — sorted,
+  de-duplicated, no leading slash — so it feeds `ExclusionFilter` unchanged.
+  Setting `libraryKey` re-points it without touching the other library's list.
+
+`observe(_:)` returns an `Observation`; keep it alive for as long as the handler
+should run. Handlers fire synchronously on the writing thread with the `Key`
+that changed, which is what lets the Organizer, `SessionTracker` and the
+`Indexer` pick up mode, interval and exclusion edits without a restart.
+
+`CoreSettings` is a `public typealias` for this type. `FilawayApp` has its own
+`AppSettings` (window frame, sidebar width) and cannot spell
+`FilawayCore.AppSettings`, because `FilawayCore` also names an enum — see
+ADR-035.
+
+### `AIConnectionManager`
+
+```swift
+let manager = AIConnectionManager(library: library)          // KeychainStore + ledger
+await manager.refresh()                                       // status from the stored key
+switch await manager.connect(apiKey: typed) {
+case let .success(models): …                                  // key stored, status .connected
+case let .failure(error):  …                                  // nothing stored
+}
+await manager.disconnect()
+for await status in await manager.statusChanges() { pill = status }
+let month = await manager.monthlyUsage()                      // AIUsageTotals? (FR-6.6)
+```
+
+An actor owning the `SecretStore`, the provider factory and `AIHealth`.
+Validation is the free `GET /v1/models` (plan §1 amendment 4).
+
+**The key is written only after validation succeeds.** A blank key never reaches
+the network, and a failed validation leaves any previously stored key alone — a
+typo in the Change… sheet must not disconnect a working install.
+
+`recordFailure(_:)` / `recordSuccess()` let the rest of the app fold pipeline
+outcomes into the same status the pill draws (FR-6.4); a rate limit heals itself
+once its deadline passes. Tests inject `InMemorySecretStore` and a
+`providerFactory` returning `MockProvider`; the app's default factory follows
+`FILAWAY_AI_MODE`, standing in a mock when `replay` has no fixture directory.
+
+---
+
 ## Errors
 
 `StorageError` is `Equatable` and `CustomStringConvertible`: `.notFound`,
@@ -620,6 +701,11 @@ looser 500 ms (NFR-2's "degrade gracefully").
   per-note diffs, 30-day retention with an injected clock, baselines, ten
   stacked undos restoring byte-identical trees, the reverse patch after a user
   edit, the conflict block, LIFO blocking.
+* `SettingsTests` / `SettingsConnectionTests` — defaults, clamping in both
+  directions, per-library exclusions, the persistence round-trip against an
+  isolated suite, observer and stream delivery; and the connection matrix
+  (valid key, rejected key, blank key, offline, rate-limit healing, disconnect,
+  monthly totals) on `InMemorySecretStore` + `MockProvider`.
 * `ScaleTests` — 5,000 notes under 3 s (tagged `.slow`).
 * `SearchScaleTests` — keyword p95 under 100 ms at 5,000 notes on a debug build;
   20,000 notes reported (tagged `.slow`).
