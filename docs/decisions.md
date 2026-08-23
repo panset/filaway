@@ -1718,3 +1718,73 @@ derived from it — a 409 s index build at 5,000 notes, a 273 MB matrix at 20,00
   **not** needed: measured on realistic notes the chunker produces 2.0 chunks
   per note, and raising `minTokens` from 64 to 128 moves the synthetic corpus by
   only 4.6% because its density is code fences, which never fold.
+
+---
+
+## ADR-049 — An unreadable database is quarantined, not deleted; diagnostics carry no path under the notes root
+
+**Date:** 2026-08-23 · **Task:** M4-08 · **Status:** accepted
+
+**Context.** M4-08 asked for crash hardening and a diagnostics export. Two
+questions had no answer yet.
+
+*What happens when `filaway.sqlite` is not a database?* SQLite recovers from a
+torn write on its own — that is what the WAL is for. It cannot recover from a
+file whose header no longer says `SQLite format 3`, which is what a truncated
+restore, an interrupted copy or a cloud-sync conflict produces. Before this task
+every opener simply threw, which surfaced as "Filaway could not open your
+library" for a problem that costs a rebuild, not data.
+
+Except that it is no longer *only* a rebuild. DS-3 and `Migrations.swift` still
+say "deleting it is always safe: everything in it is rebuildable from the notes
+folder", and that stopped being true at `v4-activity`: `activity_events`,
+`activity_note_images` and `note_baselines` live in the same file, and the
+Activity history and the organized baselines are not derived from anything.
+
+*And what may a diagnostics bundle contain?* NFR-4 is zero-content telemetry.
+The obvious reading is "no note text". But DS-1 makes a note's title its
+filename, so **a path is a title**, and a crash report full of absolute paths is
+a list of what the user has been writing about.
+
+**Decision.**
+
+1. **`DatabaseFile.open` wraps every SQLite open in Filaway.** On
+   `SQLITE_NOTADB` / `SQLITE_CORRUPT` the file and its `-wal` / `-shm` sidecars
+   are moved aside as `<name>.corrupt-<timestamp>` and the open is retried once
+   against an empty file. `MetadataStore`, `ActivityLog`, `AIUsageLedger` and
+   `PendingSessionStoreGRDB` all go through it.
+2. **Moved, never deleted.** The derived half rebuilds from the notes folder;
+   the Activity history in the same file does not. Keeping the bytes leaves a
+   salvage path, and costs a few megabytes the user can delete.
+3. **The fact is reported, not swallowed.** `recoveredFromCorruption` on each
+   store says where the old file went, and `database.txt` in a diagnostics
+   export lists every quarantined file — which is the entire explanation for
+   "my Activity history is empty".
+4. **The diagnostics redactor collapses the whole path, not the prefix.**
+   `<notes-root>/Commands/curl.md` would still name a folder and a title, so
+   anything under the root becomes `<notes-root>/…`. Settings report
+   `excludedFolders` as a **count**; the database section is `sqlite_master` DDL
+   plus a row `COUNT` per table and never a row.
+5. **The export is structural first and scrubbed second.** It never opens a
+   note, never reads `activity_events`, never touches `PromptLibrary`. The
+   redactor exists for the files *other people* wrote — crash reports and the
+   `log show` excerpt — and a leak sweep drops any staged file that still
+   contains a library path rather than shipping it.
+
+**Consequences.**
+- A corrupt `filaway.sqlite` now costs the user their Activity history and their
+  organized baselines, silently but recoverably. Splitting the non-derived
+  tables into their own file is the obvious follow-up and is **not** done here:
+  it is a migration, and M4-08 is a hardening task.
+- `DatabaseSchema`'s "deleting it is always safe" comment is now qualified in
+  `docs/core-api.md`.
+- Two bugs the tests found on the way in: an Undo the process killed half-way
+  through reported `.partial` on retry (the reverse patch was replayed onto text
+  that was already the before-image), and the redactor's account-name rule,
+  applied as a bare substring, turned `com.tejaspanse.filaway` into
+  `com.<user>.filaway` in every log line. Both fixed, both with a named
+  regression test.
+- The `<user>` rule now only fires on a path component, which means an account
+  name appearing in prose inside a crash report is *not* masked. Judged the
+  right trade: mangling every line is a worse failure than leaving a username
+  that macOS has already put in a dozen paths the export keeps as `~`.

@@ -76,6 +76,8 @@ struct ReliabilityFuzzTests {
             #expect(harness.temp.strayEntries().isEmpty, "\(sample.label) left a stray file")
         }
 
+        print("[fuzz] 400 hostile plans — \(rejected) rejected and wrote nothing, "
+            + "\(accepted) applied and fully undone")
         // A corpus that stopped being adversarial would silently pass, so say
         // out loud that it is still mostly poison.
         #expect(rejected > 300, "the fuzz corpus has gone soft: only \(rejected)/400 were rejected")
