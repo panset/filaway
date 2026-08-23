@@ -1,0 +1,639 @@
+{
+  "version": 1,
+  "now": "2026-08-20T12:00:00Z",
+  "timeZone": "UTC",
+  "description": "M3-07 retrieval query set for Tests/Fixtures/corpus/dev. Every relative date phrase resolves against `now` in `timeZone`, Monday-first, so \"last week\" means the same Monday-to-Sunday on any machine. `expectedSnippet` is the answer FR-5.2 has to put on the card and is unique across the corpus; `expectedRange` is what TemporalQueryParser should produce, asserted but never fed back into the search.",
+  "queries": [
+    {
+      "id": "curl-staging",
+      "category": "paraphrase",
+      "text": "the curl I used to fetch docs from staging",
+      "expectedPath": "Commands/curl/Staging docs endpoint.md",
+      "expectedSnippet": "Authorization: Bearer $STAGING_TOKEN"
+    },
+    {
+      "id": "curl-upload",
+      "category": "paraphrase",
+      "text": "how do I push an image file up to the asset service",
+      "expectedPath": "Commands/curl/Uploading an asset by hand.md",
+      "expectedSnippet": "-F \"file=@cover.png\""
+    },
+    {
+      "id": "curl-retry",
+      "category": "command",
+      "text": "the curl flags that make it retry when the endpoint is flaky",
+      "expectedPath": "Commands/curl/Making a flaky endpoint behave.md",
+      "expectedSnippet": "--retry-all-errors"
+    },
+    {
+      "id": "curl-redirect",
+      "category": "paraphrase",
+      "text": "follow the redirects and print only the status code",
+      "expectedPath": "Commands/curl/Where does this old link go.md",
+      "expectedSnippet": "curl -sSIL -o /dev/null"
+    },
+    {
+      "id": "curl-webhook",
+      "category": "paraphrase",
+      "text": "replaying a webhook event from a payload I saved",
+      "expectedPath": "Commands/curl/Replaying a webhook event.md",
+      "expectedSnippet": "--data-binary @webhook-payload.json"
+    },
+    {
+      "id": "curl-ttfb",
+      "category": "paraphrase",
+      "text": "measuring how long the api takes before the first byte arrives",
+      "expectedPath": "Commands/curl/Where the request time goes.md",
+      "expectedSnippet": "ttfb=%{time_starttransfer}"
+    },
+    {
+      "id": "git-rebase",
+      "category": "paraphrase",
+      "text": "how did I rebase onto main without losing commits",
+      "expectedPath": "Commands/git/Rebasing onto main without losing work.md",
+      "expectedSnippet": "git rebase origin/main"
+    },
+    {
+      "id": "git-bisect",
+      "category": "command",
+      "text": "the git bisect run line that drove the swift test filter",
+      "expectedPath": "Commands/git/Bisecting the slow test.md",
+      "expectedSnippet": "git bisect run swift test --filter SearchScaleTests"
+    },
+    {
+      "id": "git-reflog",
+      "category": "paraphrase",
+      "text": "I deleted a branch by mistake, how did I get it back",
+      "expectedPath": "Commands/git/Getting a deleted branch back.md",
+      "expectedSnippet": "git branch feature/answer-card 9f2c1ab"
+    },
+    {
+      "id": "git-squash",
+      "category": "paraphrase",
+      "text": "squash the last few commits and push them safely",
+      "expectedPath": "Commands/git/Tidying a branch before review.md",
+      "expectedSnippet": "git push --force-with-lease origin feature/chunker"
+    },
+    {
+      "id": "git-cherry",
+      "category": "paraphrase",
+      "text": "putting one fix commit onto the release branch",
+      "expectedPath": "Commands/git/Hotfix onto the release branch.md",
+      "expectedSnippet": "git cherry-pick -x 4c9e02f"
+    },
+    {
+      "id": "git-log-s",
+      "category": "paraphrase",
+      "text": "find the commit that introduced a particular string",
+      "expectedPath": "Commands/git/Who introduced this line.md",
+      "expectedSnippet": "git log -S 'recencyPrior' --oneline"
+    },
+    {
+      "id": "git-revert",
+      "category": "paraphrase",
+      "text": "the safe way to undo a commit that is already pushed",
+      "expectedPath": "Commands/git/Undoing something already pushed.md",
+      "expectedSnippet": "git revert --no-edit 7a31c9d"
+    },
+    {
+      "id": "docker-rebuild",
+      "category": "paraphrase",
+      "text": "rebuild just the api container and tail its output",
+      "expectedPath": "Commands/docker/Rebuild one service and watch it.md",
+      "expectedSnippet": "docker compose logs -f --tail=100 api"
+    },
+    {
+      "id": "docker-shell",
+      "category": "paraphrase",
+      "text": "open a shell inside a container that is already running",
+      "expectedPath": "Commands/docker/A shell inside the running container.md",
+      "expectedSnippet": "docker exec -it filaway-api-1 /bin/bash"
+    },
+    {
+      "id": "docker-prune",
+      "category": "paraphrase",
+      "text": "docker ate my disk space, what did I run to clean it up",
+      "expectedPath": "Commands/docker/Reclaiming the disk docker ate.md",
+      "expectedSnippet": "docker system prune -af --volumes"
+    },
+    {
+      "id": "docker-cp",
+      "category": "paraphrase",
+      "text": "pull a log file off a container onto my mac",
+      "expectedPath": "Commands/docker/Getting a file out of a container.md",
+      "expectedSnippet": "docker cp filaway-api-1:/var/log/app/error.log"
+    },
+    {
+      "id": "docker-pg",
+      "category": "paraphrase",
+      "text": "spin up a temporary database for the integration tests",
+      "expectedPath": "Commands/docker/A throwaway postgres for tests.md",
+      "expectedSnippet": "-e POSTGRES_PASSWORD=devonly -p 55432:5432"
+    },
+    {
+      "id": "docker-mounts",
+      "category": "command",
+      "text": "docker inspect template that lists the mounts",
+      "expectedPath": "Commands/docker/What is this container mounting.md",
+      "expectedSnippet": "docker inspect -f '{{range .Mounts}}"
+    },
+    {
+      "id": "k8s-logs",
+      "category": "paraphrase",
+      "text": "command to stream logs from a pod",
+      "expectedPath": "Commands/k8s/Streaming logs from the api pod.md",
+      "expectedSnippet": "kubectl logs -f deploy/api -c app --since=15m"
+    },
+    {
+      "id": "k8s-portfwd",
+      "category": "paraphrase",
+      "text": "reach the staging database from my laptop",
+      "expectedPath": "Commands/k8s/Reaching the staging database.md",
+      "expectedSnippet": "kubectl port-forward -n staging svc/postgres 55433:5432"
+    },
+    {
+      "id": "k8s-undo",
+      "category": "paraphrase",
+      "text": "revert a deployment that went out broken",
+      "expectedPath": "Commands/k8s/Rolling back a bad deploy.md",
+      "expectedSnippet": "kubectl rollout undo deploy/api -n staging"
+    },
+    {
+      "id": "k8s-env",
+      "category": "paraphrase",
+      "text": "check the environment variables inside a running pod",
+      "expectedPath": "Commands/k8s/What environment does this pod see.md",
+      "expectedSnippet": "kubectl exec -it -n staging deploy/api"
+    },
+    {
+      "id": "k8s-crash",
+      "category": "paraphrase",
+      "text": "which pods are not healthy and why did they die",
+      "expectedPath": "Commands/k8s/Finding the pod that keeps dying.md",
+      "expectedSnippet": "--field-selector=status.phase!=Running"
+    },
+    {
+      "id": "k8s-cp",
+      "category": "paraphrase",
+      "text": "get a dump file off a kubernetes pod",
+      "expectedPath": "Commands/k8s/Getting a heap dump off a pod.md",
+      "expectedSnippet": "kubectl cp staging/api-7f9c5d8b6-2xkqz:/tmp/heap.hprof"
+    },
+    {
+      "id": "jq-ids",
+      "category": "command",
+      "text": "the jq one-liner that pulled the ids out",
+      "expectedPath": "Commands/shell/Pulling the ids out of the export.md",
+      "expectedSnippet": "jq -r '.data.items[] | select(.status == \"active\") | .id'"
+    },
+    {
+      "id": "awk-bytes",
+      "category": "paraphrase",
+      "text": "add up the response sizes in the access log",
+      "expectedPath": "Commands/shell/Adding up the response sizes.md",
+      "expectedSnippet": "awk '$9 == 200 { total += $10 }"
+    },
+    {
+      "id": "sed-rename",
+      "category": "paraphrase",
+      "text": "search and replace a name across every file at once",
+      "expectedPath": "Commands/shell/Renaming a symbol across the repo.md",
+      "expectedSnippet": "xargs sed -i '' 's/candidateLimit/candidatePerArm/g'"
+    },
+    {
+      "id": "find-build",
+      "category": "paraphrase",
+      "text": "clean out build directories older than a month",
+      "expectedPath": "Commands/shell/Clearing out stale build folders.md",
+      "expectedSnippet": "find . -type d -name .build -mtime +30 -print0"
+    },
+    {
+      "id": "uniq-errors",
+      "category": "paraphrase",
+      "text": "count which errors happen most in a log file",
+      "expectedPath": "Commands/shell/Which errors happen most.md",
+      "expectedSnippet": "sort | uniq -c | sort -rn | head -20"
+    },
+    {
+      "id": "bash-trap",
+      "category": "paraphrase",
+      "text": "make a shell script delete its temp directory even when it fails",
+      "expectedPath": "Commands/shell/A script that cleans up after itself.md",
+      "expectedSnippet": "trap 'rm -rf \"$tmp\"' EXIT"
+    },
+    {
+      "id": "tail-grep",
+      "category": "paraphrase",
+      "text": "why does tail piped into grep print nothing for ages",
+      "expectedPath": "Commands/shell/Why tail into grep prints nothing.md",
+      "expectedSnippet": "grep --line-buffered -E 'WARN|ERROR'"
+    },
+    {
+      "id": "until-flake",
+      "category": "paraphrase",
+      "text": "loop a test until it fails so I can catch the flake",
+      "expectedPath": "Commands/shell/Catching a flaky test.md",
+      "expectedSnippet": "until ! swift test --filter ChurnTests"
+    },
+    {
+      "id": "base64-key",
+      "category": "paraphrase",
+      "text": "turn a key file into one long line for an environment variable",
+      "expectedPath": "Commands/shell/A key as one long line.md",
+      "expectedSnippet": "base64 -i secret.pem"
+    },
+    {
+      "id": "rsync-deploy",
+      "category": "paraphrase",
+      "text": "copy the built site up to the server",
+      "expectedPath": "Infra/ssh/Deploying the built site.md",
+      "expectedSnippet": "rsync -avz --delete --exclude '.build'"
+    },
+    {
+      "id": "ssh-tunnel",
+      "category": "command",
+      "text": "ssh tunnel through the jump host to postgres",
+      "expectedPath": "Infra/ssh/Tunnelling to the primary database.md",
+      "expectedSnippet": "-L 55434:db-primary.internal:5432"
+    },
+    {
+      "id": "scp-log",
+      "category": "paraphrase",
+      "text": "download a log file from the deploy host",
+      "expectedPath": "Infra/ssh/Bringing a log back for reading.md",
+      "expectedSnippet": "scp deploy@edge-01.internal.example:/var/log/filaway/"
+    },
+    {
+      "id": "ssh-keychain",
+      "category": "paraphrase",
+      "text": "stop being asked for the ssh passphrase every time",
+      "expectedPath": "Infra/ssh/Stop asking for the passphrase.md",
+      "expectedSnippet": "ssh-add --apple-use-keychain ~/.ssh/id_ed25519"
+    },
+    {
+      "id": "ssh-alive",
+      "category": "paraphrase",
+      "text": "my ssh session keeps dropping when it goes idle",
+      "expectedPath": "Infra/ssh/Sessions that stop dropping.md",
+      "expectedSnippet": "ServerAliveInterval 30"
+    },
+    {
+      "id": "brew-pin",
+      "category": "paraphrase",
+      "text": "stop homebrew upgrading postgres out from under me",
+      "expectedPath": "Snippets/toolchain/Pinning the postgres formula.md",
+      "expectedSnippet": "brew reinstall postgresql@16 && brew pin postgresql@16"
+    },
+    {
+      "id": "brew-services",
+      "category": "paraphrase",
+      "text": "restart the local database service",
+      "expectedPath": "Snippets/toolchain/Restarting the local database.md",
+      "expectedSnippet": "brew services restart postgresql@16"
+    },
+    {
+      "id": "pnpm-filter",
+      "category": "paraphrase",
+      "text": "build only one package and its dependencies in the monorepo",
+      "expectedPath": "Snippets/toolchain/Building one workspace package.md",
+      "expectedSnippet": "pnpm --filter @filaway/web... build"
+    },
+    {
+      "id": "npm-ci",
+      "category": "command",
+      "text": "the npm command CI uses instead of install",
+      "expectedPath": "Snippets/toolchain/What CI installs with.md",
+      "expectedSnippet": "npm ci --no-audit --fund=false"
+    },
+    {
+      "id": "python-venv",
+      "category": "paraphrase",
+      "text": "set up a virtualenv and install the dev requirements",
+      "expectedPath": "Snippets/toolchain/A fresh python environment.md",
+      "expectedSnippet": "python3 -m venv .venv && source .venv/bin/activate"
+    },
+    {
+      "id": "python-http",
+      "category": "paraphrase",
+      "text": "quick way to serve a directory in the browser",
+      "expectedPath": "Snippets/toolchain/Serving a folder in the browser.md",
+      "expectedSnippet": "python3 -m http.server 8123 --bind 127.0.0.1"
+    },
+    {
+      "id": "ffmpeg-gif",
+      "category": "paraphrase",
+      "text": "turn a screen recording into a gif for the readme",
+      "expectedPath": "Snippets/media/Screen recording into a gif.md",
+      "expectedSnippet": "fps=12,scale=720:-1:flags=lanczos"
+    },
+    {
+      "id": "ffmpeg-mp4",
+      "category": "paraphrase",
+      "text": "compress a mov so it fits the upload limit",
+      "expectedPath": "Snippets/media/Shrinking a video for chat.md",
+      "expectedSnippet": "-c:v libx264 -crf 28 -preset slow"
+    },
+    {
+      "id": "openssl-expiry",
+      "category": "paraphrase",
+      "text": "check when the tls certificate expires",
+      "expectedPath": "Infra/certs/When does the certificate expire.md",
+      "expectedSnippet": "openssl x509 -noout -dates -subject"
+    },
+    {
+      "id": "openssl-selfsigned",
+      "category": "paraphrase",
+      "text": "generate a certificate for developing over https locally",
+      "expectedPath": "Infra/certs/A certificate for local https.md",
+      "expectedSnippet": "openssl req -x509 -newkey rsa:2048 -nodes"
+    },
+    {
+      "id": "sqlite-csv",
+      "category": "paraphrase",
+      "text": "dump a sqlite table as csv with a header row",
+      "expectedPath": "Snippets/data/Exporting a table to csv.md",
+      "expectedSnippet": "sqlite3 -header -csv filaway.sqlite"
+    },
+    {
+      "id": "sqlite-check",
+      "category": "paraphrase",
+      "text": "verify a sqlite file is not corrupt",
+      "expectedPath": "Snippets/data/Is the database file healthy.md",
+      "expectedSnippet": "pragma integrity_check; pragma foreign_key_check;"
+    },
+    {
+      "id": "jq-clipboard",
+      "category": "paraphrase",
+      "text": "pretty print the json that is on my clipboard",
+      "expectedPath": "Snippets/data/Tidying json on the clipboard.md",
+      "expectedSnippet": "pbpaste | jq . | pbcopy"
+    },
+    {
+      "id": "launchctl-agent",
+      "category": "paraphrase",
+      "text": "register a background agent so it starts at login",
+      "expectedPath": "Snippets/system/Registering a login agent.md",
+      "expectedSnippet": "launchctl bootstrap gui/$(id -u)"
+    },
+    {
+      "id": "tmux-build",
+      "category": "paraphrase",
+      "text": "run a long build in a session I can detach from",
+      "expectedPath": "Snippets/system/A long build in a detachable session.md",
+      "expectedSnippet": "tmux new-session -d -s build"
+    },
+    {
+      "id": "xattr-quarantine",
+      "category": "paraphrase",
+      "text": "the downloaded tool says the developer cannot be verified",
+      "expectedPath": "Snippets/system/Opening a downloaded binary.md",
+      "expectedSnippet": "xattr -d com.apple.quarantine ./tool"
+    },
+    {
+      "id": "auth-token",
+      "category": "paraphrase",
+      "text": "how do I mint a fresh access token for the api",
+      "expectedPath": "Debugging/network/Auth API 401 session.md",
+      "expectedSnippet": "-d 'grant_type=client_credentials'"
+    },
+    {
+      "id": "psql-explain",
+      "category": "paraphrase",
+      "text": "figure out why a postgres query is slow",
+      "expectedPath": "Debugging/database/Chasing a slow query.md",
+      "expectedSnippet": "explain (analyze, buffers)"
+    },
+    {
+      "id": "leaks-tool",
+      "category": "paraphrase",
+      "text": "check a command line tool for memory leaks",
+      "expectedPath": "Debugging/build/The leak in the index build.md",
+      "expectedSnippet": "leaks --atExit --"
+    },
+    {
+      "id": "tcpdump-ws",
+      "category": "paraphrase",
+      "text": "capture the traffic on a port to a file I can open later",
+      "expectedPath": "Debugging/network/Capturing the websocket handshake.md",
+      "expectedSnippet": "sudo tcpdump -i any -s 0 -w ws.pcap"
+    },
+    {
+      "id": "otool-links",
+      "category": "paraphrase",
+      "text": "what libraries does this app bundle link against",
+      "expectedPath": "Debugging/build/What is this binary linking.md",
+      "expectedSnippet": "otool -L build/Filaway.app/Contents/MacOS/Filaway"
+    },
+    {
+      "id": "kubectx",
+      "category": "paraphrase",
+      "text": "switching to the new cluster someone mentioned in the platform sync",
+      "expectedPath": "Meetings/2026-08/Platform sync.md",
+      "expectedSnippet": "kubectl config use-context staging-eu-west-1"
+    },
+    {
+      "id": "bootstrap",
+      "category": "paraphrase",
+      "text": "the bootstrap steps for a fresh checkout of the repo",
+      "expectedPath": "Meetings/2026-04/Onboarding walkthrough.md",
+      "expectedSnippet": "direnv allow && make setup"
+    },
+    {
+      "id": "t-auth-2d",
+      "category": "temporal",
+      "text": "the auth thing from two days ago",
+      "expectedPath": "Debugging/network/Auth API 401 session.md",
+      "expectedSnippet": "-d 'grant_type=client_credentials'",
+      "expectedRange": {
+        "start": "2026-08-18T00:00:00Z",
+        "end": "2026-08-19T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-k8s-yesterday",
+      "category": "temporal",
+      "text": "the kubectl command I ran yesterday",
+      "expectedPath": "Commands/k8s/Streaming logs from the api pod.md",
+      "expectedSnippet": "kubectl logs -f deploy/api -c app --since=15m",
+      "expectedRange": {
+        "start": "2026-08-19T00:00:00Z",
+        "end": "2026-08-20T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-docker-lastweek",
+      "category": "temporal",
+      "text": "docker command from last week",
+      "expectedPath": "Commands/docker/Rebuild one service and watch it.md",
+      "expectedSnippet": "docker compose logs -f --tail=100 api",
+      "expectedRange": {
+        "start": "2026-08-10T00:00:00Z",
+        "end": "2026-08-17T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-jq-lastweek",
+      "category": "temporal",
+      "text": "the json filtering I wrote last week",
+      "expectedPath": "Commands/shell/Pulling the ids out of the export.md",
+      "expectedSnippet": "jq -r '.data.items[] | select(.status == \"active\") | .id'",
+      "expectedRange": {
+        "start": "2026-08-10T00:00:00Z",
+        "end": "2026-08-17T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-cert-monday",
+      "category": "temporal",
+      "text": "the certificate check I ran on monday",
+      "expectedPath": "Infra/certs/When does the certificate expire.md",
+      "expectedSnippet": "openssl x509 -noout -dates -subject",
+      "expectedRange": {
+        "start": "2026-08-17T00:00:00Z",
+        "end": "2026-08-18T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-rsync-3w",
+      "category": "temporal",
+      "text": "the deploy command from three weeks ago",
+      "expectedPath": "Infra/ssh/Deploying the built site.md",
+      "expectedSnippet": "rsync -avz --delete --exclude '.build'",
+      "expectedRange": {
+        "start": "2026-07-27T00:00:00Z",
+        "end": "2026-08-03T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-bisect-lastmonth",
+      "category": "temporal",
+      "text": "that git bisect note from last month",
+      "expectedPath": "Commands/git/Bisecting the slow test.md",
+      "expectedSnippet": "git bisect run swift test --filter SearchScaleTests",
+      "expectedRange": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-08-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "t-leak-june",
+      "category": "temporal",
+      "text": "the memory investigation I did in june",
+      "expectedPath": "Debugging/build/The leak in the index build.md",
+      "expectedSnippet": "leaks --atExit --",
+      "expectedRange": {
+        "start": "2026-06-01T00:00:00Z",
+        "end": "2026-07-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "y-curl",
+      "category": "typo",
+      "text": "the crul command for stagign docs",
+      "expectedPath": "Commands/curl/Staging docs endpoint.md",
+      "expectedSnippet": "Authorization: Bearer $STAGING_TOKEN"
+    },
+    {
+      "id": "y-k8s",
+      "category": "typo",
+      "text": "kubectl loggs from a pdo",
+      "expectedPath": "Commands/k8s/Streaming logs from the api pod.md",
+      "expectedSnippet": "kubectl logs -f deploy/api -c app --since=15m"
+    },
+    {
+      "id": "y-docker",
+      "category": "typo",
+      "text": "docekr compose rebuidl and follow the logs",
+      "expectedPath": "Commands/docker/Rebuild one service and watch it.md",
+      "expectedSnippet": "docker compose logs -f --tail=100 api"
+    },
+    {
+      "id": "y-jq",
+      "category": "typo",
+      "text": "jq oneliner that pluled the ids",
+      "expectedPath": "Commands/shell/Pulling the ids out of the export.md",
+      "expectedSnippet": "jq -r '.data.items[] | select(.status == \"active\") | .id'"
+    },
+    {
+      "id": "y-rsync",
+      "category": "typo",
+      "text": "rsyncc deploy to the sever",
+      "expectedPath": "Infra/ssh/Deploying the built site.md",
+      "expectedSnippet": "rsync -avz --delete --exclude '.build'"
+    },
+    {
+      "id": "y-git",
+      "category": "typo",
+      "text": "git rebse onto mian",
+      "expectedPath": "Commands/git/Rebasing onto main without losing work.md",
+      "expectedSnippet": "git rebase origin/main"
+    },
+    {
+      "id": "y-openssl",
+      "category": "typo",
+      "text": "opnessl certificat expiry chek",
+      "expectedPath": "Infra/certs/When does the certificate expire.md",
+      "expectedSnippet": "openssl x509 -noout -dates -subject"
+    },
+    {
+      "id": "n-terraform",
+      "category": "negative",
+      "text": "the terraform state migration command"
+    },
+    {
+      "id": "n-kms",
+      "category": "negative",
+      "text": "how do I rotate the aws kms key"
+    },
+    {
+      "id": "n-cargo",
+      "category": "negative",
+      "text": "the rust cargo workspace patch section"
+    },
+    {
+      "id": "n-dentist",
+      "category": "negative",
+      "text": "notes from the dentist appointment"
+    },
+    {
+      "id": "n-sourdough",
+      "category": "negative",
+      "text": "the recipe for the sourdough starter"
+    },
+    {
+      "id": "n-redis",
+      "category": "negative",
+      "text": "the redis cluster failover runbook"
+    },
+    {
+      "id": "n-nginx",
+      "category": "negative",
+      "text": "how to configure nginx rate limiting"
+    },
+    {
+      "id": "n-gradle",
+      "category": "negative",
+      "text": "the android gradle signing config"
+    },
+    {
+      "id": "n-ansible",
+      "category": "negative",
+      "text": "my ansible playbook for the bastion host"
+    },
+    {
+      "id": "n-excel",
+      "category": "negative",
+      "text": "the excel formula behind the burndown chart"
+    },
+    {
+      "id": "n-wifi",
+      "category": "negative",
+      "text": "where did I put the wifi password for the office"
+    },
+    {
+      "id": "n-graphql",
+      "category": "negative",
+      "text": "the graphql subscription example I copied"
+    }
+  ]
+}
