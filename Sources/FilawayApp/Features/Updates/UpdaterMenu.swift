@@ -92,38 +92,58 @@ final class UnconfiguredUpdaterProvider: UpdaterProviding {
 
 /// The single object the menu item observes.
 ///
-/// Picks its provider from the Info.plist at first use: both `SUFeedURL` and
-/// `SUPublicEDKey` must be present and non-empty. `Tools/make_app.sh` writes
-/// `SUFeedURL` always and `SUPublicEDKey` only when
-/// `Tools/release.env`/`$SPARKLE_PUBLIC_KEY` supplies one, so an ordinary local
-/// build lands in the unconfigured branch by construction.
+/// Whether this bundle can update itself is decided by the Info.plist: both
+/// `SUFeedURL` and `SUPublicEDKey` must be present and non-empty.
+/// `Tools/make_app.sh` writes `SUFeedURL` always and `SUPublicEDKey` only when
+/// `Tools/release.env` / `$SPARKLE_PUBLIC_KEY` supplies one, so an ordinary
+/// local build lands in the unconfigured branch by construction.
+///
+/// The *provider* is built lazily, and never during launch. SwiftUI evaluates
+/// `commands` while the first window is coming up, which is exactly the window
+/// NFR-1 budgets for "cold launch to editable"; constructing
+/// `SPUStandardUpdaterController` there would put Sparkle's bundle and Keychain
+/// work on that critical path for no benefit, since nothing can be checked
+/// before the app is running anyway. So the menu item reads only the plist, and
+/// the real controller appears on `didFinishLaunching` — or on the first click,
+/// whichever comes first.
 @MainActor
 final class UpdaterController: ObservableObject {
     static let shared = UpdaterController()
 
-    private let provider: UpdaterProviding
+    /// `nil` until something asks for it. See the note above.
+    private var provider: UpdaterProviding?
+    private let injected: UpdaterProviding?
 
-    /// Enables the menu item.
+    /// Enables the menu item. False until the provider exists, then whatever
+    /// Sparkle says — it goes false while a check Sparkle started is in flight.
     @Published private(set) var canCheckForUpdates: Bool
 
     /// Tooltip text — the reason updates are off, or the standard hint.
     let help: String
 
-    /// True when this bundle can actually reach an appcast.
-    var isConfigured: Bool { provider.unavailableReason == nil }
+    /// True when this bundle carries a feed URL and a public key.
+    let isConfigured: Bool
+
+    private var launchObserver: (any NSObjectProtocol)?
 
     init(provider: UpdaterProviding? = nil) {
-        let resolved = provider ?? Self.makeProvider()
-        self.provider = resolved
-        canCheckForUpdates = resolved.canCheckForUpdates
-        help = resolved.unavailableReason ?? "Check whether a newer version of Filaway is available"
-        resolved.onChange = { [weak self] in
-            guard let self else { return }
-            canCheckForUpdates = self.provider.canCheckForUpdates
+        injected = provider
+        if let provider {
+            isConfigured = provider.unavailableReason == nil
+            help = provider.unavailableReason ?? Self.defaultHelp
+        } else {
+            isConfigured = Self.bundleIsConfigured
+            help = isConfigured ? Self.defaultHelp : Self.notConfiguredReason
         }
+        // A configured build enables the item immediately: the provider is a
+        // moment away and Sparkle's own UI handles everything after the click,
+        // including "you are up to date". Leaving it disabled until
+        // didFinishLaunching would only produce a menu item that flickers.
+        canCheckForUpdates = isConfigured
+
         // Self-starting, so `FilawayApp.swift` gains exactly one line (the
         // `UpdaterCommands()` entry) and `AppDelegate` gains none. Whichever of
-        // the two happens second wins; `startIfPossible` is idempotent.
+        // the two paths happens second wins; `startIfPossible` is idempotent.
         if NSApp?.isRunning == true {
             Task { @MainActor [weak self] in self?.startIfPossible() }
         }
@@ -134,31 +154,51 @@ final class UpdaterController: ObservableObject {
         }
     }
 
-    private var launchObserver: (any NSObjectProtocol)?
-
-    /// A no-op when unconfigured, and skipped entirely in smoke runs so no
-    /// phase ever hits the network.
+    /// Builds the provider and lets Sparkle schedule its background checks.
+    ///
+    /// A no-op when unconfigured, and skipped entirely in smoke runs: a
+    /// `FILAWAY_SMOKE` phase must never reach the network, and `Tools/smoke.sh`
+    /// launches the app six times in a row, which would otherwise look like six
+    /// update checks.
     func startIfPossible() {
         guard !AppSettings.isSmokeRun else {
             Log.app.debug("smoke run: Sparkle updater not started")
             return
         }
-        provider.start()
-        canCheckForUpdates = provider.canCheckForUpdates
+        resolvedProvider().start()
+        canCheckForUpdates = resolvedProvider().canCheckForUpdates
     }
 
     func checkForUpdates() {
+        let provider = resolvedProvider()
+        provider.start()
         provider.checkForUpdates()
     }
 
-    private static func makeProvider() -> UpdaterProviding {
-        guard let feed = Self.infoString("SUFeedURL"), URL(string: feed) != nil,
-              Self.infoString("SUPublicEDKey") != nil
+    @discardableResult
+    private func resolvedProvider() -> UpdaterProviding {
+        if let provider { return provider }
+        let made: UpdaterProviding = injected
+            ?? (isConfigured ? SparkleUpdaterProvider() : UnconfiguredUpdaterProvider())
+        made.onChange = { [weak self] in
+            guard let self else { return }
+            canCheckForUpdates = self.provider?.canCheckForUpdates ?? false
+        }
+        provider = made
+        return made
+    }
+
+    private static let defaultHelp = "Check whether a newer version of Filaway is available"
+    private static let notConfiguredReason = "Updates not configured in this build"
+
+    private static var bundleIsConfigured: Bool {
+        guard let feed = infoString("SUFeedURL"), URL(string: feed) != nil,
+              infoString("SUPublicEDKey") != nil
         else {
             Log.app.info("no SUFeedURL/SUPublicEDKey in the bundle; updates disabled")
-            return UnconfiguredUpdaterProvider()
+            return false
         }
-        return SparkleUpdaterProvider()
+        return true
     }
 
     private static func infoString(_ key: String) -> String? {

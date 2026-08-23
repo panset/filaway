@@ -11,3 +11,5 @@ DerivedData/
 __pycache__/
 .env
 .claude/worktrees/
+Tools/release.env
+build/releases/
