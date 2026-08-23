@@ -55,6 +55,9 @@ public enum RetrievalBenchmark {
         /// widening it is one of the cheap levers on answer accuracy.
         public var promptChunkCount: Int
 
+        /// M4-07's typo lever. `false` reproduces every number M3-07 recorded.
+        public var typoExpansion: Bool
+
         public init(
             candidateLimit: Int = 50,
             chunkLimit: Int = 20,
@@ -66,8 +69,10 @@ public enum RetrievalBenchmark {
             latencyRepeats: Int = 1,
             keywordOnly: Bool = false,
             recencyPrior: RecencyPrior = .default,
-            promptChunkCount: Int = SemanticResults.promptChunkLimit
+            promptChunkCount: Int = SemanticResults.promptChunkLimit,
+            typoExpansion: Bool = true
         ) {
+            self.typoExpansion = typoExpansion
             self.candidateLimit = candidateLimit
             self.chunkLimit = chunkLimit
             self.noteLimit = noteLimit
@@ -136,7 +141,8 @@ public enum RetrievalBenchmark {
             chunkLimit: configuration.chunkLimit,
             noteLimit: configuration.noteLimit,
             rrfK: configuration.rrfK,
-            recencyPrior: configuration.recencyPrior
+            recencyPrior: configuration.recencyPrior,
+            typoExpansion: configuration.typoExpansion
         )
 
         for query in queries.queries.prefix(configuration.warmups) {

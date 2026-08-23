@@ -22,9 +22,10 @@ import GRDB
 /// | `v3-chunks` | M3-02 | `chunks`, `embeddings` (vector BLOBs) |
 /// | `v4-activity` | M2-08 | `activity_events`, `undo_events`, `note_baselines` |
 /// | `v5-pending-sessions` | M2-09 | `pending_sessions` (the FR-6.4 offline queue) |
+/// | `v6-vocab` | M4-07 | `notes_vocab` — an `fts5vocab` view of `notes_fts`'s term index |
 public enum DatabaseSchema {
     /// Bumped whenever the *last* migration changes; mirrored into `meta`.
-    public static let version = 4
+    public static let version = 5
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -257,8 +258,33 @@ public enum DatabaseSchema {
             try db.execute(sql: "CREATE INDEX pending_sessions_on_ended ON pending_sessions(ended_at ASC)")
         }
 
+        // M4-07 (`TypoExpansion`). `notes_vocab` is FTS5's own term index,
+        // exposed as a table: `SELECT term, doc FROM notes_vocab` is every
+        // word the library contains and how many notes contain it.
+        //
+        // **It stores nothing.** `fts5vocab` is a read-only projection of
+        // `notes_fts`'s existing index — no rows, no triggers, no rebuild
+        // path to keep in step, and it follows `notes_fts` through the
+        // drop-and-recreate that `MetadataStore.rebuild` does, because it
+        // resolves its target by name at query time.
+        //
+        // It is a migration rather than a `temp.` table created on demand
+        // because GRDB's readers run with `PRAGMA query_only = 1`, which
+        // refuses DDL even in the temp schema — and the query side is exactly
+        // where this is needed.
+        migrator.registerMigration("v6-vocab") { db in
+            try db.execute(sql: vocabularyStatement)
+        }
+
         return migrator
     }
+
+    /// The `fts5vocab` projection of ``ftsTables``' word index (M4-07).
+    static let vocabularyTable = "notes_vocab"
+
+    static let vocabularyStatement = """
+        CREATE VIRTUAL TABLE \(vocabularyTable) USING fts5vocab(notes_fts, 'row')
+        """
 
     /// The FTS tables kept in sync with `note_text`.
     static let ftsTables = ["notes_fts", "notes_trigram"]

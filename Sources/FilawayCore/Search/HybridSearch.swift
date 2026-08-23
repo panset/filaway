@@ -140,6 +140,15 @@ public actor HybridSearch {
         public var folderPath: String?
         /// Overrides whatever the temporal parser found.
         public var dateRange: DateRange?
+        /// Repair query words the library has never seen (M4-07).
+        ///
+        /// M3-07's weakest category by a distance: typo'd queries scored 57%
+        /// top-1 against 91% overall, because a misspelling is invisible to
+        /// FTS5 *and* poison to the embedder. ``TypoExpansion`` corrects only
+        /// terms with a document frequency of zero, which is why it can be on
+        /// by default — a term that matches nothing cannot lose anything by
+        /// being expanded.
+        public var typoExpansion: Bool
 
         public init(
             candidateLimit: Int = 50,
@@ -149,8 +158,10 @@ public actor HybridSearch {
             recencyPrior: RecencyPrior = .default,
             exclusions: ExclusionFilter = .none,
             folderPath: String? = nil,
-            dateRange: DateRange? = nil
+            dateRange: DateRange? = nil,
+            typoExpansion: Bool = true
         ) {
+            self.typoExpansion = typoExpansion
             self.candidateLimit = max(1, candidateLimit)
             self.chunkLimit = max(1, chunkLimit)
             self.noteLimit = max(1, noteLimit)
@@ -174,6 +185,12 @@ public actor HybridSearch {
     /// note's mtime in memory, not one query per candidate.
     private var noteMeta: [NoteID: NoteMeta] = [:]
     private var metaToken: String?
+
+    /// FTS5's term index, flattened for the M4-07 typo repair. Loaded lazily —
+    /// only a query containing a word the library has never indexed pays for
+    /// it — and invalidated with `notes_generation`, like ``noteMeta``.
+    private var vocabulary: TypoExpansion.Vocabulary?
+    private var vocabularyToken: String?
 
     public init(
         reader: any DatabaseReader,
@@ -225,12 +242,25 @@ public actor HybridSearch {
 
             let gate = admissionFilter(options: options, range: range)
 
+            // 0. Typo repair (M4-07). Only words the library has never
+            // indexed are touched, and the gate in front of it is one point
+            // lookup per term, so a correctly-spelt query pays almost nothing.
+            let repair = options.typoExpansion
+                ? try await repairUnknownTerms(in: text)
+                : TypoExpansion.Repair(corrections: [:])
+            // The vector arm embeds the corrected sentence; the keyword arm
+            // keeps the original terms *and* gains the corrections.
+            let vectorText = repair.rewrite(text)
+            if !repair.isEmpty {
+                log.debug("typo repair applied to \(repair.corrections.count, privacy: .public) term(s)")
+            }
+
             // 1. Vector arm.
             var vectorHits: [VectorNeighbor] = []
             var usedVectors = false
             if let embedder, let vectors {
                 do {
-                    let vector = try await embedder.embedQuery(text)
+                    let vector = try await embedder.embedQuery(vectorText)
                     vectorHits = try await vectors.topK(vector, k: options.candidateLimit, allow: gate)
                     usedVectors = true
                 } catch is CancellationError {
@@ -243,7 +273,9 @@ public actor HybridSearch {
             if Task.isCancelled { return .empty(query: query) }
 
             // 2. Keyword arm (FTS5 BM25 over the existing M1-06 tables).
-            let keywordNotes = try await keywordCandidates(text, limit: options.candidateLimit, gate: gate)
+            let keywordNotes = try await keywordCandidates(
+                text, extraTerms: repair.extraTerms, limit: options.candidateLimit, gate: gate
+            )
             if Task.isCancelled { return .empty(query: query) }
 
             // 3. Hydrate both arms' chunks in one read.
@@ -258,7 +290,7 @@ public actor HybridSearch {
 
             // A keyword hit is a *note*; the chunk it stands for is the one
             // that actually contains the query's words.
-            let terms = SearchQuery(text).terms
+            let terms = SearchQuery(text).terms + repair.extraTerms
             var keywordChunks: [IndexedChunk] = []
             for note in keywordNotes {
                 guard let chunks = byNote[note.id], !chunks.isEmpty else { continue }
@@ -347,10 +379,11 @@ public actor HybridSearch {
     /// them would return nothing for every interesting query.
     private func keywordCandidates(
         _ text: String,
+        extraTerms: [String] = [],
         limit: Int,
         gate: (@Sendable (NoteID) -> Bool)?
     ) async throws -> [KeywordHitRow] {
-        guard let expression = Self.orExpression(for: text) else { return [] }
+        guard let expression = Self.orExpression(for: text, extraTerms: extraTerms) else { return [] }
         // Over-fetch, because the gate rejects rows after ranking.
         let fetchLimit = gate == nil ? limit : limit * 4
         let rows: [KeywordHitRow] = try await reader.read { db in
@@ -379,9 +412,14 @@ public actor HybridSearch {
     }
 
     /// `"curl" OR "documents" OR "fetch"` — stopwords dropped, terms capped.
-    static func orExpression(for text: String) -> String? {
+    ///
+    /// `extraTerms` are ``TypoExpansion``'s corrections. They join the same
+    /// `OR`, so a repaired word competes on BM25 like any other term and the
+    /// misspelling it came from is still there to match itself.
+    static func orExpression(for text: String, extraTerms: [String] = []) -> String? {
         var terms = SearchQuery(text).terms.filter { !stopwords.contains($0) && $0.count > 1 }
         if terms.isEmpty { terms = SearchQuery(text).terms }
+        terms += extraTerms
         guard !terms.isEmpty else { return nil }
         // Longest first: the rarest words carry the most BM25 weight, and the
         // cap should keep them rather than the first ones typed.
@@ -527,6 +565,57 @@ public actor HybridSearch {
     public func invalidate() {
         noteMeta = [:]
         metaToken = nil
+        vocabulary = nil
+        vocabularyToken = nil
+    }
+
+    // MARK: - Typo repair (M4-07)
+
+    /// Corrections for every query word the FTS index has never seen.
+    ///
+    /// Two tiers, because the two costs are three orders of magnitude apart:
+    ///
+    /// 1. **The gate** — one `fts5vocab` point lookup per term (an index seek),
+    ///    on every query. A correctly-spelt query stops here.
+    /// 2. **The scan** — the whole term index, flattened once and cached
+    ///    against `notes_generation` the way ``noteMeta`` is. Paid only by a
+    ///    query that actually contains a word the library has never indexed.
+    ///
+    /// A failure at either tier is not a search failure: the query runs
+    /// unrepaired, which is exactly what it did before M4-07.
+    private func repairUnknownTerms(in text: String) async throws -> TypoExpansion.Repair {
+        let terms = SearchQuery(text).terms
+        guard !terms.isEmpty else { return TypoExpansion.Repair(corrections: [:]) }
+        let unknown: [String]
+        do {
+            unknown = try await reader.read { db in
+                try TypoExpansion.Vocabulary.unknownTerms(db, terms: terms)
+            }
+        } catch {
+            log.error("typo gate failed: \(String(describing: error), privacy: .public)")
+            return TypoExpansion.Repair(corrections: [:])
+        }
+        guard !unknown.isEmpty else { return TypoExpansion.Repair(corrections: [:]) }
+
+        do {
+            try await refreshVocabularyIfNeeded()
+        } catch {
+            log.error("vocabulary load failed: \(String(describing: error), privacy: .public)")
+            return TypoExpansion.Repair(corrections: [:])
+        }
+        guard let vocabulary else { return TypoExpansion.Repair(corrections: [:]) }
+        return vocabulary.repair(unknown)
+    }
+
+    private func refreshVocabularyIfNeeded() async throws {
+        let token: String = try await reader.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'notes_generation'") ?? "0"
+        }
+        if vocabulary != nil, token == vocabularyToken { return }
+        vocabulary = try await reader.read { db in
+            try TypoExpansion.Vocabulary.load(db)
+        }
+        vocabularyToken = token
     }
 
     private func refreshNoteMetaIfNeeded() async throws {

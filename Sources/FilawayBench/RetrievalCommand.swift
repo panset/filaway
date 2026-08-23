@@ -113,6 +113,12 @@ struct RetrievalCommand: AsyncParsableCommand {
     @Option(help: "Prompt chunks handed to the answer step (the app uses SemanticResults.promptChunkLimit).")
     var promptChunks = SemanticResults.promptChunkLimit
 
+    @Flag(
+        inversion: .prefixedNo,
+        help: "M4-07 typo repair: expand query words the library has never indexed."
+    )
+    var typoExpansion = true
+
     @Option(help: "Fail below this note top-1 rate (spec §8 is 0.90).")
     var gateNoteTop1 = 0.90
 
@@ -159,7 +165,8 @@ struct RetrievalCommand: AsyncParsableCommand {
             negativeVectorThreshold: negativeThreshold,
             keywordOnly: embedder.lowercased() == "bm25",
             recencyPrior: Self.prior(recency, boost: recencyBoost),
-            promptChunkCount: promptChunks
+            promptChunkCount: promptChunks,
+            typoExpansion: typoExpansion
         )
 
         if !json {
