@@ -107,15 +107,14 @@ final class PasteIntelligenceController {
             return false
         }
 
-        let body = text.substring(with: range)
-        let needsLeadingNewline = range.location > 0 && text.character(at: range.location - 1) != 0x0A
-        let needsTrailingNewline = range.upperBound < text.length
-            && text.character(at: range.upperBound) != 0x0A
-        let fence = "```"
-        let opening = fence + (suggestion.language ?? "") + "\n"
-        let inner = body.hasSuffix("\n") ? body : body + "\n"
-        let replacement = (needsLeadingNewline ? "\n" : "")
-            + opening + inner + fence + (needsTrailingNewline ? "\n" : "")
+        // The bytes themselves are built in Core, where they are unit-tested.
+        let replacement = CodeFence.wrap(
+            text.substring(with: range),
+            language: suggestion.language,
+            needsLeadingNewline: range.location > 0 && text.character(at: range.location - 1) != 0x0A,
+            needsTrailingNewline: range.upperBound < text.length
+                && text.character(at: range.upperBound) != 0x0A
+        )
 
         guard textView.shouldChangeText(in: range, replacementString: replacement) else {
             dismiss()

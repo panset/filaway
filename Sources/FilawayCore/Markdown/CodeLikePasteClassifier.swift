@@ -476,3 +476,37 @@ public enum CodeLikePasteClassifier {
         }?.key
     }
 }
+
+/// Builds the fenced block M4-03's "Wrap" produces (FR-2.4).
+///
+/// Pure string work, kept in Core rather than in the editor so the exact bytes
+/// the wrap writes are covered by `swift test` — the app half needs a live
+/// `NSTextView` and can only be checked by the smoke phase.
+public enum CodeFence {
+    /// The fence Filaway writes. Backticks, not tildes: they are what every
+    /// other Markdown tool emits and what `MarkdownHighlighter` styles.
+    public static let marker = "```"
+
+    /// Wraps `body` in a fenced block.
+    ///
+    /// - Parameters:
+    ///   - body: the text to fence, exactly as it sits in the document.
+    ///   - language: the info-string tag, or `nil` for a bare fence.
+    ///   - needsLeadingNewline: `true` when the character before the range is
+    ///     not a newline, so the opening fence would otherwise share a line.
+    ///   - needsTrailingNewline: `true` when the character after the range is
+    ///     not a newline, so the closing fence would otherwise run into it.
+    public static func wrap(
+        _ body: String,
+        language: String?,
+        needsLeadingNewline: Bool = false,
+        needsTrailingNewline: Bool = false
+    ) -> String {
+        let tag = (language ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let opening = marker + tag + "\n"
+        // A fence must own its closing line, so the body always ends in one.
+        let inner = body.hasSuffix("\n") ? body : body + "\n"
+        return (needsLeadingNewline ? "\n" : "")
+            + opening + inner + marker + (needsTrailingNewline ? "\n" : "")
+    }
+}

@@ -279,3 +279,50 @@ struct PasteKindTests {
         #expect(PasteKind.code(language: nil).isCodeLike)
     }
 }
+
+/// The bytes `Wrap` writes. These live in Core precisely so they are covered by
+/// `swift test` — the editor half needs a live `NSTextView` and can only be
+/// checked by the `paste` smoke phase.
+@Suite("Paste intelligence — the fenced block Wrap writes")
+struct CodeFenceTests {
+
+    @Test("a one-line command, mid-paragraph")
+    func midParagraph() {
+        let wrapped = CodeFence.wrap(
+            "git status", language: "bash",
+            needsLeadingNewline: true, needsTrailingNewline: true
+        )
+        #expect(wrapped == "\n```bash\ngit status\n```\n")
+    }
+
+    @Test("a command already on its own line needs no padding")
+    func ownLine() {
+        #expect(CodeFence.wrap("git status", language: "bash") == "```bash\ngit status\n```")
+    }
+
+    @Test("a body that already ends in a newline is not doubled")
+    func trailingNewline() {
+        #expect(CodeFence.wrap("git status\n", language: "bash") == "```bash\ngit status\n```")
+    }
+
+    @Test("no language means a bare fence")
+    func bareFence() {
+        #expect(CodeFence.wrap("x = 1", language: nil) == "```\nx = 1\n```")
+        #expect(CodeFence.wrap("x = 1", language: "  ") == "```\nx = 1\n```")
+    }
+
+    @Test("a multi-line block keeps every line")
+    func multiline() {
+        let body = "curl -sS https://api.st.app \\\n  -H \"Auth: Bearer $TOK\""
+        let wrapped = CodeFence.wrap(body, language: "bash")
+        #expect(wrapped.hasPrefix("```bash\n"))
+        #expect(wrapped.hasSuffix("\n```"))
+        #expect(wrapped.contains(body))
+    }
+
+    @Test("the wrapped result classifies as plain — wrapping twice is impossible")
+    func wrappingIsIdempotent() {
+        let wrapped = CodeFence.wrap("git status", language: "bash")
+        #expect(CodeLikePasteClassifier.classify(wrapped) == .plain)
+    }
+}
