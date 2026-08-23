@@ -25,7 +25,15 @@ Headless UI smoke check (no Xcode/XCTest needed, works on a locked screen):
 ```
 FILAWAY_SMOKE=1 build/Filaway.app/Contents/MacOS/Filaway
 # -> SMOKE window title="Filaway" visible=true size=1000x680
+# -> SMOKE ok   pasteboard-has-code-without-fences
+# -> SMOKE result failures=0            (exit status = number of failures)
 ```
+
+It drives the real editor code paths (insert text, toggle a checkbox, hover +
+Copy a code block and read the pasteboard, probe attributes and rendered pixels
+in light and dark, measure typing latency) and exits non-zero on any failure —
+add a `check(...)` line in `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`
+for each new UI behaviour that cannot be unit-tested.
 
 ## Layout
 
@@ -97,6 +105,11 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
 
 ## Current state
 
-M1-01 / M1-02 scaffolding only: the app shows an empty `NavigationSplitView`
-("Recents / Library" | "Editor"). No storage, no DB, no AI. Next tasks are
-M1-03 (storage model) and M1-09/M1-10 (shell and editor) — see `docs/plan.md` §3.
+M1-01 / M1-02 scaffolding plus **M1-10 (editor)**: the app shows the placeholder
+sidebar next to the real editor on an in-memory sample note — styled Markdown
+source on TextKit 2, fenced-code background with a language tag and hover Copy,
+clickable checkboxes, title field and date stamp
+(`Sources/FilawayApp/Features/Editor/`, highlighter in
+`Sources/FilawayCore/Markdown/MarkdownHighlighter.swift`). No storage, no DB, no
+AI. Next tasks are M1-03 (storage model), M1-09 (shell/sidebar) and M1-11
+(autosave) — see `docs/plan.md` §3.
