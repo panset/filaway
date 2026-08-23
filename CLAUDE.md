@@ -64,10 +64,29 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  clamps; AIConnectionManager walks
 #                                  notConfigured -> connected -> notConfigured
 # -> === smoke phase: settings2 ==  relaunch: those preferences persisted
+# -> === smoke phase: paste ===    M4-03: a curl line on the real pasteboard ->
+#                                  ⌘V lands it verbatim -> the affordance shows
+#                                  -> Wrap fences it -> one ⌘Z undoes the wrap;
+#                                  prose offers nothing; the setting disables it
+# -> === smoke phase: onboarding = M4-01: the three-step flow, driven inside its
+#                                  modal session: folder chosen, mock key
+#                                  validated, finish writes the bookmark and the
+#                                  library opens at the chosen folder
+# -> === smoke phase: onboarding2  relaunch: no flow, same library
+# -> === smoke phase: onboardingskip  "Skip for now" -> the gentle sidebar
+#                                  prompt is visible and dismissable
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-`Tools/smoke.sh` runs `build/Filaway.app` nine times against throwaway notes
+**Run `make smoke` only when no other agent is running it.** Two
+`build/Filaway.app` processes with the same bundle id at the same time and only
+one of them gets a `WindowGroup` window — the other's `editor`, `search`, `1`,
+`2` and `paste` phases then all fail at `library-open`, because `ShellView.task`
+(and therefore `AppModel.bootstrap()`) never runs. `settings`, `settings2` and
+the onboarding flow half are unaffected: they create their windows themselves.
+Check with `ps aux | grep '[F]ilaway.app/Contents/MacOS'` first.
+
+`Tools/smoke.sh` runs `build/Filaway.app` a dozen-plus times against throwaway notes
 roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
 overstays, and never leaves the app running. `editor`, `search`,
@@ -129,6 +148,10 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
 
   Features/Settings/       # Settings scene (⌘,): General / AI (Figure 4) /
                            #   Activity, AIStatusPill, SettingsSmokeCheck
+  Features/Onboarding/     # First-run flow (Figure 3, FR-7.1): OnboardingModel,
+                           #   OnboardingWindowController (AppKit), the launch
+                           #   gate, the gentle "connect AI" prompt, File →
+                           #   Import stub
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
 Sources/FilawayApp/
@@ -148,7 +171,8 @@ docs/spec/                 # functional spec
 ```
 
 Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index`,
-`Search`, `Session`, `Organize`, `AI`, `Embeddings`, `Activity`, `Settings`, `Util`.
+`Search`, `Session`, `Organize`, `AI`, `Embeddings`, `Activity`, `Settings`,
+`Import`, `Util`.
 Plus `Bench/` — the M3-07 development corpus and retrieval benchmark. It lives
 in Core, not in `FilawayBench`, because a SwiftPM executable target cannot be
 imported by a test target and the CI gate must measure exactly what the CLI
@@ -362,3 +386,39 @@ rewrite files other agents own:
   `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
   `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
   `effectiveSearchModel`. `SettingsModel.shared` owns the app's instances.
+
+## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
+
+**The first-run flow is a modal AppKit window, run before the library opens.**
+`OnboardingPresenter.runIfNeeded()` is called from two places — the top of
+`applicationDidFinishLaunching` *and* the first read of `AppSettings.notesRoot`
+— because SwiftUI decides for itself when it builds the scene, and whichever
+call comes first wins. That ordering matters: `AppModel` binds its `Library` in
+`init`, so the folder question has to be answered before anything reads the
+root. Two traps are recorded in **ADR-037** and both cost real time:
+
+- **Never implement `applicationWillFinishLaunching` on the
+  `@NSApplicationDelegateAdaptor` delegate.** It replaces SwiftUI's own
+  implementation, the scene is never built, and no window ever appears.
+- **Never host SwiftUI (`NSHostingController`) in a window shown before the
+  scene exists.** It trips an AttributeGraph precondition and aborts the
+  process. `OnboardingWindowController` is therefore plain AppKit.
+
+The notes root now resolves `FILAWAY_NOTES_ROOT` → the bookmark in
+`AppSettings.notesRootBookmark` → `~/Notes`, cached per launch and invalidated
+by `AppSettings.setNotesRoot(_:)`. When AI is skipped, `ConnectAIPromptModel`
+puts one quiet row in the sidebar footer (`aiConnectionSkipped`, dismissable per
+launch) — never a modal (FR-6.4).
+
+**Paste intelligence** (FR-2.4) classifies in Core
+(`CodeLikePasteClassifier` — pure, unit-tested with a ≥25-case corpus) and
+offers in the app (`Features/Editor/PasteIntelligence*.swift`). The paste always
+lands verbatim; the wrap is one undo step; `AppSettings.pasteIntelligenceEnabled`
+(Settings → General) turns it off. ADR-038.
+
+**Deferred stubs.** `FilawayCore/Import/` holds the `NoteImporter` contract and
+`AppleNotesImporter`, which throws `.notAvailableInThisVersion`; File → Import →
+Apple Notes… is present and disabled with that message as its tooltip
+(ADR-039). `<root>/_assets/` is reserved for future attachments — `PathRules`
+treats it as non-note content and `NoteStore.scan` skips the subtree
+(ADR-040). FR-4.7 "Reorganize library" is cut, with reasons, in ADR-041.

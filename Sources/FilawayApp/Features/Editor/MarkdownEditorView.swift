@@ -100,6 +100,32 @@ final class MarkdownEditorController: ObservableObject {
         textView?.toggleTask(atCharacterIndex: index) ?? false
     }
 
+    // MARK: Paste intelligence (M4-03, FR-2.4)
+
+    /// Runs the real ⌘V path: whatever is on the general pasteboard is inserted
+    /// and then classified. The smoke check uses this rather than synthesising a
+    /// key event, which a headless run cannot deliver.
+    func paste() { textView?.paste(nil) }
+
+    /// The standing "Wrap in code block?" offer, or `nil`.
+    var pasteSuggestion: PasteSuggestion? { textView?.pasteIntelligence.suggestion }
+
+    /// `true` while the affordance is on screen.
+    var isPasteAffordanceVisible: Bool { textView?.pasteAffordanceIsVisible ?? false }
+
+    /// What the affordance reads — it names the language when one was guessed.
+    var pasteAffordanceText: String { textView?.pasteAffordanceText ?? "" }
+
+    /// Clicks the affordance's `Wrap` button (the ⌘⇧K path is the same code).
+    @discardableResult
+    func wrapPastedText() -> Bool { textView?.performPasteAffordanceWrap() ?? false }
+
+    /// Clicks the affordance's dismiss glyph.
+    func dismissPasteAffordance() { textView?.pasteIntelligence.dismiss() }
+
+    /// ⌘Z on the editor's own undo manager — the wrap has to be one step.
+    func undo() { textView?.undoManager?.undo() }
+
     // MARK: Code blocks
 
     var codeBlocks: [MarkdownCodeBlock] { textView?.codeBlocks ?? [] }

@@ -61,6 +61,16 @@ the helpers (`title(of:)`, `folderPath(of:)`, `sanitizeTitle(_:)`,
 
 `Library.url(for:)` and `Library.relativePath(for:)` convert both ways.
 
+**`_assets/` is reserved** (FR-2.5, deferred — ADR-052). `<root>/_assets/` is
+the folder attachments will land in when they ship; nothing in Phase 1 writes
+it. `PathRules.isReservedPath(_:)` is true for anything under it, `isNotePath`
+is false inside it (so `NoteStore` refuses to write there and the watcher
+ignores it), and `NoteStore.scan` skips the whole subtree — `_assets` is neither
+a Library folder nor a source of notes. Notes will reference images with
+ordinary relative Markdown links (`![](../_assets/shot.png)`), so DS-1's
+"readable in any editor" survives attachments. The reservation is top-level
+only: a folder named `_assets` two levels down belongs to the user.
+
 ---
 
 ## `Library`
@@ -852,6 +862,8 @@ range-checked; nothing above it reads a raw defaults key.
 | `advancedModelOverride` | `Bool` | `false` | `ai.model.advancedOverride` | app |
 | `notesRootBookmark` | `Data?` | `nil` (→ `~/Notes`) | `library.rootBookmark` | app |
 | `aiConnectionSkipped` | `Bool` | `false` | `ai.connectionSkipped` | app |
+| `onboardingCompleted` | `Bool` | `false` | `onboarding.completed` | app |
+| `pasteIntelligenceEnabled` | `Bool` | `true` | `editor.pasteIntelligence` | app |
 | `usageMonthStart` | `Date?` | `nil` | `ai.usageMonthStart` | app |
 
 Three things to know:
@@ -901,6 +913,64 @@ outcomes into the same status the pill draws (FR-6.4); a rate limit heals itself
 once its deadline passes. Tests inject `InMemorySecretStore` and a
 `providerFactory` returning `MockProvider`; the app's default factory follows
 `FILAWAY_AI_MODE`, standing in a mock when `replay` has no fixture directory.
+
+---
+
+## `CodeLikePasteClassifier` (M4-03 — FR-2.4)
+
+`Sources/FilawayCore/Markdown/`. Decides whether pasted text is worth offering
+to fence.
+
+```swift
+switch CodeLikePasteClassifier.classify(text, pasteboardTypes: types) {
+case .plain:                       break            // prose, a URL, already fenced
+case let .shellCommand(language):  offer(language)  // "bash"
+case let .code(language):          offer(language)  // "json", "swift", nil …
+}
+```
+
+Conservative by construction, because a false positive interrupts someone
+pasting a sentence and a false negative costs three keystrokes:
+
+* a `$ ` / `% ` prompt marker, or a leading `NAME=value`, is decisive;
+* a **prose veto** runs before every remaining guess (stop-word density,
+  sentence punctuation, no code punctuation anywhere on the line);
+* JSON is decided by `JSONSerialization`, not by shape; YAML needs every line to
+  be a mapping or a bullet, and at least one real `key:`;
+* a known command head only counts with a real argument attached;
+* text that already contains a fence, and a pasteboard advertising a file URL or
+  an image, are `.plain` outright.
+
+No AppKit, no state, no regular expressions on the hot path — the editor calls
+it once per paste on the main thread. The app half is
+`FilawayApp/Features/Editor/PasteIntelligence*.swift` (ADR-050).
+
+---
+
+## Import (M4-10 — FR-7.2)
+
+`Sources/FilawayCore/Import/`. A contract, and one implementation that refuses.
+
+```swift
+public protocol NoteImporter: Sendable {
+    var displayName: String { get }
+    var isAvailable: Bool { get }
+    func discover() async throws -> [ImportCandidate]
+    func importNotes(_ candidates: [ImportCandidate],
+                     into store: NoteStore,
+                     progress: (@Sendable (Int, Int) -> Void)?) async throws -> ImportReport
+}
+```
+
+`AppleNotesImporter` throws `ImportError.notAvailableInThisVersion` from every
+entry point (plan §1 amendment 8: Apple Notes import is Phase 1.x). The message
+is `AppleNotesImporter.unavailableMessage`, shared with the disabled **File →
+Import → Apple Notes…** menu item so the sentence exists once. See ADR-051.
+
+Two things the shape fixes on purpose: an import is *discover, then write*, so
+the user can be shown what will happen before anything lands on disk; and the
+writing goes through `NoteStore`, so an importer never gets its own file format,
+front matter or collision rules.
 
 ---
 

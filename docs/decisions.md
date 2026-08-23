@@ -1718,3 +1718,183 @@ derived from it — a 409 s index build at 5,000 notes, a 273 MB matrix at 20,00
   **not** needed: measured on realistic notes the chunker produces 2.0 chunks
   per note, and raising `minTokens` from 64 to 128 moves the synthetic corpus by
   only 4.6% because its density is code fences, which never fold.
+
+---
+
+## ADR-049 — Onboarding is a modal window, and the first read of the notes root runs it
+
+**Date:** 2026-08-23 · **Task:** M4-01 · **Status:** accepted
+
+**Context.** FR-7.1's first step asks *where the notes live*. Everything
+downstream binds to that answer: `AppModel` builds its `Library` in `init`, the
+`libraryKey` derived from it names the database, the per-library preferences and
+the FTS index. So the folder question has to be answered before anything opens a
+library — and a SwiftUI `WindowGroup` gives no supported hook for "do not build
+the scene yet".
+
+Three placements were tried:
+
+1. **A sheet over the main window.** Reads well, and it is what the spec sketch
+   suggests. It is also a lie: the window behind the sheet is an already-open
+   library on a root the user has not chosen. Adopting a different folder would
+   need a `reopenLibrary(at:)` on `AppModel` that tears down the store, the
+   metadata database, the watcher and the autosave controller mid-flight — a
+   large amount of failure surface for a screen shown once.
+2. **`applicationWillFinishLaunching`.** The obvious "before the scene exists"
+   hook, and it *breaks the app*: implementing that method on an
+   `@NSApplicationDelegateAdaptor` delegate replaces SwiftUI's own
+   implementation, the scene is never created, and no window appears at all.
+   This cost a debugging cycle and is why the method is absent from
+   `AppDelegate` with nothing to mark its absence — hence this note.
+3. **`applicationDidFinishLaunching`.** Safe, but SwiftUI decides for itself
+   when it builds the scene relative to that notification, so the ordering is
+   not guaranteed.
+
+**Decision.** The flow is its own **modal window** (`NSApp.runModal`), and it is
+triggered from **two places that cannot both be too late**: the top of
+`applicationDidFinishLaunching`, and the first read of `AppSettings.notesRoot`.
+`OnboardingPresenter.runIfNeeded()` is idempotent and re-entrancy-guarded, so
+whichever comes first wins. Making the *reader of the answer* ask the question
+removes the ordering problem instead of betting on it.
+
+A modal window is also the native shape: Setup Assistant and Migration Assistant
+are plain centred windows that become the app once answered, not sheets over a
+half-built one.
+
+**Consequences.**
+- The library this launch opens is always the folder just chosen. No reopen
+  path, no teardown, no second code path for "the root changed" — M4-02's
+  Settings → General "Change…" can be a restart-scoped change for the same
+  reason.
+- `AppSettings.notesRoot` resolves once per launch and caches;
+  `setNotesRoot(_:)` invalidates the cache. Precedence is `FILAWAY_NOTES_ROOT`
+  (tests, smoke) → the stored bookmark → `~/Notes`.
+- The root is persisted as a **bookmark**, not a path (NFR-5): it survives a
+  rename and an external volume. A stale bookmark still resolves and is
+  rewritten on the spot.
+- Every smoke phase starts on a fresh defaults suite and therefore looks like a
+  first run, so the gate is skipped unless the phase is one of the onboarding
+  phases — otherwise every phase would deadlock on a modal nobody answers.
+- ⌘Q still quits during the flow: a modal session does not block terminate.
+
+---
+
+## ADR-050 — Paste intelligence offers; it never rewrites the paste
+
+**Date:** 2026-08-23 · **Task:** M4-03 · **Status:** accepted
+
+**Context.** FR-2.4: "pasting content that looks like a shell command or code
+offers to wrap it in a code block". Two ways to build it — transform the text on
+the way in and let the user undo, or insert it verbatim and offer afterwards.
+
+**Decision.** The paste always lands exactly as pasted. `MarkdownTextView.paste`
+snapshots the document, calls `super`, then hands the inserted range to
+`PasteIntelligenceController`, which classifies it with
+`CodeLikePasteClassifier` (in Core, no AppKit) and — only for `.shellCommand` /
+`.code`, only when the caret was not already inside a fence, and only when
+`AppSettings.pasteIntelligenceEnabled` — raises a transient bar reading "Wrap in
+code block? ⌘⇧K" with Wrap and Dismiss. The wrap is one `replaceCharacters`
+between `shouldChangeText` and `didChangeText`, so it is a single undo step.
+
+The classifier is **conservative by construction**: a `$`/`%` prompt marker or a
+leading `NAME=value` assignment is decisive; everything else runs a prose veto
+first; JSON is decided by `JSONSerialization` rather than by shape; a known
+command head only counts with a real argument attached; already-fenced text and
+file-URL pasteboards are `.plain` outright.
+
+**Consequences.**
+- A false positive costs one glance at a bar that withdraws on the next
+  keystroke; a false negative costs three keystrokes. The asymmetry is
+  deliberate and is what the ≥25-case corpus in `PasteIntelligenceTests` is
+  written to hold.
+- The interesting half is `swift test`-able with no window: the classifier is
+  pure Core. Only the bar and the undo grouping need the smoke phase.
+- The bar is pinned to the top of the viewport, not to the caret: a pasted
+  command is often several lines tall, so "near the caret" is not one place, and
+  a popover would take key focus from the editor.
+- The offer withdraws on any further edit, on a note switch, and after 12 s, so
+  a stale range can never be replaced.
+
+---
+
+## ADR-051 — Deferred features ship as a contract plus a disabled menu item
+
+**Date:** 2026-08-23 · **Task:** M4-10 · **Status:** accepted
+
+**Context.** FR-7.2 (import from Apple Notes) is deferred to Phase 1.x (plan §1
+amendment 8). The spec asks the design to "say so with a stub".
+
+**Decision.** `FilawayCore/Import/Importer.swift` defines `NoteImporter`
+(`displayName`, `isAvailable`, `discover()`, `importNotes(_:into:progress:)`),
+`ImportCandidate`, `ImportReport` and `ImportError`. `AppleNotesImporter`
+implements it and throws `.notAvailableInThisVersion` from every entry point,
+with one message — `AppleNotesImporter.unavailableMessage` — shared with the
+**File → Import → Apple Notes…** menu item, which is present and disabled with
+that sentence as its tooltip.
+
+The protocol shape is the part worth freezing now: an import is *discover, then
+write*, so the user can be shown what is about to happen before anything lands;
+and writing goes through `NoteStore`, so an importer never gets its own file
+format, front matter or collision rules.
+
+**Consequences.**
+- The menu item says why rather than opening a "not yet" alert.
+- The message names the workaround (drag exported `.md`/`.txt` into the notes
+  folder — the watcher picks them up), so a deferred feature is not a dead end.
+- Phase 1.x implements two methods and flips `isAvailable`; no UI or Core change.
+
+---
+
+## ADR-052 — `_assets/` is reserved now so attachments can arrive later
+
+**Date:** 2026-08-23 · **Task:** M4-10 · **Status:** accepted
+
+**Context.** FR-2.5 (image attachments) is cut from Phase 1 (plan §1 amendment
+9), and the spec requires the design to state how storage will accommodate them.
+DS-1 also says nothing but `.md` files and folders belongs in the user's tree,
+which an attachments folder would violate if it were not planned for.
+
+**Decision.** `<root>/_assets/` is reserved. Nothing in Phase 1 writes it, and
+`PathRules.isReservedPath(_:)` is true for anything under it: `isNotePath` is
+false inside it, so the store refuses to write there, the watcher ignores events
+from it, and `NoteStore.scan` calls `skipDescendants()` on the folder — it is
+neither a Library folder in the sidebar nor a source of notes. When attachments
+ship, images land in `_assets/` and notes reference them with ordinary relative
+Markdown links (`![](../_assets/shot.png)`), which keeps "readable in any
+editor" true.
+
+Reserved names are **top-level only**: a user's own folder called `_assets` two
+levels down is their business.
+
+**Consequences.**
+- A library written by Phase 1 and one written by the version that ships
+  attachments are the same library; no migration.
+- The reservation is a five-line change with a test, not a feature.
+
+---
+
+## ADR-053 — FR-4.7 "Reorganize library" is cut from Phase 1
+
+**Date:** 2026-08-23 · **Task:** M4-10 · **Status:** accepted
+
+**Context.** FR-4.7 (a COULD) asks for a command that re-files the *whole*
+library in one pass, rather than one writing session at a time.
+
+**Decision.** Cut from Phase 1 (plan §1 amendment 10), and recorded here so the
+cut is a decision rather than an omission.
+
+**Reasoning.** A whole-library pass is not a bigger version of a session
+organize; it is a different problem. The per-session pipeline is safe because
+its plan is computed against a handful of note hashes and applied
+compare-and-swap in one transaction (ADR-033); a 5,000-note plan cannot be
+computed against a consistent snapshot, cannot be reviewed in one card, and
+cannot be undone as one event — and "the AI rearranged everything and I cannot
+get it back" is precisely the failure the whole design exists to prevent.
+It is also the most expensive single feature per unit of user value in the spec:
+one full pass over a real library is thousands of requests.
+
+**Consequences.**
+- The Activity log and `UndoService` are sized for session-scale events only.
+- A later version can build it on the same `PlanApplier` by chunking the library
+  into session-sized plans and applying them one reviewable batch at a time —
+  the contract does not need to change, only the driver above it.
