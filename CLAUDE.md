@@ -29,6 +29,16 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  *before* launch: as-you-type hits, match and
 #                                  snippet ranges, ↑↓⏎esc, open-scrolled-to-
 #                                  match, fuzzy titles, recents, "No matches"
+# -> === smoke phase: organize === M2 end to end on a committed replay fixture:
+#                                  seed the library the fixture was recorded
+#                                  against, type the session, end it at the
+#                                  fixture's instant, Accept -> bytes move ->
+#                                  Activity has the event + diff -> Undo
+# -> === smoke phase: organize-auto === the same session in auto mode: applied
+#                                  unasked, the card offers Undo, Undo restores
+# -> === smoke phase: organize-offline === the provider fails with a network
+#                                  error: nothing changes, the session is queued
+#                                  durably, no modal, capture still works
 # -> === smoke phase: kill ===     type -> wait out the 750 ms debounce -> type
 #                                  again -> park; the script sends SIGKILL
 # -> === smoke phase: killcheck === relaunch: the debounced burst is on disk,
@@ -42,12 +52,17 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-`Tools/smoke.sh` runs `build/Filaway.app` six times against throwaway notes
+`Tools/smoke.sh` runs `build/Filaway.app` nine times against throwaway notes
 roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
-overstays, and never leaves the app running. `editor`, `search` and
-`kill`/`killcheck` each get their own notes root; `1` and `2` share one so the
-relaunch has state to restore. A single phase directly:
+overstays, and never leaves the app running. `editor`, `search`,
+`kill`/`killcheck` and each `organize*` phase get their own notes root (the
+organize phases get their own Application Support too, so baselines and the
+Activity journal start empty); `1` and `2` share one so the relaunch has state
+to restore. Every phase runs with `FILAWAY_AI_MODE=replay` and
+`FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
+network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. A single
+phase directly:
 
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
@@ -59,7 +74,15 @@ and state restoration. Add a `check(...)` line for each new UI behaviour that
 cannot be unit-tested: shell behaviour in
 `Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
 `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, search behaviour in
-`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`.
+`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`, organize behaviour
+in `Sources/FilawayApp/Features/Organize/OrganizeSmokeCheck.swift`.
+
+The organize phases replay a **committed** fixture whose filename is a hash of
+the whole rendered prompt, so the corpus in `OrganizeSmokeCheck` and
+`AppWiringFixture` (`Tests/FilawayCoreTests/OrganizeWiringTests.swift`) must
+stay in step — `wiringHitsTheCommittedFixture` pins the key so drift is a test
+failure, not a mystery. Regenerate with
+`FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter OrganizeWiringTests/regenerateFixture`.
 
 CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
@@ -76,6 +99,10 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
                            #   AppSettings, SmokeDriver
   Features/Sidebar/        # Recents + Library tree (Figure 1, FR-1.2)
   Features/Editor/         # TextKit 2 editor, AutosaveController
+  Features/Organize/       # OrganizeCoordinator (the whole M2 seam), the
+                           #   Figure 2a card, Edit + View-changes sheets,
+                           #   the AI status pill (FR-4.2, FR-6.4)
+  Features/Activity/       # Activity window ⌥⌘A: events, diffs, Undo (FR-4.3)
   Features/Search/         # toolbar field, SearchCoordinator, ⌘K results panel
                            #   (Figure 2b, FR-1.3, FR-5.1/5.2)
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
@@ -200,6 +227,34 @@ pure function of that state. Full rationale in ADR-034.
   the `// MARK: - Extension point (M3-06)` marker in `SearchResultsPanel`.
   Keyword search must keep working with no AI and no network at all (FR-5.5).
 
+## Organize UI (spec Figure 2a, FR-4.2, FR-4.3, FR-6.4)
+
+`OrganizeCoordinator` (`Features/Organize/`) is the seam, the way
+`SearchCoordinator` is for ⌘K: it owns the `SessionTracker`, the `Organizer`,
+the `PlanApplier`, the `ActivityLog`, `UndoService` and the durable offline
+queue, and turns `OrganizerEvent`s into main-actor card state. `AppModel` builds
+one after the first paint. Full wiring diagram in `docs/organize.md`.
+
+- **The card** is a non-blocking stack at the **bottom-trailing** of the editor
+  pane (ADR-036 — the top strip is `BannerView`'s, and the caret usually is not
+  at the bottom). Ask mode asks — *Organize this session?* with **Accept** (⏎),
+  **Edit**, **Dismiss** (⎋) — and waits as long as it takes. Auto mode states —
+  *Session organized* with **Undo** and **View changes** — and fades after 20 s.
+  Cards queue; none of them ever takes first responder.
+- **Menu items.** Window ▸ **Activity** is ⌥⌘A (the `Window` scene's own
+  shortcut). Edit ▸ **Undo Last Organization** is **⌥⌘Z** — ⇧⌘Z is Redo in every
+  macOS text view including Filaway's editor, and taking it would make the
+  editor lie.
+- **Status.** One pill in the toolbar (`AI ready` / `AI queued · N` /
+  `AI offline` / `Key invalid` / `AI paused` / `AI off`). Clicking it posts
+  `.filawayOpenAISettings` for Settings to catch. No modal alerts anywhere;
+  queued sessions retry on their own and survive a relaunch.
+- **Settings** are read through `OrganizeSettingsSource` (keys
+  `organizationMode`, `idleInterval` in minutes, `excludedFolders`) with a
+  UserDefaults default, so M2-11 can substitute `AppSettings` in one line.
+- **Candidates** come from `KeywordCandidateFinder` (FTS body evidence on top of
+  title overlap). M3-08 replaces it behind the same `CandidateFinder` protocol.
+
 ## Current state
 
 **M1 is complete.** Filaway is a working notes app on `~/Notes`: two-pane window
@@ -216,7 +271,19 @@ are blocked on Developer Program enrolment + Xcode (M4-05); the visual Figure-1/
 Figure-2b and VoiceOver passes need an unlocked screen (M4-06); launch timing at
 5k/20k notes is unmeasured (M4-07).
 
-Next up: **M2** (AI organize) and **M3** (semantic search, which fills
-`SearchMode.semantic`). The onboarding folder picker is M4-01, so the notes root
-is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a
-bookmark.
+**M2 is wired end to end** (M2-09/10/12): a writing session ends, the plan comes
+back from the provider, the Figure 2a card appears, Accept applies it, Activity
+records a diff and Undo restores every byte — proved headlessly by the
+`organize`, `organize-auto` and `organize-offline` smoke phases against a
+committed replay fixture. Settings → AI (M2-11) is the remaining M2 task; until
+it lands the organizer reads `OrganizeSettingsSource` from UserDefaults and the
+status pill's click posts `.filawayOpenAISettings` for it to catch.
+
+One known gap: FR-4.4's **raw session text is not recorded** on the automatic
+path — `PlanApplying.apply(_:)` has no room for it, so nothing between the
+tracker and the applier carries the text (`docs/organize.md`, "Known gap").
+
+Next up: **M3** (semantic search, which fills `SearchMode.semantic`, and M3-08's
+hybrid `CandidateFinder`). The onboarding folder picker is M4-01, so the notes
+root is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as
+a bookmark.

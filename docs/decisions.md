@@ -1145,3 +1145,74 @@ query.
 - `SearchMode.semantic` exists as a documented, unimplemented case. M3-06 adds a
   second backend, the Find/Ask toggle and the answer card above the list at the
   marked extension point; nothing about the focus model has to change.
+
+## ADR-035 — The app's AI mode defaults to `live`, and the smoke suite replays
+
+**Date:** 2026-08-23 · **Task:** M2-12 · **Status:** accepted
+
+**Context.** `AIMode.current()` defaults to `replay` because that is right for
+`swift test` and CI: no key, no network, no cost. The app cannot inherit that
+default — a shipped `Filaway.app` with no `FILAWAY_AI_MODE` set would serve
+fixtures that are not in the bundle, and quietly organize nothing.
+
+**Decision.** `OrganizeCoordinator.makeProvider(environment:)` reads
+`FILAWAY_AI_MODE` itself and defaults to **`live`** with
+`APIKeySource.storeThenEnvironment(KeychainStore())`. `replay` additionally
+requires `FILAWAY_AI_FIXTURES`, which `Tools/smoke.sh` sets to
+`Tests/Fixtures/ai-recordings`. A fourth, app-only lever, `FILAWAY_AI_FAIL`,
+returns a `MockProvider` that always fails with a network error (or an invalid
+key), because there is no way to unplug the network from inside a test and
+FR-6.4's degradation is exactly the path worth proving end to end.
+
+**Consequences.**
+- Every smoke phase runs with `FILAWAY_AI_MODE=replay`, so no phase can reach
+  the network even by accident — including the ones that predate M2.
+- The `organize` phases replay a **committed** fixture, so they assert the real
+  card text rather than a mock's.
+- A missing fixture surfaces as `AIError.missingRecording`, which the organizer
+  does *not* queue: the phase fails loudly instead of hanging.
+- `FILAWAY_AI_FAIL` is app-layer only. Nothing in `FilawayCore` knows about it.
+
+## ADR-036 — One prompt behind the goldens and the smoke phase, and the card sits bottom-trailing
+
+**Date:** 2026-08-23 · **Task:** M2-10, M2-12 · **Status:** accepted
+
+**Context.** Two things had to be decided to make M2 visible and testable: where
+the organization card lives on screen, and how a headless phase can replay a
+recorded model answer when the fixture's filename is a hash of the whole
+rendered prompt — library tree, note ids, session delta, candidate ranking and
+the session's end time.
+
+**Decision (the card).** Bottom-trailing of the editor pane, stacked, newest at
+the bottom. The top strip already belongs to `BannerView` — "the file changed
+under you" and "the AI has a suggestion" are different enough to deserve
+different places — and the caret is usually in the upper half of the pane, where
+a top banner would cover the words the card is talking about. Ask mode is a
+question that waits indefinitely (**Accept** ⏎ / **Edit** / **Dismiss** ⎋); auto
+mode is a statement that fades after 20 s (**Undo** / **View changes**), with
+Undo living on in the Activity window. Nothing ever takes first responder.
+
+**Decision (the fixture).** The smoke corpus is chosen so the app's own wiring
+renders **exactly** M2-06's `merge-code-block` prompt: seeded front matter pins
+the note ids, and `OrganizeCoordinator.endSessionNow(noteID:endedAt:)` rewinds
+the tracker's last activity by the idle interval and ticks, so the session ends
+at a named instant with reason `idle`. One recording therefore stands behind the
+Core goldens, the Core end-to-end wiring test and the smoke phase.
+`OrganizeWiringTests.wiringHitsTheCommittedFixture` asserts the key, so drift is
+a named test failure at `make test` rather than a bare `missingRecording` in a
+smoke run half an hour later. Auto mode renders `Mode: auto` and so has its own
+fixture, `122cfeeded98ffbb.json`.
+
+**Consequences.**
+- `KeywordCandidateFinder` normalises keyword scores over *eligible* hits only.
+  Letting the session's own note (top hit, never a candidate) set the divisor
+  would make the prompt depend on indexing order.
+- The `organize` phases wait for `MetadataStore.textIndexCount()` to catch up
+  before ending the session, for the same reason.
+- Changing the prompt, the ranker or the corpus moves the key: regenerate with
+  `FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter OrganizeWiringTests/regenerateFixture`,
+  which writes only fixtures that do not exist and never overwrites a golden.
+- The auto-mode card shows the *plan's* summary, read back off the Activity row,
+  not `AppliedPlan.summary` — the latter is the applier's account of what it did
+  ("Moved a section from Scratch."), where FR-4.2 asks for the model's
+  plain-language sentence.
