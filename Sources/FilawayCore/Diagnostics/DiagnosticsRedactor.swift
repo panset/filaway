@@ -13,7 +13,7 @@ import Foundation
 /// | `/Users/ada/Notes/Commands/curl.md` | `<notes-root>/…` |
 /// | `/Users/ada/Library/Logs/…` | `~/Library/Logs/…` |
 /// | `sk-ant-api03-…` | `<redacted-key>` |
-/// | `Ada Lovelace` (the account's full name) | `<user>` |
+/// | `/Users/ada` (another account's home) | `/Users/<user>` |
 ///
 /// The notes-root rule collapses the *whole* remainder of the path, not just
 /// the prefix: `<notes-root>/Commands/curl.md` would still name a folder and a
@@ -27,7 +27,8 @@ public struct DiagnosticsRedactor: Sendable {
     /// Literal secrets — an API key the caller happens to hold. Never logged,
     /// never stored; only ever compared against.
     public var secrets: [String]
-    /// Account names that appear in crash reports' paths.
+    /// Account names, replaced only where they are a path component
+    /// (`/Users/<name>`) — see ``redact(_:)``.
     public var userNames: [String]
 
     public static let notesRootPlaceholder = "<notes-root>"
@@ -88,8 +89,12 @@ public struct DiagnosticsRedactor: Sendable {
                 : "/private" + homeDirectory
             out = out.replacingOccurrences(of: alternate, with: "~")
         }
+        // Only as a *path component*. A bare substring replacement would maul
+        // any text the account name happens to occur in — including the bundle
+        // id, when the developer's account name is their own surname.
         for name in userNames where !name.isEmpty {
-            out = out.replacingOccurrences(of: name, with: "<user>")
+            out = out.replacingOccurrences(of: "/Users/\(name)", with: "/Users/<user>")
+            out = out.replacingOccurrences(of: "/home/\(name)", with: "/home/<user>")
         }
         return out
     }
