@@ -18,10 +18,18 @@ public actor NoteStore {
     public let library: Library
     private let fileManager: FileManager
     private var ledger = OwnOperationLedger()
+    private var failureHook: StorageFailureHook?
 
-    public init(library: Library, fileManager: FileManager = .default) {
+    public init(library: Library, fileManager: FileManager = .default, failureHook: StorageFailureHook? = nil) {
         self.library = library
         self.fileManager = fileManager
+        self.failureHook = failureHook
+    }
+
+    /// Installs (or clears) the ``StorageFailureHook`` — the only way to model a
+    /// `kill -9` inside ``atomicWrite`` without killing the test process.
+    public func setFailureHook(_ hook: StorageFailureHook?) {
+        failureHook = hook
     }
 
     /// Creates the notes root and the Application Support directory if missing.
@@ -107,7 +115,7 @@ public actor NoteStore {
         try requireDepth(ofFolder: PathRules.folderPath(of: path), original: relativePath)
         let url = library.url(for: path)
         let data = Data(text.utf8)
-        try atomicWrite(data, to: url)
+        try atomicWrite(data, to: url, relativePath: path)
 
         let summary = try Self.summary(
             from: data,
@@ -273,7 +281,7 @@ public actor NoteStore {
     /// directory on the *same volume* (NFR-5: the root may be anywhere), never
     /// inside the notes root, so DS-1's "nothing but `.md` files and folders"
     /// holds even mid-write.
-    private func atomicWrite(_ data: Data, to url: URL) throws {
+    private func atomicWrite(_ data: Data, to url: URL, relativePath: String) throws {
         let directory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let staging = try fileManager.url(
@@ -285,6 +293,10 @@ public actor NoteStore {
         defer { try? fileManager.removeItem(at: staging) }
         let temporary = staging.appendingPathComponent(url.lastPathComponent)
         try data.write(to: temporary, options: .atomic)
+        // NFR-3's worst instant: the new bytes exist, the old file is still the
+        // one at `url`, and the rename has not happened. A `kill -9` here must
+        // leave the original intact and nothing behind inside the notes root.
+        try failureHook?.check(.beforeRename(relativePath))
         if fileManager.fileExists(atPath: url.path) {
             _ = try fileManager.replaceItemAt(url, withItemAt: temporary)
         } else {

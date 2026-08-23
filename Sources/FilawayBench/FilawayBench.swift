@@ -13,7 +13,7 @@ struct FilawayBench: AsyncParsableCommand {
         subcommands: [
             Scan.self, Keyword.self, All.self, EmbedCommand.self,
             IndexCommand.self, SemanticCommand.self, RetrievalCommand.self,
-            CorpusCommand.self,
+            CorpusCommand.self, ChurnCommand.self,
         ],
         defaultSubcommand: Scan.self
     )

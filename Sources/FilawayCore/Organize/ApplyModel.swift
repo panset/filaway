@@ -25,6 +25,21 @@ public protocol PlanApplying: Sendable {
     ///   compare-and-swap) — the caller re-queues the session rather than
     ///   applying half a plan.
     func apply(_ plan: OrganizationPlan) async throws -> AppliedPlan
+
+    /// Applies the plan and files the session's **raw text** with the resulting
+    /// Activity event, so FR-4.4's "the original raw session text remains
+    /// recoverable" has something to recover (M4-08).
+    ///
+    /// The default implementation drops the text and calls ``apply(_:)``: an
+    /// in-memory double in a race-matrix test has nowhere to put it, and the
+    /// organizer must not have to know which kind of applier it holds.
+    func apply(_ plan: OrganizationPlan, sessionText: String?) async throws -> AppliedPlan
+}
+
+public extension PlanApplying {
+    func apply(_ plan: OrganizationPlan, sessionText: String?) async throws -> AppliedPlan {
+        try await apply(plan)
+    }
 }
 
 /// Why an apply refused.

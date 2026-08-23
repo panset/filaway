@@ -3,10 +3,19 @@ import GRDB
 
 /// The migration registry for the derived database (DS-3).
 ///
-/// Everything here is *derived*: the file can be deleted at any time and
-/// rebuilt from the notes folder (`Settings → Rebuild index`). That is what
-/// lets later milestones bolt on FTS5, embeddings, activity and undo without
-/// touching the user's Markdown.
+/// Most of what is here is *derived*: `notes`, `folders`, `note_text`, the FTS
+/// indexes, `chunks` and `embeddings` can be deleted at any time and rebuilt
+/// from the notes folder (`Settings → Rebuild index`). That is what lets later
+/// milestones bolt on FTS5, embeddings, activity and undo without touching the
+/// user's Markdown.
+///
+/// **Three tables are the exception** and have been since `v4-activity`:
+/// `activity_events`, `activity_note_images` and `note_baselines` are not
+/// derived from anything on disk, so losing this file costs the user their
+/// Activity history and every organized baseline. That is why
+/// ``DatabaseFile/open(at:configuration:fileManager:now:prepare:)`` *quarantines*
+/// an unreadable database rather than deleting it, and why splitting those
+/// tables into their own file is the follow-up ADR-049 names.
 ///
 /// ## Adding a migration
 ///

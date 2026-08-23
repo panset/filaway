@@ -58,8 +58,12 @@ public struct Library: Sendable, Hashable, Codable {
         supportRoot.appendingPathComponent(key, isDirectory: true)
     }
 
-    /// The GRDB database file (DS-3). Deleting it is always safe: everything in
-    /// it is rebuildable from the notes folder.
+    /// The GRDB database file (DS-3).
+    ///
+    /// Deleting it costs a rebuild for the *derived* tables — but not for the
+    /// Activity history and the organized baselines, which have lived in here
+    /// since `v4-activity` and are not derived from anything. See
+    /// ``DatabaseFile`` and ADR-049.
     public var databaseURL: URL {
         supportDirectory.appendingPathComponent("filaway.sqlite", isDirectory: false)
     }

@@ -405,7 +405,8 @@ public actor Organizer {
                 droppedActions: dropped,
                 proposedAt: clock.now(),
                 noteIDs: touched,
-                snapshotTexts: built.snapshotTexts
+                snapshotTexts: built.snapshotTexts,
+                sessionText: built.sessionText
             )
             proposals[proposal.id] = proposal
             emit(.proposed(proposal))
@@ -418,7 +419,8 @@ public actor Organizer {
                 droppedActions: dropped,
                 proposedAt: clock.now(),
                 noteIDs: touched,
-                snapshotTexts: built.snapshotTexts
+                snapshotTexts: built.snapshotTexts,
+                sessionText: built.sessionText
             )
             await applyAndAdvance(plan, proposal: proposal)
         }
@@ -434,7 +436,9 @@ public actor Organizer {
 
     private func applyAndAdvance(_ plan: OrganizationPlan, proposal: ProposedPlan) async {
         do {
-            var applied = try await applier.apply(plan)
+            // FR-4.4: the raw session text rides along, so the Activity row
+            // the apply opens can hand it back for the next 30 days (M4-08).
+            var applied = try await applier.apply(plan, sessionText: proposal.sessionText)
             applied.sessionID = applied.sessionID ?? proposal.sessionID
             // The baseline advances to what is on disk *after* the apply, so
             // the text the plan itself wrote is never mistaken for new material

@@ -189,6 +189,14 @@ final class OrganizeCoordinator: ObservableObject {
                 log.info("recovered \(outcomes.count, privacy: .public) incomplete apply events")
                 onBanner?("Filaway finished tidying up an interrupted organization.", "arrow.uturn.backward")
             }
+            // FR-4.4 retention, once a day rather than once a launch (M4-08).
+            // Fire-and-forget: nothing downstream waits on a prune, and the
+            // scheduler's stamp makes a second launch in the same day a no-op.
+            let maintenance = MaintenanceScheduler(library: library)
+            Task.detached(priority: .background) {
+                await maintenance.runIfDue(.activityPrune) { _ = try? await activity.prune() }
+            }
+
             await refreshQueueCount()
             // A relaunch is the other half of FR-6.4: anything that was waiting
             // for the network gets its next attempt now.

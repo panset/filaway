@@ -24,8 +24,10 @@ public actor PendingSessionStoreGRDB: PendingSessionStore {
     public init(library: Library) throws {
         self.library = library
         try FileManager.default.createDirectory(at: library.supportDirectory, withIntermediateDirectories: true)
-        dbQueue = try DatabaseQueue(path: library.databaseURL.path, configuration: Self.configuration())
-        try DatabaseSchema.migrator.migrate(dbQueue)
+        let opened = try DatabaseFile.open(at: library.databaseURL, configuration: Self.configuration()) { queue in
+            try DatabaseSchema.migrator.migrate(queue)
+        }
+        dbQueue = opened.queue
     }
 
     /// In-memory database, for tests and previews.
