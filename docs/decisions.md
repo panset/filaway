@@ -349,3 +349,159 @@ scan` and `ScaleTests` both call it.
 - Release-build numbers (M-series, 2026-08): 5,000 notes / 48 MB scan 413 ms +
   rebuild 191 ms; 20,000 notes 1.62 s + 751 ms. `ScaleTests` gates the 5,000-note
   case at 3 s on a debug build, where it currently runs in ~1.1 s.
+
+---
+
+## ADR-012 — Two FTS5 indexes over one stored copy of the note text
+
+**Date:** 2026-08-23 · **Task:** M1-06 · **Status:** accepted
+
+**Context.** Plan §1 asks for FTS5 "trigram for substring, unicode61 for
+word/prefix" over title and body. FR-5.1 needs both behaviours: `dock` must
+match while the word is still being typed, and `pplication/json` must be found
+inside a fenced `curl` command, where no word tokenizer can see it. A single
+tokenizer cannot do both — unicode61 has no substring matching, and trigram
+cannot do prefix or phrase ranking well and is blind to anything under three
+characters. The `notes` table holds no body text, so the index has to store the
+text itself somewhere.
+
+**Decision.** The `v2-fts` migration adds a `note_text` table (`note_id`
+cascading from `notes`, `relpath`, `title`, `body`, `content_hash`) and two
+FTS5 tables over it as **external content**: `notes_fts` (unicode61,
+`remove_diacritics 2`) and `notes_trigram` (trigram). Three triggers per table
+mirror `note_text` into both. Ranking weights are persisted in the index
+(`bm25(10.0, 1.0)`), so `ORDER BY rank` is already the order the UI wants. The
+body is therefore stored once, indexed twice.
+
+Query-time, the trigram table is a **fallback**, not a peer: it runs only when
+the word pass could not express the query at all (an emoji, a mid-word
+fragment) or came back with less than a screenful. And where the word pass is
+ordered by bm25 — which costs a score for every matching document — the trigram
+pass takes an unordered `LIMIT`, so SQLite stops as soon as it has enough rows.
+
+**Consequences.**
+- The derived database is roughly 5× the size of the Markdown it indexes: 55 MB
+  for a 10 MB / 5,000-note library, 216 MB for 41 MB / 20,000. Almost all of the
+  excess is the trigram posting lists. It is derived data in Application
+  Support, deletable at any time, and the price of substring search that stays
+  under 100 ms. If it ever becomes a complaint, the trigram table can be dropped
+  behind a setting and body substring search falls back to the word index.
+- Bodies are stored in the database as well as on disk. That is what makes the
+  snippet and match range exact (see ADR-013) without re-reading files per
+  keystroke.
+- Queries shorter than three characters that contain no word tokens (a bare
+  emoji) match nothing. Documented limitation of the trigram tokenizer.
+- Indexing a 5,000-note library takes ~1.2 s release / ~1.6 s debug on top of
+  the metadata rebuild, so `rebuild(from:indexingText:)` can defer it.
+
+---
+
+## ADR-013 — Match ranges are computed in Swift, not taken from FTS5
+
+**Date:** 2026-08-23 · **Task:** M1-06 · **Status:** accepted
+
+**Context.** FR-5.2 wants a click on a result to open the note *scrolled to the
+relevant section*, which means the search has to return where in the note the
+match is, in UTF-16 units that `NSTextView` can use. FTS5's `snippet()` returns
+marked-up text, not offsets, and its offsets — where it has them — are token
+positions, not character positions. Folding the text and doing arithmetic on the
+folded copy is also wrong: case- and diacritic-folding can change length (ﬁ → fi),
+so the range would drift.
+
+**Decision.** FTS5 is used only to select and rank candidate *notes*. For the
+handful that survive the limit, `SearchService` fetches the stored body and
+finds the best occurrence with Foundation's own matcher
+(`range(of:options: [.caseInsensitive, .diacriticInsensitive])`), preferring the
+whole query and falling back to its longest term. The result is converted to a
+`MatchRange` (UTF-16 location/length, `nsRange` for the app layer) and to a
+one-line snippet with the match located inside it for highlighting.
+
+**Consequences.**
+- The range is exact by construction, and a test asserts that the returned range
+  really does point at the matched text for every query shape.
+- Ranges are measured against the *body* — front matter stripped — because that
+  is what the editor's buffer holds.
+- Cost is bounded by the result limit (25 notes), not the match count.
+- A title-only hit has no body range; the UI opens the note at the top and shows
+  the note's opening line as the snippet.
+
+---
+
+## ADR-014 — The search index is maintained by `MetadataStore`'s write paths
+
+**Date:** 2026-08-23 · **Task:** M1-06 · **Status:** accepted
+
+**Context.** The index must survive everything that changes the library: the
+app's own saves, the reconciler's add/edit/move/delete, folder removal, and a
+full `rebuild()`. `LibraryChange` carries a `NoteSummary`, which has no body, so
+whoever indexes has to read the file. Making that the caller's job would mean
+every future write path could silently forget it.
+
+**Decision.** `MetadataStore` owns it. It holds a `NoteTextLoader` (by default:
+read the file, strip front matter) and re-indexes inside the same transaction as
+the row it is writing — `upsert`, `apply(_ changes:)`, and `rebuild`. Deletes
+need no code at all: `note_text.note_id` has `ON DELETE CASCADE`, so removing a
+note or a folder unindexes for free. Bodies are read *outside* the write
+transaction and skipped when the stored `content_hash` already matches, so a
+reconcile of three notes reads three files.
+
+Two paths need care and got it. A **move** keeps the note's bytes, so the hash
+check would skip it — moves are therefore always reloaded, and the `.moved`
+handler's delete is guarded by id so it cannot cascade away the row it is about
+to update. A **rebuild** drops the triggers, bulk-loads `note_text` in batches of
+512, and lets FTS5's own `'rebuild'` command build both indexes in one pass;
+row-at-a-time trigger firing was several times slower.
+
+`SearchService` reads through `MetadataStore.reader` — the same GRDB
+`DatabaseQueue`, exposed `nonisolated` — so a keystroke never queues behind an
+autosave on the store's actor. The two still share one SQLite connection; search
+reads are a few milliseconds, and the upgrade path if that ever bites is WAL
+plus a `DatabasePool`.
+
+**Consequences.**
+- `rebuild(from:)` now reads every note's body. `rebuild(from:indexingText:
+  false)` skips it, and `staleTextNotes(limit:)` / `indexText(_:)` are the
+  catch-up API for a shell that wants the sidebar on screen first.
+- A note whose file is unreadable is left out of the index rather than failing
+  the write: one bad file cannot break a reconcile.
+- `MetadataStore` bumps a `notes_generation` counter in `meta` on every write.
+  A rename changes neither the row count nor any mtime, so a digest of the table
+  cannot see it — the counter is what tells `SearchService`'s title cache to
+  refresh.
+
+---
+
+## ADR-015 — Fuzzy is titles-only, and the title scan is a flat byte buffer
+
+**Date:** 2026-08-23 · **Task:** M1-06 · **Status:** accepted
+
+**Context.** Plan §1 amendment 6 defines FR-5.1's "fuzzy" as substring/prefix on
+the body plus typo tolerance on titles. Typo tolerance means comparing the query
+against *every* title on *every* keystroke, and NFR-1 gives the whole search
+100 ms — measured on a debug build, which is what CI and the perf gate run.
+
+**Decision.** Damerau-Levenshtein (optimal string alignment) with a budget of 0
+edits under four characters, 1 up to seven, 2 beyond; whole-title, plus
+word-level for single-word queries at a one-edit penalty. Bodies are matched
+literally — only the two FTS indexes see them.
+
+The scan is built for the debug case. All folded titles live in one flat
+`[UInt8]` buffer with a parallel array of trivial spans, so 20,000 titles cost no
+retains, no allocations and no `String` comparisons; matching is byte-level
+(exact for folded UTF-8, which is self-synchronising). Each span caches a 64-bit
+signature of the byte classes it contains: since `d` edits can drop at most `d`
+distinct classes, `popcount(sig(query) & ~sig(title)) > d` proves the pair is too
+far apart, in one instruction, before any matrix is touched. The distance
+function itself is allocation-free and abandons a row as soon as every cell
+exceeds the budget.
+
+**Consequences.**
+- The measured effect on a debug build at 5,000 notes: the title pass went from
+  47–100 ms to 2–13 ms, and overall p95 from 132 ms (failing) to 25 ms.
+- Distance is measured over UTF-8 bytes, not Characters. For non-ASCII titles it
+  over-counts — a conservative direction — and a property test fuzzes the
+  signature prefilter against the real distance to prove it never rejects a pair
+  that is actually within budget.
+- The title cache is a few hundred kilobytes at 20,000 notes and is revalidated
+  against the `notes_generation` counter, so a keystroke that changed nothing
+  costs one indexed lookup.

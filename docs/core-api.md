@@ -1,6 +1,6 @@
-# FilawayCore public API — storage, metadata, watching
+# FilawayCore public API — storage, metadata, watching, search
 
-What M1-03/04/05 landed, and how the app layer is meant to drive it. Everything
+What M1-03/04/05/06 landed, and how the app layer is meant to drive it. Everything
 here is in `FilawayCore` (Swift 6 language mode, no AppKit/SwiftUI). Requirement
 IDs refer to `docs/spec/functional-spec.html`.
 
@@ -11,6 +11,7 @@ Three types do the work:
 | `NoteStore` | actor | The user's notes folder. Every read and write of a `.md` file. |
 | `MetadataStore` | actor | The derived SQLite database in Application Support. |
 | `LibraryWatcher` | actor | FSEvents + reconcile; publishes `LibraryChange`. |
+| `SearchService` | actor | Keyword search over the derived database. |
 
 `Library` is the value that ties them together.
 
@@ -204,8 +205,35 @@ func setMeta(_ key: String, _ value: String) throws
   do. Only `last_opened` has no file representation, and `rebuild` carries it
   across by note id.
 * The migration registry is `DatabaseSchema.migrator`. Append migrations, never
-  edit or reorder them; `v2-fts` (M1-06), `v3-chunks` (M3-02) and `v4-activity`
-  (M2-08) are reserved.
+  edit or reorder them; `v3-chunks` (M3-02) and `v4-activity` (M2-08) are
+  reserved. `v2-fts` (M1-06) is described under **Search** below.
+
+### Keeping the search index fed (M1-06)
+
+```swift
+init(library: Library, textLoader: NoteTextLoader? = nil) throws
+func rebuild(from snapshot: LibrarySnapshot, indexingText: Bool = true) throws
+
+func indexText(_ entries: [NoteText]) throws
+func textIndexCount() throws -> Int
+func staleTextNotes(limit: Int = 1_000) throws -> [NoteSummary]
+func text(id: NoteID) throws -> NoteText?
+func generation() throws -> Int
+nonisolated var reader: any DatabaseReader
+```
+
+**You do not normally call any of this.** `upsert`, `apply(_:)` and `rebuild`
+index as they write, reading each note's body through `textLoader` (default:
+read the file, strip front matter) and skipping notes whose `contentHash` is
+already indexed. Deletes cascade. So the index is correct after a reconcile, a
+rename, a folder removal and a rebuild without the app doing anything.
+
+The one decision the shell has to make is *when* the first index is built.
+`rebuild(from:)` reads every note's body — about 1.2 s for 5,000 notes on a
+release build. If that is in the way of the first paint, call
+`rebuild(from:indexingText: false)`, show the sidebar, then drain
+`staleTextNotes(limit:)` into `indexText(_:)` in the background; search returns
+nothing until it has caught up, and nothing else is affected.
 
 ---
 
@@ -285,6 +313,92 @@ What it guarantees:
 
 ---
 
+## `SearchService` (FR-5.1, FR-5.2)
+
+```swift
+init(metadata: MetadataStore)
+init(reader: any DatabaseReader)
+
+func keyword(_ query: String, limit: Int = 25) async -> [KeywordHit]
+func recent(limit: Int = 25) async -> [KeywordHit]
+func invalidate()
+```
+
+```swift
+struct KeywordHit: Sendable, Equatable, Identifiable {
+    let id: NoteID
+    let title, relativePath: String
+    let modified: Date
+    let snippet: String          // one line, whitespace collapsed, elided
+    let matchRange: MatchRange?  // into the note *body*, or nil for a title-only hit
+    let snippetRange: MatchRange? // the same match inside `snippet`
+    let source: MatchSource
+    let score: Double
+}
+
+struct MatchRange: Sendable, Equatable, Hashable {
+    let location, length: Int    // UTF-16
+    var nsRange: NSRange
+    func substring(in text: String) -> String?
+}
+
+enum MatchSource { case titleExact, titlePrefix, titleWord, titleSubstring,
+                        titleFuzzy, body, bodySubstring, recent
+                   var isTitle: Bool }
+```
+
+```swift
+let search = SearchService(metadata: metadata)
+
+// One task per keystroke; cancel the previous one.
+searchTask?.cancel()
+searchTask = Task {
+    let hits = await search.keyword(field.stringValue, limit: 25)
+    guard !Task.isCancelled else { return }
+    await MainActor.run { results = hits }
+}
+```
+
+Notes for the UI layer:
+
+* **`keyword` never throws and never crashes on user input.** `"`, `*`, `:`,
+  `NOT`, an unterminated quote — none of it is FTS5 syntax to Filaway; it is all
+  literal text. A cancelled search returns `[]` rather than a stale list.
+* **Empty query → recents**, in the same order as the sidebar's Recents
+  (`max(lastOpened, mtime)` first). That is what ⌘K should show before anything
+  is typed.
+* **Ranking is: title matches, then body relevance (bm25), then recency.**
+  `source` says which band a hit is in, `score` is the number behind the sort.
+  Do not re-sort; do feel free to group by `source.isTitle`.
+* **`matchRange` is FR-5.2.** It is a UTF-16 range into `Note.body` — the same
+  string the editor holds — so `textView.scrollRangeToVisible(hit.matchRange!.nsRange)`
+  is the whole implementation. `nil` means the title matched and the body does
+  not contain the query; open the note at the top.
+* **Fuzzy is titles-only** (plan §1 amendment 6): a misremembered title within
+  one or two edits still finds the note; a typo in the body finds nothing.
+* Searching is cheap and off the store's actor, so it is safe to call on every
+  keystroke without debouncing. Debounce anyway if you like — 40 ms is plenty.
+
+---
+
+## `LaunchTimer` (M1-07)
+
+```swift
+LaunchTimer.mark(.processStart)   // optional; defaults to the kernel's exec time
+LaunchTimer.mark(.windowVisible)  // in `windowDidBecomeVisible`
+LaunchTimer.mark(.editorReady)    // when the first note is editable
+LaunchTimer.elapsed(to: .editorReady)  // TimeInterval?
+LaunchTimer.report()                   // "processStart +0 ms, windowVisible +412 ms, …"
+```
+
+`XCTApplicationLaunchMetric` needs Xcode (plan §8), so this is the stand-in for
+the "launch-to-editable < 2 s" budget. It prints one line per mark when
+`FILAWAY_TIMING=1` and is silent otherwise. `processStart` comes from
+`kinfo_proc` unless marked explicitly, so the number includes dyld and framework
+load.
+
+---
+
 ## Errors
 
 `StorageError` is `Equatable` and `CustomStringConvertible`: `.notFound`,
@@ -307,13 +421,32 @@ times a cold scan and a full rebuild. Release build, M-series, 2026-08:
 | 20,000 notes / 41 MB | 1.62 s | 751 ms | **2.37 s** |
 
 `ScaleTests` asserts the 5,000-note case stays under 3 s on a debug build
-(currently ~1.1 s).
+(currently ~1.2 s).
+
+`filaway-bench keyword --notes N [--queries N] [--limit N] [--budget-millis N]`
+builds the corpus, rebuilds the database *and its FTS indexes*, then times the
+five query shapes FR-5.1 promises — a word, a prefix, two words, a misremembered
+title, a substring inside a `curl` command. It **exits non-zero when p95 reaches
+100 ms** (NFR-1), so it is usable as a CI gate. `filaway-bench all` runs `scan`
+and `keyword` against one shared corpus.
+
+| Corpus | Index rebuild | Database | Search p50 | p95 | max |
+|---|---|---|---|---|---|
+| 5,000 notes / 10 MB — release | 1.11 s | 55 MB | 9 ms | **12 ms** | 12 ms |
+| 5,000 notes / 10 MB — debug | 1.7 s | 55 MB | 15 ms | **25 ms** | 27 ms |
+| 20,000 notes / 41 MB — release | 5.1 s | 216 MB | 35 ms | **40 ms** | 46 ms |
+| 20,000 notes / 41 MB — debug | 7.0 s | 216 MB | 46 ms | **91 ms** | 100 ms |
+
+The database is ~5× the size of the Markdown it indexes; ADR-012 explains why
+and what to do if that ever matters. `SearchScaleTests` gates 5,000 notes at
+p95 < 100 ms on a **debug** build and reports the 20,000-note case against a
+looser 500 ms (NFR-2's "degrade gracefully").
 
 ---
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 75 tests, ~1.3 s without the slow tags.
+`Tests/FilawayCoreTests` — 151 tests, ~1.8 s without the slow tags.
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -325,7 +458,17 @@ times a cold scan and a full rebuild. Release build, M-series, 2026-08:
 * `WatcherTests` — the live FSEvents stream (tagged `.fsevents`).
 * `ChurnTests` — randomised external churn interleaved with app writes, asserting
   no loss, no duplicates, moves tracked, conflict copy only when dirty.
+* `SearchTests` — ranking order, prefix, substring inside code, typo'd titles,
+  unicode and emoji, hostile FTS5 syntax, empty query, and match-range accuracy
+  (the returned range really does point at the matched text).
+* `SearchIndexTests` — the index agrees with the folder after add, edit, move,
+  rename, delete, folder removal, an in-app save, and a rebuild.
+* `SearchUnitTests` / `LaunchTimerTests` — query escaping, edit distance, the
+  signature prefilter (fuzzed against the real distance), snippets, UTF-16
+  ranges across astral characters, launch marks.
 * `ScaleTests` — 5,000 notes under 3 s (tagged `.slow`).
+* `SearchScaleTests` — keyword p95 under 100 ms at 5,000 notes on a debug build;
+  20,000 notes reported (tagged `.slow`).
 
 `FILAWAY_SKIP_SLOW_TESTS=1 swift test` skips the churn, scale and FSEvents
 suites. `Tools/fs_churn.sh --root ~/Notes -n 500` is the manual counterpart:
