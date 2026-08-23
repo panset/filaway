@@ -55,7 +55,12 @@ struct AIStatusPill: View {
             .buttonStyle(.plain)
             .help(help)
             .accessibilityLabel(accessibilityLabel)
-            .accessibilityValue(queuedCount > 0 ? "^[\(queuedCount) session](inflect: true) waiting" : "")
+            // A plain interpolated `String`, not `^[…](inflect:)` markup: that
+            // markup is only expanded inside a `LocalizedStringKey` literal, and
+            // a `String` argument would be announced with the brackets in it.
+            .accessibilityValue(queuedCount > 0
+                ? "\(queuedCount) session\(queuedCount == 1 ? "" : "s") waiting"
+                : "")
             .accessibilityHint("Opens AI settings")
         }
     }

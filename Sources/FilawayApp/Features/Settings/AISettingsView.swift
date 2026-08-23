@@ -172,7 +172,7 @@ private struct IdleIntervalPicker: View {
                 in: CoreSettings.idleIntervalRange
             )
             .accessibilityLabel("Auto-organize after idle")
-            .accessibilityValue("^[\(minutes) minute](inflect: true)")
+            .accessibilityValue("\(minutes) minute\(minutes == 1 ? "" : "s")")
             .labelsHidden()
         }
         .accessibilityElement(children: .contain)

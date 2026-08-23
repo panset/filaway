@@ -211,8 +211,11 @@ final class SettingsModel: ObservableObject {
             lastRebuildSummary = "The semantic index is not available in this build."
             return
         }
-        lastRebuildSummary = "Rebuilt: ^[\(report.chunksInserted + report.chunksReused) chunk](inflect: true) "
-            + "from ^[\(report.notesIndexed) note](inflect: true)."
+        let chunks = report.chunksInserted + report.chunksReused
+        // Plain interpolation: `^[…](inflect:)` is only expanded inside a
+        // `LocalizedStringKey` literal, and this string is shown as a `String`.
+        lastRebuildSummary = "Rebuilt: \(chunks) chunk\(chunks == 1 ? "" : "s") "
+            + "from \(report.notesIndexed) note\(report.notesIndexed == 1 ? "" : "s")."
     }
 
     // MARK: - Derived display state
