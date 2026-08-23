@@ -571,7 +571,7 @@ pass takes an unordered `LIMIT`, so SQLite stops as soon as it has enough rows.
   under 100 ms. If it ever becomes a complaint, the trigram table can be dropped
   behind a setting and body substring search falls back to the word index.
 - Bodies are stored in the database as well as on disk. That is what makes the
-  snippet and match range exact (see ADR-009) without re-reading files per
+  snippet and match range exact (see ADR-019) without re-reading files per
   keystroke.
 - Queries shorter than three characters that contain no word tokens (a bare
   emoji) match nothing. Documented limitation of the trigram tokenizer.
