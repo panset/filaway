@@ -133,8 +133,14 @@ final class OrganizeCoordinator: ObservableObject {
     ///   which **must** run before the launch `reconcile()` — a rolled-back
     ///   apply moves files, and the reconcile has to see the tree afterwards
     ///   (docs/core-api.md, "Crash recovery").
+    /// - Parameter candidateFinder: M3-08's hybrid finder, when the retrieval
+    ///   stack can supply one. `nil` keeps the FTS-only default.
     @discardableResult
-    func start(searchService: SearchService, autosave: AutosaveController?) async -> [RecoveryOutcome] {
+    func start(
+        searchService: SearchService,
+        autosave: AutosaveController?,
+        candidateFinder: (any CandidateFinder)? = nil
+    ) async -> [RecoveryOutcome] {
         guard organizer == nil else { return [] }
         let settings = settingsSource
         do {
@@ -155,7 +161,7 @@ final class OrganizeCoordinator: ObservableObject {
                 source: OrganizeLibrarySourceLive(store: store),
                 baselines: activity,
                 applier: applier,
-                candidateFinder: KeywordCandidateFinder(search: searchService),
+                candidateFinder: candidateFinder ?? KeywordCandidateFinder(search: searchService),
                 queueStore: queue,
                 settings: settings.organizerSettings
             )

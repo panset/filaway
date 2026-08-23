@@ -72,6 +72,10 @@ final class AppModel: ObservableObject {
     private var revealToken = 0
 
     let search = SearchCoordinator()
+    /// The semantic stack (M3-06): embedder, index, vectors, hybrid ranker and
+    /// the answer extractor. Built behind the first frame; ⌘K is keyword-only
+    /// until it is up (FR-5.5).
+    let semanticSearch = SemanticSearchCoordinator()
 
     /// The organize pipeline (M2-12). `nil` until ``bootstrap()`` has opened the
     /// library — the shell paints, and capture works, without it.
@@ -110,6 +114,13 @@ final class AppModel: ObservableObject {
         self.expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
         search.onOpen = { [weak self] hit in self?.openSearchHit(hit) }
         search.onReturnFocusToEditor = { [weak self] in self?.focusEditor() }
+        // M3-06: a semantic result opens the note scrolled to its chunk, in the
+        // same coordinates a keyword hit uses (FR-5.2).
+        search.onOpenChunk = { [weak self] noteID, range in
+            self?.openSearchChunk(noteID: noteID, range: range)
+        }
+        search.onOpenAISettings = { SettingsWindow.open() }
+        search.semantic = semanticSearch
     }
 
     // MARK: - Launch
@@ -141,6 +152,10 @@ final class AppModel: ObservableObject {
             search.backend = { query, limit in
                 await searchService.keyword(query, limit: limit)
             }
+
+            // Semantic search (M3-05/M3-06). Returns immediately; the embedder,
+            // the catch-up and the vector load all happen off the main actor.
+            semanticSearch.start(metadata: metadata, library: library)
 
             let autosave = AutosaveController(store: store, watcher: watcher, debounce: debounce)
             autosave.onSaved = { [weak self] summary, _ in self?.noteSaved(summary) }
@@ -195,7 +210,15 @@ final class AppModel: ObservableObject {
                 // `recoverIncompleteEvents()` runs inside `start()`, and it must
                 // run *before* the reconcile: a rolled-back apply moves files
                 // and the stat-scan has to see the tree afterwards.
-                await organize.start(searchService: searchService, autosave: autosave)
+                // M3-08: merge targets come from the hybrid ranker once the
+                // index is up, and from FTS until then.
+                await organize.start(
+                    searchService: searchService,
+                    autosave: autosave,
+                    candidateFinder: self?.semanticSearch.candidateFinder(
+                        fallback: KeywordCandidateFinder(search: searchService)
+                    )
+                )
                 await self?.reconcile()
                 _ = await watcher.start()
             }
@@ -338,6 +361,22 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// A click, or ⏎, on a semantic result or the answer card (M3-06, FR-5.2).
+    func openSearchChunk(noteID: NoteID, range: MatchRange) {
+        Task { await openSearchChunkAsync(noteID: noteID, range: range) }
+    }
+
+    @discardableResult
+    func openSearchChunkAsync(noteID: NoteID, range: MatchRange) async -> Bool {
+        guard metadata != nil else { return false }
+        selection = .recent(noteID)
+        await open(noteID: noteID)
+        guard openNote?.id == noteID else { return false }
+        revealToken += 1
+        reveal = Reveal(token: revealToken, noteID: noteID, range: range.nsRange, selects: true)
+        return true
+    }
+
     // MARK: - Focus
 
     func focusEditor() { focusEditorRequest += 1 }
@@ -412,6 +451,9 @@ final class AppModel: ObservableObject {
     }
 
     private func noteSaved(_ summary: NoteSummary) {
+        // FR-5.4: the semantic index follows every autosave, debounced inside
+        // the indexer.
+        semanticSearch.noteSaved(summary.id)
         Task { [weak self] in
             guard let self, let metadata = self.metadata else { return }
             try? await metadata.apply([.modified(summary)])
@@ -439,6 +481,7 @@ final class AppModel: ObservableObject {
     // MARK: - Watcher stream (DS-4)
 
     private func handle(_ change: LibraryChange) async {
+        semanticSearch.libraryChanged(change)
         switch change {
         case let .modified(summary) where summary.id == openNote?.id:
             await reconcileOpenNote(with: summary)

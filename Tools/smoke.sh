@@ -10,6 +10,9 @@
 #   search  the M1-12 ⌘K checks on a three-note corpus seeded *before* launch:
 #           as-you-type hits, ↑/↓/⏎/Esc, open-scrolled-to-match, fuzzy titles,
 #           recents on an empty query
+#   semantic the M3-06 ⌘K Ask checks on the same corpus with fixed mtimes:
+#           ⏎ → answer card, Copy, open-scrolled-to-chunk, the temporal filter
+#           and the offline notice
 #   organize  M2: seed the library a committed AI fixture was recorded against,
 #           type the session, end it at the fixture's instant, then Accept →
 #           the bytes move → Activity has the event → Undo restores them
@@ -73,6 +76,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
 EDITOR_ROOT="$WORK/EditorNotes"
 SEARCH_ROOT="$WORK/SearchNotes"
+SEMANTIC_ROOT="$WORK/SemanticNotes"
 KILL_ROOT="$WORK/KillNotes"
 SETTINGS_ROOT="$WORK/SettingsNotes"
 PASTE_ROOT="$WORK/PasteNotes"
@@ -100,7 +104,8 @@ FIXTURES="$PWD/Tests/Fixtures/ai-recordings"
 # variant needs one the connected variant has not already answered.
 ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
 ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT" "$PASTE_ROOT" \
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" \
+         "$SETTINGS_ROOT" "$PASTE_ROOT" \
          "$ORGANIZE_ROOT" "$ORGANIZE_AUTO_ROOT" "$ORGANIZE_OFFLINE_ROOT" \
          "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT"
 
@@ -147,6 +152,19 @@ seed_search_corpus() {
 }
 seed_search_corpus "$SEARCH_ROOT"
 
+# The semantic phase reuses the same three notes, then pins their modification
+# times so FR-5.3's "two days ago" has exactly one note to find. Titles, the
+# command and the ages are asserted in Features/Search/SemanticSmokeCheck.swift
+# — keep in step.
+seed_semantic_corpus() {
+  local root="$1"
+  seed_search_corpus "$root"
+  touch -t "$(date -v-10d +%Y%m%d%H%M)" "$root/Commands/Staging docs.md"
+  touch -t "$(date -v-2d  +%Y%m%d%H%M)" "$root/Auth API debug.md"
+  touch -t "$(date -v-20d +%Y%m%d%H%M)" "$root/Docker cheats.md"
+}
+seed_semantic_corpus "$SEMANTIC_ROOT"
+
 failures=0
 app_pid=""
 
@@ -172,6 +190,7 @@ run_phase() {
   local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root=""
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
+  [ "$phase" = "semantic" ] && root="$SEMANTIC_ROOT"
   [ "$phase" = "killcheck" ] && root="$KILL_ROOT"
   local onboard_root=""
   case "$phase" in
@@ -273,6 +292,9 @@ run_phase paste 90
 run_phase onboarding 120
 run_phase onboarding2 60
 run_phase onboardingskip 120
+# Last: the embedder compiles the bundled Core ML package on first use, which
+# can take a few seconds on a cold Application Support.
+run_phase semantic 240
 
 echo
 if [ "$failures" -gt 0 ] && [ "$SCREEN_LOCKED" = "1" ]; then

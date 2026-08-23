@@ -36,9 +36,20 @@ struct SearchFieldView: View {
                 .onChange(of: isFocused.wrappedValue) { _, focused in
                     if focused { coordinator.activate() } else { coordinator.fieldLostFocus() }
                 }
-                // ⏎ opens the selected hit; with nothing selected it falls
-                // through (M3-06 turns that into "run the semantic query").
-                .onSubmit { coordinator.openSelected() }
+                // ⏎ either runs the semantic query (a question-shaped query in
+                // Find mode, or a new one in Ask mode) or opens the selection —
+                // ``SearchCoordinator/submit()`` decides (FR-5.1).
+                .onSubmit { coordinator.submit() }
+                // ⌘C with the answer card selected copies the snippet, not the
+                // field's text (FR-5.2). Only "c" ever reaches this.
+                .onKeyPress(keys: [KeyEquivalent("c")]) { press in
+                    guard press.modifiers.contains(.command),
+                          coordinator.isPresented,
+                          coordinator.isAnswerCardSelected,
+                          coordinator.copyAnswerSnippet() != nil
+                    else { return .ignored }
+                    return .handled
+                }
                 .onKeyPress(.upArrow) {
                     guard coordinator.isPresented else { return .ignored }
                     coordinator.moveSelection(by: -1)

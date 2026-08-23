@@ -30,7 +30,10 @@ Headless UI smoke tests (no Xcode/XCTest needed, no synthetic key events —
 but **the screen must be unlocked**: on macOS 26 a newly launched app gets no
 window while the screen is locked, SwiftUI never builds the scene, and every
 phase fails at `library-open` with no `SMOKE window …` lines. `Tools/smoke.sh`
-detects it and says so):
+detects it and says so. `SmokeDriver` opens the library itself when the scene
+never arrives, so everything that does not need a view — search, semantic,
+settings — still runs; only the phases that type into the live `NSTextView`
+fail):
 
 ```
 make smoke          # or: Tools/smoke.sh [--keep]
@@ -75,6 +78,10 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> === smoke phase: onboarding2  relaunch: no flow, same library
 # -> === smoke phase: onboardingskip  "Skip for now" -> the gentle sidebar
 #                                  prompt is visible and dismissable
+# -> === smoke phase: semantic === M3-06: ⌘K Ask on a corpus with fixed mtimes:
+#                                  ⏎ -> answer card, Copy -> pasteboard, ⏎ ->
+#                                  the note scrolled to the chunk, the temporal
+#                                  filter, and the offline notice
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
@@ -86,14 +93,21 @@ one of them gets a `WindowGroup` window — the other's `editor`, `search`, `1`,
 the onboarding flow half are unaffected: they create their windows themselves.
 Check with `ps aux | grep '[F]ilaway.app/Contents/MacOS'` first.
 
+`SmokeDriver.openLibraryIfTheSceneDidNot()` softens that: when no scene has
+arrived by the time a phase starts, the driver opens the library itself
+(idempotent — `bootstrap()` returns early once the store exists). Everything
+that does not need a view then still runs, including `search`, `semantic` and
+`settings`; only the phases that type into the live `NSTextView` fail.
+
 `Tools/smoke.sh` runs `build/Filaway.app` a dozen-plus times against throwaway notes
 roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
 overstays, and never leaves the app running. `editor`, `search`,
-`kill`/`killcheck` and each `organize*` phase get their own notes root (the
-organize phases get their own Application Support too, so baselines and the
-Activity journal start empty); `1` and `2` share one so the relaunch has state
-to restore. Every phase runs with `FILAWAY_AI_MODE=replay` and
+`kill`/`killcheck`, `semantic` and each `organize*` phase get their own notes
+root (the organize phases get their own Application Support too, so baselines
+and the Activity journal start empty); `1` and `2` share one so the relaunch has
+state to restore. The `semantic` corpus is seeded with **fixed mtimes**, so
+FR-5.3's "two days ago" has exactly one note to find. Every phase runs with `FILAWAY_AI_MODE=replay` and
 `FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
 network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. A single
 phase directly:
@@ -108,7 +122,8 @@ and state restoration. Add a `check(...)` line for each new UI behaviour that
 cannot be unit-tested: shell behaviour in
 `Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
 `Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, search behaviour in
-`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`, organize behaviour
+`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`, semantic search in
+`Sources/FilawayApp/Features/Search/SemanticSmokeCheck.swift`, organize behaviour
 in `Sources/FilawayApp/Features/Organize/OrganizeSmokeCheck.swift`.
 
 The organize phases replay a **committed** fixture whose filename is a hash of
@@ -117,6 +132,11 @@ the whole rendered prompt, so the corpus in `OrganizeSmokeCheck` and
 stay in step — `wiringHitsTheCommittedFixture` pins the key so drift is a test
 failure, not a mystery. Regenerate with
 `FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter OrganizeWiringTests/regenerateFixture`.
+
+The `semantic` phase scripts its provider instead of replaying: a replay key
+hashes the rendered prompt, and the prompt carries the *indexed* chunks, so a
+committed fixture would break the first time the chunker or the embedder moved
+(ADR-056). The prompt→tool contract is pinned offline by `AnswerGoldenTests`.
 
 CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
 5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
@@ -292,10 +312,18 @@ pure function of that state. Full rationale in ADR-034.
   `AppModel.reveal`, which `ShellView` turns into
   `MarkdownEditorController.scrollTo(range:)`. Hits inside the note already open
   work the same way. A title-only hit (`matchRange == nil`) opens at the top.
-- **`SearchMode.semantic` is a declared, unimplemented extension point for
-  M3-06.** Nothing in M1 sets it. The answer card and Find/Ask toggle belong at
-  the `// MARK: - Extension point (M3-06)` marker in `SearchResultsPanel`.
-  Keyword search must keep working with no AI and no network at all (FR-5.5).
+- **`SearchMode.semantic` is live (M3-06).** Typing is always keyword; ⏎ on a
+  multi-word query, one ending in "?" or starting with a wh-word switches to Ask
+  and runs it, and a Find/Ask toggle in the panel header is the explicit
+  override (remembered for the session). Ask is two-staged — the local hybrid
+  ranking paints immediately, the answer card upgrades it when the extractor
+  returns — so nothing ever blocks on Claude. The card is *item 0* of the
+  selection: ↑/↓ walk it, ⏎ opens the note scrolled to its chunk, ⌘C copies the
+  snippet. Keyword search keeps working with no AI and no network at all
+  (FR-5.5), and so does semantic *retrieval*: only the card needs a provider.
+  `SemanticSearchCoordinator` owns the embedder/index/vectors/hybrid/extractor
+  stack and is fed from autosave, the watcher and `excludedFolders`. See
+  ADR-054…056.
 
 ## Organize UI (spec Figure 2a, FR-4.2, FR-4.3, FR-6.4)
 
@@ -341,6 +369,14 @@ are blocked on Developer Program enrolment + Xcode (M4-05); the visual Figure-1/
 Figure-2b and VoiceOver passes need an unlocked screen (M4-06); launch timing at
 5k/20k notes is unmeasured (M4-07).
 
+**M3-05/06/08 are in.** `FilawayCore/Search/Answer*.swift` turns
+`SemanticResults.promptChunks` into Figure 2b's answer card via `answer.v1` and
+the strict `answer_selection` tool on Haiku 4.5, inside a 5 s budget with a
+local heuristic behind it; `SemanticSearchService` is the façade the ⌘K panel
+calls, and `Organize/HybridCandidateFinder` swaps the organizer's merge-target
+retrieval onto the same hybrid ranker (M3-08). See `docs/core-api.md`
+§ "Answers" and `docs/organize.md` § "Finding candidates".
+
 **M2 is wired end to end** (M2-09/10/12): a writing session ends, the plan comes
 back from the provider, the Figure 2a card appears, Accept applies it, Activity
 records a diff and Undo restores every byte — proved headlessly by the
@@ -353,10 +389,8 @@ One known gap: FR-4.4's **raw session text is not recorded** on the automatic
 path — `PlanApplying.apply(_:)` has no room for it, so nothing between the
 tracker and the applier carries the text (`docs/organize.md`, "Known gap").
 
-Next up: **M3** (semantic search, which fills `SearchMode.semantic`, and M3-08's
-hybrid `CandidateFinder`). The onboarding folder picker is M4-01, so the notes
-root is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as
-a bookmark.
+The onboarding folder picker is M4-01, so the notes root is `~/Notes` (override
+with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
 
 **M4-04 / M4-05 are in.** Sparkle 2.9.x arrives through SPM and is embedded in
 `Contents/Frameworks` by `Tools/make_app.sh`, which also writes the Sparkle
@@ -380,8 +414,12 @@ rewrite files other agents own:
 - **`AIStatusPill`** exists in `Features/Settings/` and is not in the toolbar.
   One line in `ShellView`: `ToolbarItem(placement: .status) { AIStatusPill(status:
   …) }`, fed from `AIConnectionManager.statusChanges()`.
-- **Nothing reads the preferences yet.** The Organizer, `SessionTracker` and the
-  Indexer should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
+- **`Settings → Rebuild index` is not wired.**
+  `SemanticSearchCoordinator.rebuildAll()` exists and does the whole job
+  (rebuild, reload vectors, invalidate the ranker); the Settings pane just has
+  to call it (FR-5.4).
+- **Nothing reads the preferences yet.** The Organizer and `SessionTracker`
+  should take `CoreSettings` (the alias for `FilawayCore.AppSettings` —
   the app's own `AppSettings` shadows it, ADR-035) and subscribe with
   `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
   `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
