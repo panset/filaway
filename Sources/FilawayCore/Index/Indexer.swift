@@ -209,6 +209,12 @@ public actor Indexer {
     /// vectors from the resident matrix.
     public func apply(_ changes: [LibraryChange]) async {
         var removed: [NoteID] = []
+        // Some removals cannot name the notes they took with them: a folder
+        // removal deletes its notes by path inside ``MetadataStore``, and a
+        // `.removed` for a file the database never knew has no id. The chunks
+        // are gone either way (they cascade from `notes`); the resident matrix
+        // is what needs telling, and the only honest answer is to reread it.
+        var needsReload = false
         for change in changes {
             switch change {
             case let .added(note), let .modified(note), let .moved(_, _, note):
@@ -222,16 +228,24 @@ public actor Indexer {
                 if let id {
                     removed.append(id)
                     deadlines[id] = nil
+                } else {
+                    needsReload = true
                 }
             case .conflict, .folderAdded:
                 break
             case .folderRemoved:
-                // The notes under it arrive as their own `.removed` changes.
-                break
+                needsReload = true
             }
         }
         if !removed.isEmpty {
             await vectors?.removeNotes(removed)
+        }
+        if needsReload {
+            do {
+                try await vectors?.reloadIfLoaded()
+            } catch {
+                log.error("vector reload after a removal failed: \(String(describing: error), privacy: .public)")
+            }
         }
     }
 

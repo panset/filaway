@@ -432,6 +432,33 @@ struct IndexerTests {
         #expect(await fixture.indexer.status == .idle)
     }
 
+    @Test("a removed folder drops its notes' vectors from the matrix")
+    func folderRemovalDropsVectors() async throws {
+        let fixture = try Fixture()
+        try await fixture.addNote("Commands/curl.md", Self.curlNote)
+        try await fixture.addNote("Ideas/keep.md", "# Keep\n\nA note that survives the folder removal.")
+        _ = try await fixture.indexer.catchUp()
+        try await fixture.vectors.ensureLoaded()
+        let before = await fixture.vectors.count
+        #expect(before > 1)
+
+        // A folder removal deletes its notes inside MetadataStore, by path —
+        // there is no `.removed` change naming them.
+        try fixture.temp.removeExternal("Commands")
+        try await fixture.metadata.removeFolder("Commands")
+        await fixture.indexer.apply([.folderRemoved("Commands")])
+
+        let after = await fixture.vectors.count
+        #expect(after < before)
+        #expect(after > 0)
+        let hits = try await fixture.vectors.topK(
+            fixture.embedder.vector(for: "curl documents json"), k: 10
+        )
+        #expect(!hits.isEmpty)
+        let survivors = try await fixture.metadata.allNotes().map(\.id)
+        #expect(hits.allSatisfy { survivors.contains($0.noteID) })
+    }
+
     @Test("watcher changes feed the queue")
     func watcherChangesFeedTheQueue() async throws {
         let fixture = try Fixture()
