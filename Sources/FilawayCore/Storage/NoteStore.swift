@@ -348,6 +348,12 @@ public actor NoteStore {
             let values = try? url.resourceValues(forKeys: Set(keys))
             guard let relative = library.relativePath(for: url), !relative.isEmpty else { continue }
             if values?.isDirectory == true {
+                // `_assets/` is reserved for future attachments (FR-2.5): it is
+                // not a Library folder and nothing inside it is a note.
+                if PathRules.isReservedPath(relative) {
+                    enumerator.skipDescendants()
+                    continue
+                }
                 folders.append(relative)
                 continue
             }

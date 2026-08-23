@@ -318,23 +318,24 @@ by default) rather than to an empty list. Returning nothing would leave the
 model with no merge targets at all and start it creating near-duplicates — the
 exact sprawl FR-4.6 exists to prevent.
 
-**Injecting it.** The organizer takes it at construction, so the app wires it
-where it builds the `Organizer`:
+**How the app wires it (M3-08, done).** `OrganizeCoordinator.start` takes an
+optional `CandidateFinder`, and `AppModel` passes one from the retrieval stack:
 
 ```swift
-let finder = hybrid.map { HybridCandidateFinder(hybrid: $0) } ?? nil
-let organizer = Organizer(
-    provider: provider, source: source, baselines: baselines, applier: applier,
-    candidateFinder: finder ?? TitleOverlapCandidateFinder(),
-    settings: organizerSettings
+await organize.start(
+    searchService: searchService,
+    autosave: autosave,
+    candidateFinder: semanticSearch.candidateFinder(
+        fallback: KeywordCandidateFinder(search: searchService)
+    )
 )
 ```
 
-In `FilawayApp` the `HybridSearch` instance is
-`AppModel.shared.semanticSearch.hybrid`, which is `nil` until the retrieval
-stack has finished loading — so read it at the point the organizer is built, and
-keep the `TitleOverlapCandidateFinder()` default for the case where it is not up
-yet.
+`SemanticSearchCoordinator.candidateFinder(fallback:)` returns a **stable**
+object rather than a `HybridCandidateFinder` directly, because the organizer is
+built on the first paint and the embedder is still compiling then. It forwards
+to the fallback until `HybridSearch` exists and to `HybridCandidateFinder` from
+that moment on, so nothing has to wait and nothing has to be rebuilt.
 
 ### The request
 

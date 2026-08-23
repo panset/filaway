@@ -40,6 +40,12 @@ struct ShellView: View {
             LaunchClock.mark("shellAppeared")
             await model.bootstrap()
             LaunchClock.mark("editorReady")
+            // Straight out of onboarding into a blank note, with the caret in it
+            // (FR-7.1's "start writing"). Only on a library that has nothing in
+            // it — adopting an existing folder opens what is already there.
+            if OnboardingPresenter.didRunThisLaunch, model.noteCount == 0, model.openNote == nil {
+                model.newNote()
+            }
         }
         .onChange(of: model.focusEditorRequest) { _, _ in
             DispatchQueue.main.async { editor.focus() }

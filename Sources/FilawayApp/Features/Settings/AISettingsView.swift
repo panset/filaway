@@ -16,7 +16,8 @@ struct AISettingsView: View {
         Form {
             Section {
                 ConnectionCard(model: model) { isShowingKeySheet = true }
-                LocalModelRow()
+                // Figure 3's second option card, shared with onboarding.
+                LocalModelOptionRow()
             }
 
             Section {
@@ -144,36 +145,6 @@ private struct ConnectionCard: View {
         case .rateLimited: return "Rate limited; organization is queued."
         case let .error(message): return message
         }
-    }
-}
-
-/// FR-6.5: the local-model slot is visible from day one and disabled.
-private struct LocalModelRow: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "desktopcomputer")
-                .font(.title2)
-                .frame(width: 28)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Local model (Ollama)")
-                    .font(.headline)
-                Text("Fully private · coming in v2")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text("Soon")
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
-        }
-        .padding(14)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-        .foregroundStyle(.secondary)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Local model, Ollama. Fully private, coming in version 2. Not available yet.")
     }
 }
 

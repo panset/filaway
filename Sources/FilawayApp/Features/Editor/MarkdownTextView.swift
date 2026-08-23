@@ -32,6 +32,11 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
     /// Set while the shell pushes text in, so we do not echo it back out.
     private(set) var isProgrammaticChange = false
 
+    /// FR-2.4's "wrap what you just pasted?" offer. Owns the decision; this
+    /// view only supplies the paste hook and the bar it draws.
+    let pasteIntelligence = PasteIntelligenceController()
+    private var pasteBar: PasteIntelligenceBar?
+
     private var accessories: [CodeBlockAccessoryView] = []
     private var blockRects: [(index: Int, rect: NSRect, language: String?)] = []
     private var hoveredBlock: Int?
@@ -68,6 +73,7 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
         typingAttributes = theme.baseAttributes
         setAccessibilityLabel("Note body, Markdown source")
         textStorage?.delegate = self
+        pasteIntelligence.onChange = { [weak self] in self?.updatePasteBar() }
     }
 
     // MARK: Text plumbing
@@ -82,6 +88,7 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
         let length = (string as NSString).length
         setSelectedRange(NSRange(location: min(selection.location, length), length: 0))
         isProgrammaticChange = false
+        pasteIntelligence.dismiss()
         rehighlightAll()
     }
 
@@ -143,6 +150,8 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
     override func didChangeText() {
         super.didChangeText()
         if !isProgrammaticChange { onTextChange?(string) }
+        // Any edit that is not the wrap itself invalidates the pasted range.
+        if !isApplyingPasteWrap { pasteIntelligence.noteDocumentChanged() }
         invalidateDecorations()
     }
 
@@ -159,6 +168,73 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
     override func insertText(_ string: Any, replacementRange: NSRange) {
         super.insertText(string, replacementRange: replacementRange)
         onActivity?(.typing)
+    }
+
+    // MARK: Paste intelligence (M4-03, FR-2.4)
+
+    /// The text lands exactly as pasted; the classifier only gets to *offer*
+    /// afterwards. See ``PasteIntelligenceController``.
+    override func paste(_ sender: Any?) {
+        let context = pasteIntelligence.willPaste(in: self)
+        super.paste(sender)
+        pasteIntelligence.didPaste(in: self, context: context)
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        let context = pasteIntelligence.willPaste(in: self)
+        super.pasteAsPlainText(sender)
+        pasteIntelligence.didPaste(in: self, context: context)
+    }
+
+    /// ⌘⇧K accepts the standing offer. Nothing is bound when there is none, so
+    /// the shortcut stays available to anything else that wants it.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "k",
+           pasteIntelligence.suggestion != nil {
+            return wrapPendingPaste()
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Applies the standing offer. Exposed for the bar, ⌘⇧K and the smoke check.
+    @discardableResult
+    func wrapPendingPaste() -> Bool {
+        isApplyingPasteWrap = true
+        defer { isApplyingPasteWrap = false }
+        return pasteIntelligence.wrap(in: self)
+    }
+
+    var pasteAffordanceIsVisible: Bool { pasteBar?.isOffering ?? false }
+    var pasteAffordanceText: String { pasteBar?.promptText ?? "" }
+
+    /// Clicks the bar's `Wrap` button the way a mouse would.
+    @discardableResult
+    func performPasteAffordanceWrap() -> Bool {
+        guard let bar = pasteBar, bar.isOffering else { return false }
+        bar.performWrap()
+        return true
+    }
+
+    private var isApplyingPasteWrap = false
+
+    /// Creates, positions or removes the bar to match the controller's state.
+    private func updatePasteBar() {
+        guard let suggestion = pasteIntelligence.suggestion else {
+            pasteBar?.removeFromSuperview()
+            pasteBar = nil
+            return
+        }
+        let bar = pasteBar ?? {
+            let created = PasteIntelligenceBar()
+            created.onWrap = { [weak self] in self?.wrapPendingPaste() }
+            created.onDismiss = { [weak self] in self?.pasteIntelligence.dismiss() }
+            addSubview(created)
+            pasteBar = created
+            return created
+        }()
+        bar.configure(language: suggestion.language)
+        bar.position(in: enclosingScrollView?.documentVisibleRect ?? visibleRect)
     }
 
     override func setSelectedRanges(
@@ -181,6 +257,8 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
     @objc private func clipViewDidScroll() {
         onActivity?(.scroll)
         updateDecorations()
+        // The bar is pinned to the viewport, not to the text.
+        if pasteIntelligence.suggestion != nil { updatePasteBar() }
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }

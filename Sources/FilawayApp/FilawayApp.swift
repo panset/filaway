@@ -12,7 +12,11 @@ struct FilawayApp: App {
             ShellView(model: model)
         }
         .defaultSize(width: 1000, height: 680)
-        .commands { AppCommands(model: model) }
+        .commands {
+            AppCommands(model: model)
+            // File → Import… (M4-10, FR-7.2) — present and disabled.
+            ImportCommands()
+        }
 
         // Settings → General / AI / Activity, ⌘, (M2-11, FR-8.1).
         Settings {
@@ -85,6 +89,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The FR-7.1 launch gate, before anything opens a library.
+        // `runIfNeeded()` returns at once after the first run; on the first run
+        // it does not return until the flow is finished. `AppSettings.notesRoot`
+        // calls it too, so whichever happens first wins and the root this launch
+        // opens is always the one the user just chose. See ADR-049.
+        OnboardingPresenter.runIfNeeded()
+
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         Log.app.info("Filaway \(FilawayCore.version, privacy: .public) launched")
@@ -126,6 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let phase = ProcessInfo.processInfo.environment["FILAWAY_SMOKE"], phase != "0" {
             if SettingsSmokeCheck.handles(phase: phase) {
                 SettingsSmokeCheck.start(phase: phase)
+            } else if OnboardingSmokeCheck.handles(phase: phase) {
+                OnboardingSmokeCheck.start(phase: phase)
+            } else if PasteIntelligenceSmokeCheck.handles(phase: phase) {
+                PasteIntelligenceSmokeCheck.start(phase: phase)
             } else {
                 SmokeDriver.start(phase: phase)
             }

@@ -46,9 +46,29 @@ public enum PathRules {
         return out
     }
 
+    /// Reserved top-level folder for attachments (FR-2.5, deferred — ADR-052).
+    ///
+    /// Nothing in Phase 1 writes it. It is reserved *now* so that a library
+    /// written by Phase 1 and a library written by whichever version ships
+    /// attachments are the same library: images land in `<root>/_assets/` and
+    /// notes reference them with ordinary relative Markdown links
+    /// (`![](../_assets/shot.png)`), which keeps DS-1's "readable in any editor"
+    /// true. The scanner skips the folder, so an `_assets/notes.md` is not a
+    /// note and `_assets` is not a Library folder.
+    public static let assetsFolder = "_assets"
+
+    /// `true` when the relative path is inside a folder Filaway reserves for
+    /// itself. Reserved names are top-level only — a *note* folder called
+    /// `_assets` two levels down is the user's business.
+    public static func isReservedPath(_ path: String) -> Bool {
+        components(path).first == assetsFolder
+    }
+
     /// `true` when the relative path names a Markdown file Filaway manages.
     public static func isNotePath(_ path: String) -> Bool {
-        guard let last = components(path).last else { return false }
+        let parts = components(path)
+        guard let last = parts.last else { return false }
+        guard parts.first != assetsFolder else { return false }
         return (last as NSString).pathExtension.lowercased() == noteExtension
             && !((last as NSString).deletingPathExtension.isEmpty)
     }

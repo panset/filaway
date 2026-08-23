@@ -39,7 +39,9 @@ public final class AppSettings: @unchecked Sendable {
         case searchModel
         case advancedModelOverride
         case notesRootBookmark
+        case onboardingCompleted
         case aiConnectionSkipped
+        case pasteIntelligenceEnabled
         case usageMonthStart
     }
 
@@ -93,7 +95,9 @@ public final class AppSettings: @unchecked Sendable {
         static let searchModel = "ai.model.search"
         static let advancedModelOverride = "ai.model.advancedOverride"
         static let notesRootBookmark = "library.rootBookmark"
+        static let onboardingCompleted = "onboarding.completed"
         static let aiConnectionSkipped = "ai.connectionSkipped"
+        static let pasteIntelligenceEnabled = "editor.pasteIntelligence"
         static let usageMonthStart = "ai.usageMonthStart"
 
         static func excludedFolders(_ libraryKey: String) -> String { "ai.excludedFolders.\(libraryKey)" }
@@ -256,6 +260,16 @@ public final class AppSettings: @unchecked Sendable {
 
     // MARK: - Onboarding (FR-7.1)
 
+    /// `false` until the first-run flow has been walked to the end (or skipped
+    /// out of). The launch gate in `AppDelegate` reads it; nothing else should.
+    public var onboardingCompleted: Bool {
+        get { defaults.bool(forKey: DefaultsKey.onboardingCompleted) }
+        set {
+            defaults.set(newValue, forKey: DefaultsKey.onboardingCompleted)
+            notify(.onboardingCompleted)
+        }
+    }
+
     /// `true` once the user has walked past "Connect your AI" without a key.
     /// Drives the persistent, gentle prompt rather than a modal nag.
     public var aiConnectionSkipped: Bool {
@@ -263,6 +277,24 @@ public final class AppSettings: @unchecked Sendable {
         set {
             defaults.set(newValue, forKey: DefaultsKey.aiConnectionSkipped)
             notify(.aiConnectionSkipped)
+        }
+    }
+
+    // MARK: - Editor (FR-2.4)
+
+    /// Paste intelligence: offer to wrap a pasted command or snippet in a code
+    /// block. On by default; the offer is a transient affordance, never a modal,
+    /// so the switch exists for people who want *no* interruption at all.
+    public var pasteIntelligenceEnabled: Bool {
+        get {
+            guard defaults.object(forKey: DefaultsKey.pasteIntelligenceEnabled) != nil else {
+                return Self.defaultPasteIntelligenceEnabled
+            }
+            return defaults.bool(forKey: DefaultsKey.pasteIntelligenceEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: DefaultsKey.pasteIntelligenceEnabled)
+            notify(.pasteIntelligenceEnabled)
         }
     }
 
@@ -331,6 +363,7 @@ public final class AppSettings: @unchecked Sendable {
             DefaultsKey.semanticSearchEnabled, DefaultsKey.organizeModel,
             DefaultsKey.searchModel, DefaultsKey.advancedModelOverride,
             DefaultsKey.notesRootBookmark, DefaultsKey.aiConnectionSkipped,
+            DefaultsKey.onboardingCompleted, DefaultsKey.pasteIntelligenceEnabled,
             DefaultsKey.usageMonthStart, DefaultsKey.excludedFolders(libraryKey),
         ] {
             defaults.removeObject(forKey: key)
@@ -348,6 +381,8 @@ public final class AppSettings: @unchecked Sendable {
     /// session stops resembling one piece of work.
     public static let idleIntervalRange = 1 ... 15
     public static let defaultSemanticSearchEnabled = true
+    /// FR-2.4 is a SHOULD and the offer is cheap to ignore, so it ships on.
+    public static let defaultPasteIntelligenceEnabled = true
 
     public static func clampIdleInterval(_ minutes: Int) -> Int {
         min(max(minutes, idleIntervalRange.lowerBound), idleIntervalRange.upperBound)
