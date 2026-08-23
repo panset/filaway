@@ -348,9 +348,11 @@ enum SettingsSmokeCheck {
         // ARC is also holding this one: closing it would free it twice.
         window.isReleasedWhenClosed = false
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 80))
+        // Genuinely bare: no title, no image, no label. An image-only button is
+        // *not* the negative control it looks like — AppKit derives a name from
+        // the SF Symbol, which is exactly the behaviour the walk should accept.
         let bare = NSButton(frame: NSRect(x: 10, y: 10, width: 60, height: 24))
         bare.title = ""
-        bare.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
         let labelled = NSButton(frame: NSRect(x: 90, y: 10, width: 60, height: 24))
         labelled.title = ""
         labelled.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)

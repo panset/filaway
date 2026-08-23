@@ -71,6 +71,16 @@ if [ "$(ioreg -n Root -d1 -a 2>/dev/null | grep -c CGSSessionScreenIsLocked)" !=
   echo "smoke:           every phase will fail at library-open. Unlock and re-run."
 fi
 
+# **`-ApplePersistenceIgnoreState YES` is not optional here.** The `kill` phase
+# SIGKILLs the app on purpose, and the watchdog SIGKILLs any phase that
+# overstays, so Filaway accumulates a crash history by design. Once macOS
+# decides the app "quit unexpectedly", `NSPersistentUIRestorer` puts up a
+# *modal* "reopen its windows?" alert from inside `_handleAEOpenEvent` — before
+# `applicationDidFinishLaunching` runs, before any smoke phase starts, and with
+# nobody to answer it. Every phase then hangs silently until the watchdog kills
+# it, which adds another crash to the history. The flag skips the persistent-UI
+# machinery entirely. Symptom, if it ever comes back: a phase that produces no
+# output at all and is killed at its timeout. `sample <pid>` names it.
 STAMP="$(date +%s)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
@@ -261,7 +271,7 @@ run_phase() {
   FILAWAY_AI_FIXTURES="$FIXTURES" \
   FILAWAY_AI_FAIL="$fail" \
   FILAWAY_SMOKE_SHOTS="$shots" \
-    "$APP" > >(tee -a "$WORK/transcript.log") 2>&1 &
+    "$APP" -ApplePersistenceIgnoreState YES > >(tee -a "$WORK/transcript.log") 2>&1 &
   app_pid=$!
 
   ( sleep "$limit"; kill -9 "$app_pid" 2>/dev/null ) &
@@ -296,7 +306,7 @@ run_kill_phase() {
   FILAWAY_DEFAULTS_SUITE="$SUITE" \
   FILAWAY_AI_MODE="replay" \
   FILAWAY_AI_FIXTURES="$FIXTURES" \
-    "$APP" > "$out" 2>&1 &
+    "$APP" -ApplePersistenceIgnoreState YES > "$out" 2>&1 &
   app_pid=$!
 
   while [ "$waited" -lt "$limit" ]; do

@@ -282,6 +282,13 @@ final class AppModel: ObservableObject {
         await watcher?.stop()
         semanticSearch.resetForLibraryChange()
 
+        // **Close the note while `library` is still the old one.** FR-1.5's
+        // last-open note is stored per `Library.key`, and `closeOpenNote()`
+        // clears that key's entry — do this after the swap and it erases what
+        // the *new* library remembered, one instruction before `bootstrap()`
+        // goes looking for it.
+        closeOpenNote()
+
         AppSettings.setNotesRoot(url)
         let library = Library(root: url, supportRoot: AppSettings.supportRoot)
         self.library = library
@@ -296,7 +303,6 @@ final class AppModel: ObservableObject {
         searchService = nil
         organize = nil
         search.backend = nil
-        closeOpenNote()
         recents = []
         tree = nil
         noteCount = 0
