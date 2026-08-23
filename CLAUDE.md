@@ -17,6 +17,9 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make bench ARGS="corpus generate"` | Regenerates the committed dev corpus from `DevCorpusContent` |
 | `make bench ARGS="index --notes 5000"` | Semantic index build cost (add `--embed-batch`/`--min-tokens` to probe the levers) |
 | `make bench ARGS="semantic --notes 5000"` | Offline semantic query p50/p95 and the resident matrix |
+| `make bench ARGS="index --root <notes> --with-queries"` | M4-07: searches at `.userInitiated` while the index builds — the "is ⌘K usable on a first launch?" number |
+| `make bench ARGS="launch --library <notes> --runs 5"` | M4-07 NFR-1: launches `build/Filaway.app` five times and reports the p50 of each launch stage (`--warm` primes the database first). Needs `make app` |
+| `make bench ARGS="retrieval-log summarize"` | M4-11: hit rate and median seconds over the Help → Log Retrieval Outcome… dogfood log (spec §8) |
 | `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
 | `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
@@ -342,7 +345,7 @@ one after the first paint. Full wiring diagram in `docs/organize.md`.
 - **Menu items.** Window ▸ **Activity** is ⌥⌘A (the `Window` scene's own
   shortcut). Edit ▸ **Undo Last Organization** is **⌥⌘Z** — ⇧⌘Z is Redo in every
   macOS text view including Filaway's editor, and taking it would make the
-  editor lie.
+  editor lie. Help ▸ **Log Retrieval Outcome…** is **⌃⌥⌘L** (M4-11, below).
 - **Status.** One pill in the toolbar (`AI ready` / `AI queued · N` /
   `AI offline` / `Key invalid` / `AI paused` / `AI off`). Clicking it posts
   `.filawayOpenAISettings` for Settings to catch. No modal alerts anywhere;
@@ -366,8 +369,8 @@ keyword search over FTS5 with open-scrolled-to-match. Storage and search are
 The M1 Definition-of-Done walk-through, with numbers and the remaining gaps, is
 `docs/verification/M1.md`. The open ones: notarization and the universal build
 are blocked on Developer Program enrolment + Xcode (M4-05); the visual Figure-1/
-Figure-2b and VoiceOver passes need an unlocked screen (M4-06); launch timing at
-5k/20k notes is unmeasured (M4-07).
+Figure-2b and VoiceOver passes need an unlocked screen (M4-06). **Launch timing
+is now measured** — `docs/verification/M4-perf.md`.
 
 **M3-05/06/08 are in.** `FilawayCore/Search/Answer*.swift` turns
 `SemanticResults.promptChunks` into Figure 2b's answer card via `answer.v1` and
@@ -424,6 +427,44 @@ rewrite files other agents own:
   `observe(_:)`, reading `organizationMode`, `idleIntervalSeconds`,
   `excludedFolders`, `semanticSearchEnabled` and `effectiveOrganizeModel` /
   `effectiveSearchModel`. `SettingsModel.shared` owns the app's instances.
+
+**M4-07 / M4-09 / M4-11 are in.** Four verification documents carry the numbers
+and the walk-throughs; read them before re-measuring anything:
+
+- `docs/verification/M4-perf.md` — launch (**374 ms to editable at 20,000
+  notes**, against NFR-1's 2 s), the first-launch index (52 s at 5k, 235 s at
+  20k, now at `.utility` and most-recently-modified first), what ⌘K costs
+  *while* that runs (p95 79 ms at 20k, never zero results), app RSS at scale,
+  the thresholds where behaviour changes, and which checks CI gates.
+- `docs/verification/M2.md`, `docs/verification/M3.md` — the M2 and M3
+  Definition-of-Done lists walked clause by clause, with the test name or smoke
+  phase that proves each one. Two things are outright failing and both are small:
+  FR-4.4's raw session text is never recorded on the automatic path
+  (`docs/organize.md` § "Known gap"), and `Settings → Rebuild index` is a
+  disabled button with a working `SemanticSearchCoordinator.rebuildAll()`
+  behind it.
+- `docs/verification/success-criteria.md` — the spec §8 protocol: the
+  install→typing stopwatch and the one-week retrieval log.
+- `docs/prompts.md` — `organize.v1` / `answer.v1` are frozen; the bump rule,
+  how to re-record with a key, and **the list of assumptions no test on this
+  machine can falsify** (strict `anyOf`, `["integer","null"]`, adaptive thinking
+  with a forced tool, Haiku latency).
+- `docs/cost.md` — **~$16/month** for 15 sessions + 30 searches a day, and the
+  one unpulled lever (prompt caching would save ~30% of it).
+
+**M4-07's retrieval lever.** `Search/TypoExpansion.swift` repairs query words
+whose document frequency is zero, using FTS5's own term index through the new
+`v6-vocab` `fts5vocab` view. Typos went 57% → **100%** top-1 and the corpus
+overall 91% → **95%**, with nothing regressing (ADR-058).
+`filaway-bench retrieval --no-typo-expansion` reproduces the old numbers.
+
+**A trap worth knowing when you launch the app repeatedly and kill it:** after a
+few SIGKILLs macOS decides the app has a crash history and opens *"Do you want
+to try to reopen its windows?"* — an `NSAlert` run **before**
+`applicationDidFinishLaunching`, so the app prints nothing and the run hangs; on
+a locked screen the dialog is invisible and it looks like the app is broken. Pass
+`-ApplePersistenceIgnoreState YES` and delete
+`~/Library/Saved Application State/com.tejaspanse.filaway.savedState`.
 
 ## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
 

@@ -53,12 +53,14 @@ struct RetrievalLogCommand: AsyncParsableCommand {
             print("window:   \(first) → \(last) (\(summary.days) \(summary.days == 1 ? "day" : "days"))")
             print("searches: \(summary.count)")
             print("")
-            print("hit rate:      \(percent(summary.hitRate)) (\(summary.hits)/\(summary.count) found)")
-            print("under \(Int(budgetSeconds)) s:     \(percent(summary.successRate)) "
+            let label = { (text: String) in text.padding(toLength: 15, withPad: " ", startingAt: 0) }
+            print("\(label("hit rate:"))\(percent(summary.hitRate)) "
+                + "(\(summary.hits)/\(summary.count) found)")
+            print("\(label("under \(Int(budgetSeconds)) s:"))\(percent(summary.successRate)) "
                 + "— found *and* inside the budget (spec §8 bar: 90%)")
-            print("median:        \(seconds(summary.medianSeconds)) over every search")
-            print("median (hits): \(seconds(summary.medianHitSeconds))")
-            print("p90 / max:     \(seconds(summary.p90Seconds)) / \(seconds(summary.maxSeconds))")
+            print("\(label("median:"))\(seconds(summary.medianSeconds)) over every search")
+            print("\(label("median (hits):"))\(seconds(summary.medianHitSeconds))")
+            print("\(label("p90 / max:"))\(seconds(summary.p90Seconds)) / \(seconds(summary.maxSeconds))")
 
             if !summary.misses.isEmpty {
                 print("")

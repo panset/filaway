@@ -152,6 +152,12 @@ struct IndexCommand: AsyncParsableCommand {
     @Option(help: "Chunker minTokens — how small a section may be before it folds (ADR-039).")
     var minTokens: Int?
 
+    @Flag(help: """
+        M4-07: run a search loop against the index while it is building, and report \
+        what a user would see — query latency under load, and how coverage grows.
+        """)
+    var withQueries = false
+
     @Flag(help: "Keep the generated corpus and print its path.")
     var keep = false
 
@@ -170,8 +176,12 @@ struct IndexCommand: AsyncParsableCommand {
 
         let databaseBefore = megabytes(ofFileAt: index.bench.library.databaseURL)
         let start = Date()
+        let probe = withQueries ? SearchUnderLoad(index: index) : nil
+        let probing = probe.map { probe in Task(priority: .userInitiated) { await probe.run() } }
         let report = try await index.indexer.rebuildAll()
         let elapsed = Date().timeIntervalSince(start)
+        probing?.cancel()
+        if let probe { await probe.report(buildSeconds: elapsed) }
         let databaseAfter = megabytes(ofFileAt: index.bench.library.databaseURL)
 
         let noteCount = try await index.metadata.noteCount()
@@ -219,5 +229,83 @@ struct IndexCommand: AsyncParsableCommand {
         print("edit:     \(formatMillis(elapsed)) to re-index one note — "
             + "\(report.embeddingsComputed) embeddings recomputed, \(report.chunksReused) chunks reused "
             + "(FR-5.4 budget: 5 s)")
+    }
+}
+
+/// M4-07: what ⌘K feels like *while* the first-launch index is building.
+///
+/// The number M3-perf.md could not give: a 5,000-note library takes 50 s to
+/// index and a 20,000-note one takes about four minutes, and the whole design
+/// rests on that being background work nobody notices. This runs a search loop
+/// at `.userInitiated` against the same database the `Indexer` is writing —
+/// the priority relationship a real ⌘K has to a real catch-up — and reports
+/// the latency distribution it saw and how many notes were already findable.
+///
+/// It measures three things at once:
+///
+/// * **Latency under load.** The p95 here is what NFR-1's <5 s semantic budget
+///   is actually spent against on a first launch.
+/// * **Partial results.** The `Indexer` writes each note in its own
+///   transaction, so a query run halfway through returns the notes indexed so
+///   far rather than nothing (FR-5.4, and what "Indexing n of m" is a promise
+///   about).
+/// * **Whether the writer starves the reader.** SQLite in WAL mode lets them
+///   run at once; the failure mode this would catch is the indexer holding the
+///   writer across a whole batch.
+actor SearchUnderLoad {
+    private let index: BenchIndex
+    private var latencies: [TimeInterval] = []
+    private var coverage: [(seconds: TimeInterval, chunks: Int, hits: Int)] = []
+    private var startedAt = Date()
+
+    /// Ordinary questions, so the FTS arm and the vector arm both do work.
+    private static let queries = [
+        "the curl command with the bearer token",
+        "how do I rebuild one docker service and follow its logs",
+        "rebase onto main without losing work",
+        "count which errors happen most in a log file",
+        "stream the logs from a running pod",
+    ]
+
+    init(index: BenchIndex) { self.index = index }
+
+    func run() async {
+        startedAt = Date()
+        var next = 0
+        while !Task.isCancelled {
+            let query = Self.queries[next % Self.queries.count]
+            next += 1
+            let start = Date()
+            // No vector arm: the resident matrix is deliberately not reloaded
+            // mid-build (a rebuild must not force a lazy store into memory),
+            // so this is the BM25 half plus the chunk hydration — which is
+            // exactly the half a user gets before the vectors are all in.
+            let hybrid = HybridSearch(
+                metadata: index.metadata, embedder: nil, vectorStore: nil
+            )
+            let results = await hybrid.semanticCandidates(query)
+            latencies.append(Date().timeIntervalSince(start))
+            let chunks = (try? await index.indexer.chunkCount()) ?? 0
+            coverage.append((Date().timeIntervalSince(startedAt), chunks, results.notes.count))
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+    }
+
+    func report(buildSeconds: TimeInterval) {
+        guard !latencies.isEmpty else { return }
+        print("")
+        print("during the build (M4-07) — \(latencies.count) searches at .userInitiated "
+            + "while the indexer ran at .utility:")
+        print("  latency:  p50 \(formatMillis(percentile(latencies, 0.5))), "
+            + "p95 \(formatMillis(percentile(latencies, 0.95))), "
+            + "max \(formatMillis(latencies.max() ?? 0))")
+        let quarters = [0.25, 0.5, 0.75].compactMap { fraction -> String? in
+            let at = buildSeconds * fraction
+            guard let sample = coverage.first(where: { $0.seconds >= at }) else { return nil }
+            return "\(Int(fraction * 100))% in: \(sample.chunks) chunks, \(sample.hits) notes ranked"
+        }
+        if !quarters.isEmpty { print("  partial:  \(quarters.joined(separator: " · "))") }
+        print("  (a query never returned nothing: the indexer commits per note, "
+            + "so ⌘K improves as the build runs)")
     }
 }
