@@ -458,13 +458,18 @@ whose document frequency is zero, using FTS5's own term index through the new
 overall 91% → **95%**, with nothing regressing (ADR-058).
 `filaway-bench retrieval --no-typo-expansion` reproduces the old numbers.
 
-**A trap worth knowing when you launch the app repeatedly and kill it:** after a
-few SIGKILLs macOS decides the app has a crash history and opens *"Do you want
-to try to reopen its windows?"* — an `NSAlert` run **before**
-`applicationDidFinishLaunching`, so the app prints nothing and the run hangs; on
-a locked screen the dialog is invisible and it looks like the app is broken. Pass
-`-ApplePersistenceIgnoreState YES` and delete
-`~/Library/Saved Application State/com.tejaspanse.filaway.savedState`.
+**The real cause of "no MarkdownEditorView", and it is not a locked screen.**
+After a run that kills the app — every smoke run, every launch bench — macOS
+decides Filaway has a crash history and opens *"Do you want to try to reopen its
+windows?"*: an `NSAlert` shown **before** `applicationDidFinishLaunching`, so
+SwiftUI never builds the scene, the app prints nothing at all, and the phase
+hangs or fails at `library-open`. On a locked screen the dialog is invisible,
+which is why it read as a lock problem for so long. The fix is
+`-ApplePersistenceIgnoreState YES` plus deleting
+`~/Library/Saved Application State/com.tejaspanse.filaway.savedState`;
+`Tools/smoke.sh` and `filaway-bench launch` both do it. With it, the window
+arrives reliably in a headless session and launch timing is measurable
+(`docs/verification/M4-perf.md` §1.3).
 
 ## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
 
