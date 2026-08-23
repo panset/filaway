@@ -689,3 +689,126 @@ exceeds the budget.
 - The title cache is a few hundred kilobytes at 20,000 notes and is revalidated
   against the `notes_generation` counter, so a keystroke that changed nothing
   costs one indexed lookup.
+
+---
+
+## ADR-025 — The Activity log *is* the apply journal
+
+**Date:** 2026-08-23 · **Task:** M2-07, M2-08 · **Status:** accepted
+
+**Context.** M2-07 needs a durable record written before the first file
+operation so that `kill -9` mid-apply cannot leave a half-organized library
+(NFR-3). M2-08 needs a user-visible history of every AI action with timestamps
+and before/after diffs (FR-4.3). Both want the same three things: what the plan
+was, which notes it touched, and what those notes looked like on each side.
+
+**Decision.** One table, `activity_events`, with a `kind` (what the row is) and
+a `status` (how far it got). `PlanApplier` inserts the row with
+`status = 'inProgress'` and the before-images *already in it*, executes, writes
+the after-images, and only then flips the status to `'applied'`. Per-note text
+lives in a separate `activity_note_images` table rather than a JSON blob,
+because Undo's ordering rule asks "did a later event touch this note?", which
+wants an index.
+
+`recoverIncompleteEvents()` repairs what is left over at launch:
+
+* **Roll forward** when every note has a durable after-image *and* the file on
+  disk still matches its hash — the work was done and only the status flip was
+  lost. The event becomes a normal, undoable entry.
+* **Roll back** otherwise: notes the event created go to the Trash, every
+  before-image is written back to the path it came from, files left at
+  intermediate paths are trashed, and empty folders the event made are removed.
+
+Which is why the after-images and the status flip are two separate writes: it
+gives the recovery a state to roll *forward* from, instead of a window where a
+finished apply looks like a failed one.
+
+**Consequences.**
+- A crash is never worse than "the plan did not happen", and never leaves a note
+  half-appended. The tests inject the crash through an `ApplyFailureHook` at a
+  named `ApplyStep`, so the path is exercised without killing the process.
+- Rollback is expressed entirely in terms of before-images plus a durable
+  progress list (`progress_json`, appended after every file operation), so it
+  works identically inline (an error) and at launch (a crash).
+- The log grows one row per organization event forever. Only text is pruned
+  (ADR-026), and the row count is a handful per day.
+- `MetadataStore` is untouched by an apply: the writes go through `NoteStore`,
+  whose own-operation ledger the watcher already reconciles into the database.
+
+---
+
+## ADR-026 — Undo restores bytes, patches when it must, and never drops text
+
+**Date:** 2026-08-23 · **Task:** M2-08 · **Status:** accepted
+
+**Context.** FR-4.3 wants a single Undo over ≥10 events; FR-4.4 says the AI
+never deletes user content. Between those two sits the case the plan calls out
+as risk #2: the user edited a note *after* the AI touched it, and then pressed
+Undo. Restoring the before-image wholesale would destroy the user's edit —
+exactly the failure the whole design exists to prevent.
+
+**Decision.** Images are the note's **raw file bytes**, front matter included,
+and Undo works entirely in that space. Per note, in order:
+
+1. current hash == after-image hash → write the before-image back verbatim. The
+   file is byte-identical to what it was before the AI saw it.
+2. otherwise → replay the reverse patch (a line diff from after back to before,
+   hunks located by context nearest their old position) onto the *current* text.
+3. any hunk that will not land → keep the user's text and append what the hunk
+   was carrying under a `## Restored by Undo (conflict)` heading; report
+   `.partial`.
+
+Creates become Trash, a trashed empty source is written back, a move or retitle
+is reversed through `NoteStore.move`/`rename` (so the file keeps its identity
+rather than being rewritten), and the undo records its own event, marking the
+original non-undoable. Redo is out of scope for Phase 1.
+
+Ordering is LIFO, but only against *organization* events: undoing event N is
+refused with `.blockedByLaterEvent` when a later `applied` event touched one of
+the same notes. Undo events themselves never block, or a ten-deep unwind would
+stop after its first step.
+
+Retention follows from this: raw session text is dropped once it is older than
+30 days (FR-4.4's floor), and before/after images are kept for as long as the
+event is undoable — an event that has been undone, and is out of the ten-deep
+window, may lose its images. The event row itself is never deleted.
+
+**Consequences.**
+- Ten stacked events unwind to byte-identical trees, asserted by fingerprinting
+  the whole `.md` tree before every apply and after every undo.
+- The diff is a small LCS over lines with the common prefix and suffix trimmed —
+  a few hundred lines of Swift, no dependency, and the same code powers both the
+  Activity window's unified diff and the reverse patch.
+- Because images are raw bytes, front-matter churn is invisible to the user: the
+  diff *view* strips front matter, while the *restore* keeps it.
+- A conflicted undo leaves a note the user must reconcile by hand. That is the
+  deliberate trade: a visible, marked duplication rather than a silent loss.
+
+---
+
+## ADR-027 — `ActivityLog` opens its own connection, with WAL and a busy timeout
+
+**Date:** 2026-08-23 · **Task:** M2-08 · **Status:** accepted
+
+**Context.** The activity, undo and baseline tables live in `filaway.sqlite`
+(migration `v4-activity`), the same file `MetadataStore` owns. `MetadataStore`
+keeps its `DatabaseQueue` private, and threading every activity write through it
+would tie the AI pipeline to the indexer's actor for no benefit.
+
+**Decision.** `ActivityLog` is its own actor with its own `DatabaseQueue` on the
+same path, configured with `busyMode = .timeout(5)` and `PRAGMA journal_mode =
+WAL`. Both are properties of the *file*, so switching WAL on here means
+`MetadataStore`'s readers no longer block behind an activity write. The GRDB
+default (`.immediateError`) would have surfaced normal contention as an error.
+
+**Consequences.**
+- Two connections, one migrator: both types run `DatabaseSchema.migrator`, which
+  is idempotent, so whichever opens the file first migrates it.
+- `-wal` and `-shm` files appear beside `filaway.sqlite` in Application Support.
+  Nothing is added to the user's notes folder (DS-1 holds).
+- `MetadataStore` still carries GRDB's default busy mode. It should adopt the
+  same timeout when the app wires both up — a one-line change, noted for the
+  integration pass rather than made here to avoid a conflicting edit.
+- `note_baselines` rides along on the same connection: `DatabaseBaselineStore`
+  is a thin `BaselineStore` façade over `ActivityLog`, so the session tracker
+  never opens a third connection.

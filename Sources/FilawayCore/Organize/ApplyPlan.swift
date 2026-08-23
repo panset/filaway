@@ -89,7 +89,9 @@ public actor PlanApplier: PlanApplying {
         // their final state, which is why a crash here rolls *forward*.
         try failureHook?.check(.beforeCommit)
         let summary = Self.summarize(state.outcomes)
-        try await activity.setStatus(.applied, for: eventID, isUndoable: true, summary: summary)
+        // A plan that changed no note has nothing to undo, and must not become
+        // the target of the card's Undo button.
+        try await activity.setStatus(.applied, for: eventID, isUndoable: !images.isEmpty, summary: summary)
 
         log.info("applied plan: \(state.outcomes.count, privacy: .public) action(s)")
         return AppliedPlan(
@@ -580,7 +582,7 @@ public actor PlanApplier: PlanApplying {
         for event in try await activity.incompleteEvents() {
             let progress = Self.decode(try await activity.progressJSON(for: event.id))
             if canRollForward(event) {
-                try await activity.setStatus(.applied, for: event.id, isUndoable: true)
+                try await activity.setStatus(.applied, for: event.id, isUndoable: !event.images.isEmpty)
                 outcomes.append(RecoveryOutcome(
                     eventID: event.id,
                     resolution: .rolledForward,

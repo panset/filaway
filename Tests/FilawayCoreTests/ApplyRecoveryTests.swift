@@ -10,10 +10,6 @@ import Testing
 /// view — the row stays `inProgress` and nobody rolled anything back.
 @Suite("Apply journal recovery")
 struct ApplyRecoveryTests {
-    private func crash(after step: @escaping @Sendable (ApplyStep) -> Bool) -> ApplyFailureHook {
-        .crash(at: step)
-    }
-
     @Test("a crash between operations rolls back to the before-images")
     func crashMidPlanRollsBack() async throws {
         let harness = try ApplyHarness(failureHook: .crash(at: { step in

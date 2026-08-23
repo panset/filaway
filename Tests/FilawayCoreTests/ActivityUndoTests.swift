@@ -248,6 +248,23 @@ struct ActivityUndoTests {
         }
     }
 
+    @Test("a plan that changed nothing is not what Undo reaches for")
+    func emptyPlanIsNotUndoable() async throws {
+        let harness = try ApplyHarness()
+        try await harness.seed("Notes.md", "start\n")
+        let id = try await harness.id(of: "Notes.md")
+        let real = try await harness.apply(try await harness.plan([
+            .appendToNote(AppendToNoteAction(target: .id(id), content: "one")),
+        ], summary: "one"))
+        try await harness.apply(try await harness.plan([], summary: "Nothing to file."))
+
+        #expect(try await harness.activity.eventCount() == 2)
+        #expect(try await harness.undo.undoableEvents().count == 1)
+        let result = try await harness.undoLatest()
+        #expect(result.eventID == real.eventID)
+        #expect(try await harness.body("Notes.md") == "start\n")
+    }
+
     @Test("undoing an apply leaves no stray files and no third folder level")
     func undoKeepsTheInvariants() async throws {
         let harness = try ApplyHarness()
