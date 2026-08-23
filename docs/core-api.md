@@ -1,6 +1,6 @@
-# FilawayCore public API — storage, metadata, watching, search
+# FilawayCore public API — storage, metadata, watching, search, apply
 
-What M1-03/04/05/06 landed, and how the app layer is meant to drive it. Everything
+What M1-03/04/05/06 and M2-07/08 landed, and how the app layer is meant to drive it. Everything
 here is in `FilawayCore` (Swift 6 language mode, no AppKit/SwiftUI). Requirement
 IDs refer to `docs/spec/functional-spec.html`.
 
@@ -12,6 +12,9 @@ Three types do the work:
 | `MetadataStore` | actor | The derived SQLite database in Application Support. |
 | `LibraryWatcher` | actor | FSEvents + reconcile; publishes `LibraryChange`. |
 | `SearchService` | actor | Keyword search over the derived database. |
+| `PlanApplier` | actor | Applies an organization plan, whole or not at all. |
+| `ActivityLog` | actor | The Activity history, the apply journal and the baselines. |
+| `UndoService` | actor | Reverses an applied plan (FR-4.3). |
 
 `Library` is the value that ties them together.
 
@@ -205,8 +208,10 @@ func setMeta(_ key: String, _ value: String) throws
   do. Only `last_opened` has no file representation, and `rebuild` carries it
   across by note id.
 * The migration registry is `DatabaseSchema.migrator`. Append migrations, never
-  edit or reorder them; `v3-chunks` (M3-02) and `v4-activity` (M2-08) are
-  reserved. `v2-fts` (M1-06) is described under **Search** below.
+  edit or reorder them. `v2-fts` (M1-06) is described under **Search** below
+  and `v4-activity` (M2-08) under **Applying plans**; `v3-chunks` (M3-02) is
+  still reserved, and will register *after* `v4-activity` — GRDB orders
+  migrations by registration, not by name.
 
 ### Keeping the search index fed (M1-06)
 
@@ -399,6 +404,130 @@ load.
 
 ---
 
+## Applying plans, Activity and Undo (M2-07, M2-08)
+
+```swift
+let activity = try ActivityLog(library: library)          // same filaway.sqlite, own connection
+let applier  = PlanApplier(store: store, activity: activity, excludedFolders: excluded)
+let undo     = UndoService(store: store, activity: activity)
+
+try await applier.recoverIncompleteEvents()               // once, at launch, before reconcile()
+
+let applied = try await applier.apply(plan, sessionText: session.rawText)
+card.show(applied.summary)                                // FR-4.2
+
+let result = try await undo.undoLatest()                  // the card's Undo button
+if result.outcome == .partial { banner("Some changes needed a conflict block.") }
+```
+
+### `PlanApplier` (FR-4.2, FR-4.4, NFR-3)
+
+```swift
+protocol PlanApplying: Sendable {
+    func apply(_ plan: OrganizationPlan) async throws -> AppliedPlan
+}
+
+init(store:activity:excludedFolders:clock:failureHook:)
+func apply(_ plan: OrganizationPlan) async throws -> AppliedPlan
+func apply(_ plan: OrganizationPlan, sessionText: String?) async throws -> AppliedPlan
+@discardableResult func recoverIncompleteEvents() async throws -> [RecoveryOutcome]
+```
+
+One apply is: re-validate against a fresh `scan()`; **compare and swap** every
+note in `plan.preconditions` and every `moveSegment` segment; write the journal
+row with the before-images *before* the first write; execute in a fixed order
+(folders -> new notes -> appends -> segment removals -> retitles -> moves ->
+tags), each step atomic through `NoteStore`; write the after-images; flip the
+status to `applied`.
+
+* **A CAS miss throws `ApplyError.preconditionFailed([NoteID])` and changes
+  nothing** — not one byte. That is FR-3.2's "the user kept typing": re-plan, do
+  not re-try. A segment that is no longer in its source verbatim is the same
+  error.
+* `ApplyError.invalidPlan([PlanIssue])` means the library moved on in a way the
+  validator rejects (a folder went away, a title is now taken).
+* `appendToNote` appends under a `---` rule and an optional `##` heading, never
+  interleaved. An empty target gets no rule.
+* `moveSegment` appends to the destination *first*, then removes the segment from
+  the source. A source left whitespace-only goes to the **Trash with its text
+  intact** — it is never rewritten empty first, and never hard-deleted.
+* `createNote` picks a free filename, so a collision suffixes rather than
+  overwrites; `AppliedPlan.outcomes` carries the final path of every action.
+* `tagNote` merges additively (case-insensitive, first spelling wins).
+
+`AppliedPlan` gives the card everything it needs: `eventID`, a `summary` built
+from what actually happened, per-action `outcomes` (kind, status, final path,
+previous path), `createdNotes`, `createdFolders`, `trashedNotes` (with their
+Trash URLs) and `changedPaths`.
+
+### Crash recovery
+
+`recoverIncompleteEvents()` looks for journal rows still marked `inProgress`:
+
+* **Rolls forward** when every note has a durable after-image *and* the file on
+  disk still matches its hash — the work was done, only the status flip was
+  lost. The event becomes a normal undoable entry.
+* **Rolls back** otherwise: notes the event created go to the Trash, every
+  before-image is written back to the path it came from, files left at
+  intermediate paths are trashed, empty created folders are removed. The plan
+  then counts as never applied.
+
+Call it once at launch, before `watcher.reconcile()`. It is idempotent.
+
+### `ActivityLog` (FR-4.3, FR-4.4)
+
+```swift
+init(library:) / init(inMemoryFor:)
+
+func events(limit: Int = 25, before: ActivityCursor? = nil) throws -> [ActivityEvent]
+func event(_ id: ActivityEventID) throws -> ActivityEvent?      // with before/after images
+func images(for: ActivityEventID) throws -> [NoteImage]
+func diff(for: ActivityEventID) throws -> [NoteDiff]            // per-note line diff
+func sessionText(for: ActivityEventID) throws -> String?
+func undoableEvents(limit: Int = 10) throws -> [ActivityEvent]
+func recordDismissed(plan:summary:sessionText:at:) throws -> ActivityEventID
+@discardableResult
+func prune(olderThan: TimeInterval = 30 days, now: Date, keepingUndoDepth: Int = 10) throws -> ActivityPruneReport
+
+func baseline(for: NoteID) throws -> NoteBaseline?              // BaselineStore
+func setBaseline(noteID:hash:text:at:) throws
+```
+
+* **`events(...)` does not load note text.** A page of images would be
+  megabytes; call `event(_:)` for the row the user opened.
+* Paging is newest-first through `ActivityCursor` (`timestamp` + `id`, so two
+  events written in the same millisecond cannot hide each other).
+* `diff(for:)` diffs the **body** — front matter is stripped, because `id:`
+  churn is not a change the user made. `NoteDiff.unified` is `diff -u` text;
+  `NoteDiff.created` / `.trashed` / `.wasRelocated` cover the rest.
+* Retention (FR-4.4): `prune(olderThan:)` drops raw session text past 30 days,
+  and images only for events Undo can no longer reach. Event rows stay forever.
+* It is also the GRDB `BaselineStore` (`note_baselines`); `DatabaseBaselineStore`
+  is the façade to hand `SessionTracker`.
+
+### `UndoService` (FR-4.3)
+
+```swift
+func undoLatest() async throws -> UndoResult
+func undo(_ eventID: ActivityEventID) async throws -> UndoResult
+func undoableEvents(limit: Int = 10) async throws -> [ActivityEvent]
+```
+
+Per affected note: if the file still hashes to the after-image, the before-image
+goes back **byte-for-byte**; if the user has edited it since, the reverse patch
+is replayed onto the current text; if a hunk will not land, the user's text is
+kept and the recovered text appended under `## Restored by Undo (conflict)`, and
+the result is `.partial`. Creates become Trash, a trashed empty source is
+written back, moves and retitles are reversed by moving the file.
+
+Undo is **LIFO**: `UndoError.blockedByLaterEvent(id)` names the later
+organization event that touched the same note — reverse that one first. Undo
+events themselves never block. An undo records its own Activity event and makes
+the original non-undoable (no redo in Phase 1). The other errors are
+`.nothingToUndo`, `.unknownEvent`, `.notUndoable`.
+
+---
+
 ## Errors
 
 `StorageError` is `Equatable` and `CustomStringConvertible`: `.notFound`,
@@ -446,7 +575,7 @@ looser 500 ms (NFR-2's "degrade gracefully").
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 151 tests, ~1.8 s without the slow tags.
+`Tests/FilawayCoreTests` — 212 tests, ~2 s without the slow tags.
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -466,6 +595,16 @@ looser 500 ms (NFR-2's "degrade gracefully").
 * `SearchUnitTests` / `LaunchTimerTests` — query escaping, edit distance, the
   signature prefilter (fuzzed against the real distance), snippets, UTF-16
   ranges across astral characters, launch marks.
+* `ApplyTests` — the whole action matrix, `moveSegment` into an existing note,
+  into a new one and leaving its source empty (-> Trash), CAS misses that
+  byte-compare the entire tree, the depth and no-stray-file invariants.
+* `ApplyRecoveryTests` — a crash injected between operations, before the
+  after-images and before the commit: roll back, roll forward, inline rollback
+  on error, idempotence (NFR-3).
+* `ActivityLogTests` / `ActivityUndoTests` / `ActivityDiffTests` — paging,
+  per-note diffs, 30-day retention with an injected clock, baselines, ten
+  stacked undos restoring byte-identical trees, the reverse patch after a user
+  edit, the conflict block, LIFO blocking.
 * `ScaleTests` — 5,000 notes under 3 s (tagged `.slow`).
 * `SearchScaleTests` — keyword p95 under 100 ms at 5,000 notes on a debug build;
   20,000 notes reported (tagged `.slow`).
