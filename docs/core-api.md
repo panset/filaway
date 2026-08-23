@@ -383,6 +383,10 @@ Notes for the UI layer:
   one or two edits still finds the note; a typo in the body finds nothing.
 * Searching is cheap and off the store's actor, so it is safe to call on every
   keystroke without debouncing. Debounce anyway if you like — 40 ms is plenty.
+* The app already does all of this:
+  `FilawayApp/Features/Search/SearchCoordinator` owns the debounce (80 ms),
+  cancellation, selection and the ⌘K panel; `AppModel.bootstrap()` installs the
+  backend. See CLAUDE.md § "Search UI" and ADR-025.
 
 ---
 

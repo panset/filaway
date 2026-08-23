@@ -16,6 +16,8 @@ import FilawayCore
 /// | Phase | What it proves |
 /// |---|---|
 /// | `editor` | The M1-10 editor checks, now against a note read from disk. |
+/// | `search` | The M1-12 ⌘K checks against a corpus seeded on disk before launch: as-you-type hits, keyboard nav, open-scrolled-to-match, fuzzy titles, recents, Escape. |
+/// | `kill` / `killcheck` | Type, wait out the debounce, type again, park — the script sends SIGKILL; the relaunch proves ≤ one 750 ms burst was lost (FR-2.3, NFR-3). |
 /// | `1` | Empty sidebar → ⌘N → type → autosave lands on disk → rename renames the file → an external edit reaches the sidebar → a final burst is flushed by terminate. |
 /// | `2` | Relaunch on the same root restores the last note *and* the burst typed immediately before quit (FR-1.5, FR-2.3). |
 @MainActor
@@ -38,6 +40,9 @@ enum SmokeDriver {
             await settle(seconds: 1.0)
             switch phase {
             case "editor": await runEditorPhase()
+            case "search": await runSearchPhase()
+            case "kill": await runKillPhase()
+            case "killcheck": await runKillCheckPhase()
             case "2": await runRelaunchPhase()
             default: await runCapturePhase()
             }
@@ -166,6 +171,85 @@ enum SmokeDriver {
               model.recents.map(\.note.title).joined(separator: ", "))
         print("SMOKE info launch \(LaunchClock.summary)")
         print("SMOKE phase=2 result failures=\(failures)")
+        finish()
+    }
+
+    // MARK: - Phase: kill (FR-2.3 / NFR-3, the `kill -9` DoD row)
+
+    /// Title and bursts shared by the `kill` and `killcheck` phases.
+    static let killTitle = "Kill test"
+    /// Typed, then given longer than the 750 ms debounce: must survive SIGKILL.
+    static let survivingBurst = "this burst was typed well before the kill\n"
+    /// Typed in the last instant: allowed to be lost, nothing else is.
+    static let doomedBurst = "typed a moment before SIGKILL\n"
+
+    /// Types, waits out the debounce, types again, then parks and prints
+    /// `SMOKE ready-for-kill`. `Tools/smoke.sh` sees that line and sends
+    /// SIGKILL — the app gets no terminate handler, no flush, no chance to
+    /// tidy up, which is exactly the point.
+    private static func runKillPhase() async {
+        let model = AppModel.shared
+        header()
+        guard await model.newNoteAsync() != nil else {
+            check("kill-new-note", false)
+            return finish()
+        }
+        await model.commitTitleAsync(killTitle)
+        await settle(seconds: 0.4)
+        guard let editor = MarkdownEditorController.mostRecent else {
+            check("kill-editor-attached", false)
+            return finish()
+        }
+        editor.insertText(survivingBurst)
+        // > 750 ms debounce, so this burst is on disk before the kill.
+        await settle(seconds: 1.4)
+        check("kill-first-burst-flushed", !model.dirtyNoteIDs.contains(model.openNote?.id ?? NoteID()))
+        editor.insertText(doomedBurst)
+        print("SMOKE info note=\(model.openNote?.relativePath ?? "nil")")
+        print("SMOKE ready-for-kill")
+        fflush(stdout)
+        // Park. The script kills us; anything printed after this never happens.
+        await settle(seconds: 120)
+        check("kill-was-delivered", false, "the script never sent SIGKILL")
+        finish()
+    }
+
+    /// Relaunch after the SIGKILL: the pre-debounce burst is on disk and the
+    /// library opens cleanly after an unclean shutdown.
+    private static func runKillCheckPhase() async {
+        let model = AppModel.shared
+        header()
+        _ = await poll(seconds: 15) { model.isLoaded && model.noteCount >= 1 }
+        check("library-opens-after-sigkill", model.isLoaded && model.noteCount >= 1,
+              "notes=\(model.noteCount)")
+
+        let url = model.library.url(for: "\(killTitle).md")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        check("sigkill-file-exists", FileManager.default.fileExists(atPath: url.path),
+              url.lastPathComponent)
+        check("sigkill-kept-debounced-burst",
+              text.contains(survivingBurst.trimmingCharacters(in: .newlines)),
+              String(text.suffix(80)).debugDescription)
+        check("sigkill-file-not-truncated", text.hasPrefix("---\n"))
+        // The last burst is allowed to be lost — that is the ≤750 ms window
+        // FR-2.3 buys. Reported, never asserted.
+        print("SMOKE info last-burst-survived="
+            + "\(text.contains(doomedBurst.trimmingCharacters(in: .newlines)))")
+        check("sigkill-note-in-sidebar",
+              model.tree?.notes.contains { $0.title == killTitle } ?? false)
+        print("SMOKE phase=killcheck result failures=\(failures)")
+        finish()
+    }
+
+    // MARK: - Phase: search (M1-12)
+
+    /// The corpus is already on disk when the app starts (`Tools/smoke.sh`
+    /// seeds it), so this also covers "a cold launch on an unknown library
+    /// indexes it".
+    private static func runSearchPhase() async {
+        header()
+        failures += await SearchSmokeCheck.run()
+        print("SMOKE phase=search result failures=\(failures)")
         finish()
     }
 

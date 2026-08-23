@@ -7,6 +7,13 @@
 # throwaway preferences domain:
 #
 #   editor  the M1-10 editor checks, on a note read back from disk
+#   search  the M1-12 ⌘K checks on a three-note corpus seeded *before* launch:
+#           as-you-type hits, ↑/↓/⏎/Esc, open-scrolled-to-match, fuzzy titles,
+#           recents on an empty query
+#   kill    type → wait out the 750 ms debounce → type again → the script sends
+#           SIGKILL (no terminate handler, no flush)
+#   killcheck relaunch after the SIGKILL: the debounced burst is on disk and the
+#           library opens cleanly (FR-2.3, NFR-3)
 #   1       empty sidebar → ⌘N → type → autosave lands → rename renames the
 #           file → an external edit reaches the sidebar → quit mid-burst
 #   2       relaunch on the same root: last note restored, last burst survived
@@ -33,9 +40,54 @@ STAMP="$(date +%s)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
 EDITOR_ROOT="$WORK/EditorNotes"
+SEARCH_ROOT="$WORK/SearchNotes"
+KILL_ROOT="$WORK/KillNotes"
 SUPPORT="$WORK/Support"
 SUITE="com.tejaspanse.filaway.smoke.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT"
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT"
+
+# Three notes on disk before the app ever runs, so the search phase also proves
+# a cold launch indexes a library Filaway has never seen. Titles and the tail
+# phrase are asserted in Features/Search/SearchSmokeCheck.swift — keep in step.
+seed_search_corpus() {
+  local root="$1"
+  mkdir -p "$root/Commands"
+  {
+    echo "Notes from the staging spike."
+    echo
+    # ~160 lines of filler: the code block below has to start well past one
+    # screenful, so "the editor scrolled to the match" is a real assertion.
+    i=1
+    while [ "$i" -le 160 ]; do
+      echo "Line $i — background on the staging environment and its quirks."
+      i=$((i + 1))
+    done
+    echo
+    echo "curl to fetch docs from staging:"
+    echo
+    echo '```bash'
+    echo 'curl -H "Auth: Bearer $TOK" https://api.st.app/v2/docs'
+    echo '```'
+    echo
+    echo "remember: token expires hourly"
+  } > "$root/Commands/Staging docs.md"
+
+  {
+    echo "The 401 only happens after the bearer token rotates."
+    echo
+    echo "- [ ] rotate the staging token"
+    echo "- [ ] check the refresh window"
+  } > "$root/Auth API debug.md"
+
+  {
+    echo "Handy container commands."
+    echo
+    echo '```bash'
+    echo 'curl -fsS http://localhost:8080/healthz'
+    echo '```'
+  } > "$root/Docker cheats.md"
+}
+seed_search_corpus "$SEARCH_ROOT"
 
 failures=0
 app_pid=""
@@ -59,6 +111,8 @@ run_phase() {
   local phase="$1" limit="$2" status
   local root="$ROOT"
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
+  [ "$phase" = "search" ] && root="$SEARCH_ROOT"
+  [ "$phase" = "killcheck" ] && root="$KILL_ROOT"
   echo
   echo "=== smoke phase: $phase ==============================================="
   FILAWAY_SMOKE="$phase" \
@@ -85,7 +139,48 @@ run_phase() {
   echo "smoke: phase $phase exited $status"
 }
 
+# FR-2.3 / NFR-3: the app is SIGKILLed mid-edit — no terminate handler, no
+# flush. The phase parks on "SMOKE ready-for-kill"; we kill it there.
+run_kill_phase() {
+  # Polled at 200 ms so SIGKILL lands close to the last keystroke — killing a
+  # second later would let the 750 ms debounce flush it and make the assertion
+  # vacuous.
+  local out="$WORK/kill.log" waited=0 limit=300
+  echo
+  echo "=== smoke phase: kill ==============================================="
+  FILAWAY_SMOKE="kill" \
+  FILAWAY_NOTES_ROOT="$KILL_ROOT" \
+  FILAWAY_SUPPORT_ROOT="$SUPPORT" \
+  FILAWAY_DEFAULTS_SUITE="$SUITE" \
+    "$APP" > "$out" 2>&1 &
+  app_pid=$!
+
+  while [ "$waited" -lt "$limit" ]; do
+    grep -q "SMOKE ready-for-kill" "$out" 2>/dev/null && break
+    kill -0 "$app_pid" 2>/dev/null || break
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+
+  local ready=1
+  grep -q "SMOKE ready-for-kill" "$out" 2>/dev/null || ready=0
+  kill -9 "$app_pid" 2>/dev/null
+  wait "$app_pid" 2>/dev/null
+  app_pid=""
+  cat "$out"
+
+  if [ "$ready" = "1" ]; then
+    echo "smoke: phase kill — SIGKILL delivered mid-edit"
+  else
+    echo "SMOKE FAIL phase-kill — never reached the kill point"
+    failures=$((failures + 1))
+  fi
+}
+
 run_phase editor 90
+run_phase search 120
+run_kill_phase
+run_phase killcheck 60
 run_phase 1 90
 run_phase 2 60
 

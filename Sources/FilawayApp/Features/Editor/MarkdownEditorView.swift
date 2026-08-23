@@ -59,6 +59,15 @@ final class MarkdownEditorController: ObservableObject {
         textView?.scrollTo(range: range, select: select)
     }
 
+    /// `true` when `range` is on screen — the headless check for "opens the
+    /// note scrolled to the relevant section" (FR-5.2).
+    func isRangeVisible(_ range: NSRange) -> Bool {
+        textView?.isVisible(range: range) ?? false
+    }
+
+    /// The character range currently in the viewport, or `nil` before layout.
+    var visibleCharacterRange: NSRange? { textView?.visibleCharacterRange() }
+
     /// Convenience for search: scrolls to the first occurrence of `match`.
     @discardableResult
     func scrollTo(match: String, select: Bool = true) -> Bool {

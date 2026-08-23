@@ -332,9 +332,24 @@ final class MarkdownTextView: NSTextView, @preconcurrency NSTextStorageDelegate 
         }
     }
 
+    /// `true` when `range` is inside the part of the document on screen — what
+    /// "opens the note scrolled to the relevant section" (FR-5.2) has to be
+    /// true of, and the only way to check it with no screen to capture.
+    ///
+    /// Prefers geometry (the laid-out rect against the clip view's visible
+    /// rect) and falls back to TextKit 2's viewport range.
+    func isVisible(range: NSRange) -> Bool {
+        let clamped = clamp(range, to: (string as NSString).length)
+        if let scrollView = enclosingScrollView, let rect = blockRect(for: clamped) {
+            return rect.intersects(scrollView.documentVisibleRect)
+        }
+        guard let viewport = visibleCharacterRange() else { return false }
+        return clamped.location >= viewport.location && clamped.location <= viewport.upperBound
+    }
+
     /// Character range TextKit 2 currently has laid out for the viewport.
     /// `nil` under TextKit 1 or before the first layout pass.
-    private func visibleCharacterRange() -> NSRange? {
+    func visibleCharacterRange() -> NSRange? {
         guard let layoutManager = textLayoutManager,
               let content = layoutManager.textContentManager,
               let viewport = layoutManager.textViewportLayoutController.viewportRange

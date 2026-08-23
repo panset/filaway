@@ -1096,3 +1096,52 @@ definition, while the side that calls it names what it needs:
 - The app wiring (M2-10) has one name for each thing: `PlanApplier` as the
   `PlanApplying`, `ActivityLog` (or `DatabaseBaselineStore`) as the
   `BaselineStore`, `InMemoryPendingSessionStore` until M2-09.
+
+## ADR-034 — The ⌘K results panel is a non-focusable overlay, not a popover
+
+**Date:** 2026-08-23 · **Task:** M1-12 · **Status:** accepted
+
+**Context.** FR-1.3 puts one search bar in the toolbar; Figure 2b shows the ⌘K
+surface as a field with a results list under it. macOS offers three obvious
+shapes for the list: an `NSPopover` anchored to the toolbar item, a separate
+Spotlight-style floating `NSPanel`, or an overlay drawn inside the window.
+
+The deciding constraint is **focus**. The search has to be fully operable from
+the keyboard: ↑/↓ move the selection, ⏎ opens it, Esc closes and returns to the
+editor, and every character typed in between has to keep reaching the field. A
+popover takes first responder when it appears, so the arrow keys would land in
+the popover's list and the letters would have to be forwarded back to a field
+that no longer has focus — a two-way relay that AppKit's popover dismissal
+policies then fight. A separate panel has the same problem plus its own window
+level, key-window handling and screen placement.
+
+**Decision.** The panel is a plain SwiftUI overlay on the window
+(`ShellView.searchOverlay`), horizontally centred so it hangs under the
+toolbar's `.principal` search field. It never becomes first responder: the text
+field keeps focus for the whole interaction and forwards keys to
+``SearchCoordinator`` (`moveSelection(by:)`, `openSelected()`,
+`handleEscape()`), which owns both `results` and `selectedIndex`. The panel is a
+pure function of that state. A transparent full-window backdrop closes it on a
+click outside, Spotlight-style.
+
+⌘K goes through `AppModel.focusSearch()`, which both moves focus and calls
+`SearchCoordinator.activate()` — so the shortcut works even where SwiftUI's
+`FocusState` has nowhere to move focus to (the headless smoke run), and the
+field editor's contents are selected so the next keystroke replaces the old
+query.
+
+**Consequences.**
+- Every keyboard path is a method call on a `@MainActor` object, which is why
+  the `search` smoke phase can drive ↑/↓/⏎/Esc with no synthetic key events and
+  no unlocked screen (plan §8).
+- The panel is clipped to the window. That is the trade against a real panel,
+  and it is the right one at 460 pt wide.
+- The overlay is hosted by its own small `SearchOverlay` view with its own
+  `@ObservedObject`: `ShellView` observes `AppModel`, and `SearchCoordinator` is
+  a separate object, so without it the overlay would never see the panel open.
+- Debounce is 80 ms and only the newest *generation* of a query may publish, so
+  a slow search for `cur` cannot overwrite a fast one for `curl`. Cancellation
+  alone would nearly always be enough; the counter makes it unconditional.
+- `SearchMode.semantic` exists as a documented, unimplemented case. M3-06 adds a
+  second backend, the Find/Ask toggle and the answer card above the list at the
+  marked extension point; nothing about the focus model has to change.

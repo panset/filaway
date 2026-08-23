@@ -57,6 +57,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var focusSearchRequest = 0
     @Published private(set) var focusSidebarRequest = 0
 
+    /// "Open the note scrolled to the relevant section" (FR-5.2). Set after the
+    /// note is loaded; ``ShellView`` performs the scroll on the live text view.
+    struct Reveal: Equatable {
+        /// Makes two reveals of the same range distinct, so `onChange` fires.
+        var token: Int
+        var noteID: NoteID
+        var range: NSRange
+        /// `false` for a title-only hit: open at the top, select nothing.
+        var selects: Bool
+    }
+
+    @Published private(set) var reveal: Reveal?
+    private var revealToken = 0
+
     let search = SearchCoordinator()
 
     // MARK: - Storage stack
@@ -66,6 +80,7 @@ final class AppModel: ObservableObject {
     private(set) var metadata: MetadataStore?
     private(set) var watcher: LibraryWatcher?
     private(set) var autosave: AutosaveController?
+    private(set) var searchService: SearchService?
 
     private var changeTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
@@ -89,7 +104,8 @@ final class AppModel: ObservableObject {
         self.library = Library(root: root, supportRoot: supportRoot)
         self.debounce = debounce
         self.expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
-        search.onOpen = { [weak self] id in self?.select(noteID: id) }
+        search.onOpen = { [weak self] hit in self?.openSearchHit(hit) }
+        search.onReturnFocusToEditor = { [weak self] in self?.focusEditor() }
     }
 
     // MARK: - Launch
@@ -111,6 +127,16 @@ final class AppModel: ObservableObject {
             self.store = store
             self.metadata = metadata
             self.watcher = watcher
+
+            // Keyword search (M1-06/M1-12). It reads through
+            // `MetadataStore.reader`, off the store's actor, so a keystroke
+            // never queues behind an autosave — and it is entirely offline
+            // (FR-5.5).
+            let searchService = SearchService(metadata: metadata)
+            self.searchService = searchService
+            search.backend = { query, limit in
+                await searchService.keyword(query, limit: limit)
+            }
 
             let autosave = AutosaveController(store: store, watcher: watcher, debounce: debounce)
             autosave.onSaved = { [weak self] summary, _ in self?.noteSaved(summary) }
@@ -256,10 +282,48 @@ final class AppModel: ObservableObject {
         AppSettings.setLastOpenNoteID(nil, libraryKey: library.key)
     }
 
+    // MARK: - Search (FR-5.2)
+
+    /// A click, or ⏎, on a keyword hit.
+    func openSearchHit(_ hit: KeywordHit) {
+        Task { await openSearchHitAsync(hit) }
+    }
+
+    /// Selects the note in the sidebar, loads it, then asks the editor to scroll
+    /// to the hit's `matchRange` and select it — "clicking any result opens the
+    /// note scrolled to the relevant section" (FR-5.2).
+    ///
+    /// Works when the hit *is* the open note: `open(noteID:)` returns early in
+    /// that case, and the reveal is published either way.
+    @discardableResult
+    func openSearchHitAsync(_ hit: KeywordHit) async -> Bool {
+        guard metadata != nil else { return false }
+        selection = .recent(hit.id)
+        await open(noteID: hit.id)
+        guard openNote?.id == hit.id else { return false }
+        revealToken += 1
+        reveal = Reveal(
+            token: revealToken,
+            noteID: hit.id,
+            // A title-only hit has no body range: open at the top (ADR-019).
+            range: hit.matchRange?.nsRange ?? NSRange(location: 0, length: 0),
+            selects: hit.matchRange != nil
+        )
+        return true
+    }
+
     // MARK: - Focus
 
     func focusEditor() { focusEditorRequest += 1 }
-    func focusSearch() { focusSearchRequest += 1 }
+
+    /// ⌘K from anywhere. Presenting the panel here rather than waiting for the
+    /// field's focus callback keeps the shortcut deterministic — and testable
+    /// from the headless smoke driver, which has no first responder to move.
+    func focusSearch() {
+        focusSearchRequest += 1
+        search.activate()
+    }
+
     func focusSidebar() { focusSidebarRequest += 1 }
 
     // MARK: - Banner

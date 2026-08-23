@@ -30,6 +30,9 @@ struct ShellView: View {
         } detail: {
             detail
         }
+        // The ⌘K panel hangs off the whole window, not the detail pane, so it
+        // lands under the toolbar's centred search field (Figure 2b, ADR-025).
+        .overlay(alignment: .top) { searchOverlay }
         .navigationTitle(model.openNote?.title ?? "Filaway")
         .toolbar { toolbar }
         .background(WindowAccessor(onWindow: configure(window:)))
@@ -43,11 +46,30 @@ struct ShellView: View {
         }
         .onChange(of: model.focusSearchRequest) { _, _ in
             searchFocused = true
+            // ⌘K selects what is already in the field, like every other macOS
+            // search field, so the next keystroke replaces the old query.
+            DispatchQueue.main.async { SearchFieldSelection.selectAllInFocusedField() }
         }
         .onChange(of: model.focusSidebarRequest) { _, _ in
             searchFocused = false
             FirstResponder.focusSidebar()
         }
+        .onChange(of: model.reveal) { _, request in
+            guard let request else { return }
+            // Switching notes rebuilds the editor (`.id(open.id)`); one turn of
+            // the run loop lets the new text view attach and lay out before we
+            // scroll it.
+            DispatchQueue.main.async {
+                editor.focus()
+                editor.scrollTo(range: request.range, select: request.selects)
+            }
+        }
+    }
+
+    // MARK: - ⌘K panel (Figure 2b, FR-1.3, FR-5.1)
+
+    private var searchOverlay: some View {
+        SearchOverlay(coordinator: model.search) { searchFocused = false }
     }
 
     // MARK: - Detail
