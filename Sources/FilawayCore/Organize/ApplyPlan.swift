@@ -110,15 +110,12 @@ public actor PlanApplier: PlanApplying {
     // MARK: - Preparation
 
     private struct Prepared {
-        var snapshot: LibrarySnapshot
-        var context: OrganizeContext
         /// Existing notes the plan touches, resolved from its references.
         var resolved: [NoteID: NoteSummary]
         /// `NoteRef` → note id, so execution never re-resolves.
         var references: [NoteRef: NoteID]
+        /// The full raw text of every note the plan will change.
         var beforeImages: [NoteImage]
-        var rawTexts: [NoteID: String]
-        var bodies: [NoteID: String]
     }
 
     private func prepare(_ plan: OrganizationPlan) async throws -> Prepared {
@@ -165,8 +162,9 @@ public actor PlanApplier: PlanApplying {
         }
 
         // (1) Re-validate against the library as it is *now*.
-        let context = OrganizeContext(snapshot: snapshot, excludedFolders: excludedFolders, bodies: bodies)
-        let validation = PlanValidator(context: context).validate(plan)
+        let validation = PlanValidator(
+            context: OrganizeContext(snapshot: snapshot, excludedFolders: excludedFolders, bodies: bodies)
+        ).validate(plan)
         guard validation.isValid else { throw ApplyError.invalidPlan(validation.errors) }
 
         // (3) Before-images: the full raw text of every note that will change.
@@ -182,22 +180,13 @@ public actor PlanApplier: PlanApplying {
                 )
             }
 
-        return Prepared(
-            snapshot: snapshot,
-            context: context,
-            resolved: resolved,
-            references: references,
-            beforeImages: beforeImages,
-            rawTexts: rawTexts,
-            bodies: bodies
-        )
+        return Prepared(resolved: resolved, references: references, beforeImages: beforeImages)
     }
 
     // MARK: - Execution
 
     private struct ApplyState {
         var pathByID: [NoteID: String] = [:]
-        var titleByID: [NoteID: String] = [:]
         var beforeByID: [NoteID: NoteImageSide] = [:]
         var references: [NoteRef: NoteID] = [:]
         var created: Set<NoteID> = []
@@ -218,7 +207,6 @@ public actor PlanApplier: PlanApplying {
             references = prepared.references
             for (id, note) in prepared.resolved {
                 pathByID[id] = note.relativePath
-                titleByID[id] = note.title
             }
             for image in prepared.beforeImages {
                 beforeByID[image.noteID] = image.before
@@ -315,7 +303,7 @@ public actor PlanApplier: PlanApplying {
             }
             try failureHook?.check(.retitleNote(index: index, path: path))
             let summary = try await store.rename(path, to: retitle.newTitle)
-            relocated(id, from: path, to: summary.relativePath, state: &state)
+            relocated(id, to: summary.relativePath, state: &state)
             try await record(.init(kind: .relocated, noteID: id, path: summary.relativePath, previousPath: path), state: &state, eventID: eventID)
             state.outcomes.append(ActionOutcome(
                 index: index,
@@ -337,7 +325,7 @@ public actor PlanApplier: PlanApplying {
             _ = try await ensureFolder(folder, state: &state, eventID: eventID)
             try failureHook?.check(.moveNote(index: index, path: path))
             let summary = try await store.move(path, toFolder: folder)
-            relocated(id, from: path, to: summary.relativePath, state: &state)
+            relocated(id, to: summary.relativePath, state: &state)
             try await record(.init(kind: .relocated, noteID: id, path: summary.relativePath, previousPath: path), state: &state, eventID: eventID)
             state.outcomes.append(ActionOutcome(
                 index: index,
@@ -391,7 +379,6 @@ public actor PlanApplier: PlanApplying {
         }
 
         state.pathByID[note.id] = note.relativePath
-        state.titleByID[note.id] = note.title
         state.created.insert(note.id)
         state.createdNotes.append(note.id)
         try await record(.init(kind: .createdNote, noteID: note.id, path: note.relativePath), state: &state, eventID: eventID)
@@ -516,9 +503,8 @@ public actor PlanApplier: PlanApplying {
         return existed
     }
 
-    private func relocated(_ id: NoteID, from oldPath: String, to newPath: String, state: inout ApplyState) {
+    private func relocated(_ id: NoteID, to newPath: String, state: inout ApplyState) {
         state.pathByID[id] = newPath
-        state.titleByID[id] = PathRules.title(of: newPath)
     }
 
     /// Appends to the journal's progress list and makes it durable before the

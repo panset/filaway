@@ -44,7 +44,7 @@ public enum ApplyText {
     public static func removingSegment(_ segment: String, from body: String) -> String? {
         guard !segment.isEmpty, let range = body.range(of: segment) else { return nil }
         let head = String(body[body.startIndex ..< range.lowerBound]).trimmingTrailingWhitespaceAndNewlines
-        let tail = String(body[range.upperBound...]).trimmingLeadingNewlines
+        let tail = String(body[range.upperBound...]).trimmingLeadingBlanks
         if head.isEmpty, tail.isEmpty { return "" }
         if head.isEmpty { return tail }
         if tail.isEmpty { return head + "\n" }
@@ -87,7 +87,9 @@ extension String {
         return out
     }
 
-    var trimmingLeadingNewlines: String {
+    /// Newlines, spaces and tabs at the very start — the seam left behind when
+    /// a segment is lifted out of the middle of a note.
+    var trimmingLeadingBlanks: String {
         var out = self
         while let first = out.first, first.isNewline || first == " " || first == "\t" { out.removeFirst() }
         return out
