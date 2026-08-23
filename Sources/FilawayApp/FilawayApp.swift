@@ -24,14 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         Log.app.info("Filaway \(FilawayCore.version, privacy: .public) launched")
 
-        // Headless smoke check (plan §8): report the windows we opened, then
-        // quit. Lets CI and a locked screen verify the shell without XCTest UI.
+        // Headless smoke check (plan §8): drive the real editor code paths,
+        // print what happened, then quit with a non-zero status on failure.
+        // Lets CI and a locked screen verify the shell without XCTest UI.
         if ProcessInfo.processInfo.environment["FILAWAY_SMOKE"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                for window in NSApp.windows where window.contentView != nil {
-                    print("SMOKE window title=\"\(window.title)\" visible=\(window.isVisible) size=\(Int(window.frame.width))x\(Int(window.frame.height))")
-                }
-                NSApp.terminate(nil)
+                let failures = EditorSmokeCheck.run()
+                fflush(stdout)
+                exit(failures == 0 ? 0 : 1)
             }
         }
     }
@@ -41,16 +41,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Placeholder two-pane shell (spec Fig 1); filled in by M1-09.
+/// Two-pane shell (spec Fig 1). The sidebar is still the M1-09 placeholder; the
+/// detail pane is the real editor (M1-10) on an in-memory sample note until
+/// storage (M1-03) lands.
 struct ShellView: View {
+    @StateObject private var editor = MarkdownEditorController()
+    @State private var title = SampleNote.title
+    @State private var markdown = SampleNote.markdown
+
     var body: some View {
         NavigationSplitView {
             Text("Recents / Library")
                 .foregroundStyle(.secondary)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240)
         } detail: {
-            Text("Editor")
-                .foregroundStyle(.secondary)
+            NoteEditorView(
+                title: $title,
+                markdown: $markdown,
+                createdAt: SampleNote.createdAt,
+                controller: editor,
+                onTitleCommit: { newTitle in
+                    // M1-09/M1-11 rename the file here.
+                    Log.app.debug("title committed (\(newTitle.count, privacy: .public) chars)")
+                },
+                onTextChange: { _ in
+                    // M1-11 autosave hooks in here (750 ms debounce).
+                },
+                onEditorActivity: { _ in
+                    // M2-03 session tracker hooks in here.
+                }
+            )
         }
     }
 }

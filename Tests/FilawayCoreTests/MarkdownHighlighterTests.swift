@@ -237,6 +237,45 @@ func fenceVariants() {
     #expect(bogus.codeBlocks.isEmpty)
 }
 
+@Test("codeBlocks(overlapping:) returns viewport blocks with their global index")
+func codeBlocksOverlapping() {
+    let text = """
+    ```a
+    one
+    ```
+    text
+    ```b
+    two
+    ```
+    text
+    ```c
+    three
+    ```
+    """
+    let highlighter = MarkdownHighlighter(text: text)
+    let all = highlighter.codeBlocks
+    #expect(all.count == 3)
+    #expect(all.map(\.language) == ["a", "b", "c"])
+
+    // A range covering only the middle block, from a cold cache and a warm one.
+    let middle = all[1]
+    for _ in 0 ..< 2 {
+        let overlapping = highlighter.codeBlocks(overlapping: middle.range)
+        #expect(overlapping.count == 1)
+        #expect(overlapping[0].index == 1)
+        #expect(overlapping[0].block == middle)
+    }
+    // Whole document.
+    let everything = highlighter.codeBlocks(
+        overlapping: NSRange(location: 0, length: highlighter.length)
+    )
+    #expect(everything.map(\.index) == [0, 1, 2])
+    #expect(everything.map(\.block) == all)
+    // A range in the prose between two blocks touches none.
+    let gap = NSRange(location: all[0].location + all[0].length + 1, length: 2)
+    #expect(highlighter.codeBlocks(overlapping: gap).isEmpty)
+}
+
 // MARK: - Line endings and multibyte
 
 @Test("CRLF documents keep correct offsets and styling")

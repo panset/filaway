@@ -337,24 +337,62 @@ public final class MarkdownHighlighter {
     public var codeBlocks: [MarkdownCodeBlock] {
         if let cached = codeBlockCache { return cached }
         var blocks: [MarkdownCodeBlock] = []
+        enumerateFencedBlocks { _, openLine, closeLine, isClosed in
+            blocks.append(makeCodeBlock(openLine: openLine, closeLine: closeLine, isClosed: isClosed))
+            return true
+        }
+        codeBlockCache = blocks
+        return blocks
+    }
+
+    /// Only the blocks overlapping `range`, paired with their index in
+    /// ``codeBlocks``.
+    ///
+    /// The editor calls this on every relayout to decorate the viewport; it
+    /// stops as soon as it is past `range` and never materialises the blocks it
+    /// skips, so a 1 MB note with hundreds of blocks stays cheap.
+    public func codeBlocks(overlapping range: NSRange) -> [(index: Int, block: MarkdownCodeBlock)] {
+        if let cached = codeBlockCache {
+            return cached.enumerated()
+                .filter { $0.element.location < range.upperBound
+                    && $0.element.location + $0.element.length > range.location }
+                .map { (index: $0.offset, block: $0.element) }
+        }
+        var result: [(index: Int, block: MarkdownCodeBlock)] = []
+        enumerateFencedBlocks { index, openLine, closeLine, isClosed in
+            let start = lines[openLine].start
+            guard start < range.upperBound else { return false }
+            let end = closeLine.map { lines[$0].end } ?? chars.count
+            if end > range.location {
+                result.append((
+                    index,
+                    makeCodeBlock(openLine: openLine, closeLine: closeLine, isClosed: isClosed)
+                ))
+            }
+            return true
+        }
+        return result
+    }
+
+    /// Walks fenced blocks in document order. `body` returns `false` to stop.
+    private func enumerateFencedBlocks(
+        _ body: (_ index: Int, _ openLine: Int, _ closeLine: Int?, _ isClosed: Bool) -> Bool
+    ) {
         var openLine: Int?
+        var index = 0
         // The last entry is always a zero-length sentinel; skip it.
         for i in 0 ..< lines.count where lines[i].length > 0 && i + 1 < lines.count {
-            let line = lines[i]
-            let wasOpen = line.state.isOpen
+            let wasOpen = lines[i].state.isOpen
             let nextState = lines[i + 1].state
             if !wasOpen && nextState.isOpen {
                 openLine = i
             } else if wasOpen && !nextState.isOpen, let open = openLine {
-                blocks.append(makeCodeBlock(openLine: open, closeLine: i, isClosed: true))
+                if !body(index, open, i, true) { return }
+                index += 1
                 openLine = nil
             }
         }
-        if let open = openLine {
-            blocks.append(makeCodeBlock(openLine: open, closeLine: nil, isClosed: false))
-        }
-        codeBlockCache = blocks
-        return blocks
+        if let open = openLine { _ = body(index, open, nil, false) }
     }
 
     /// The fenced code block containing `index`, if any.
