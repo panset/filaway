@@ -349,3 +349,60 @@ scan` and `ScaleTests` both call it.
 - Release-build numbers (M-series, 2026-08): 5,000 notes / 48 MB scan 413 ms +
   rebuild 191 ms; 20,000 notes 1.62 s + 751 ms. `ScaleTests` gates the 5,000-note
   case at 3 s on a debug build, where it currently runs in ~1.1 s.
+
+---
+
+## ADR-012 — Semantic search ships a bundled Core ML bge-small; NaturalLanguage is not a real fallback
+
+**Date:** 2026-08-22 · **Task:** M1-08 (spike, plan §5 risk #4) · **Status:** accepted
+
+**Context.** Plan §1 chose local Core ML embeddings (Anthropic has no
+embeddings API) with a bge-small ↔ MiniLM decision deferred to M3-07, and plan
+§8 added `NLContextualEmbedding` to the fallback ladder because this machine has
+no Xcode and therefore no `coremlcompiler`. None of it had been tried.
+Full measurements: `docs/spikes/embedder.md`.
+
+**Decision.**
+
+1. **Ship `BAAI/bge-small-en-v1.5`** converted with `coremltools` to a fixed
+   `[1, 256]` fp16 ML Program with CLS pooling and L2 normalisation baked into
+   the graph (63.5 MB; 57.9 MB compressed). `all-MiniLM-L6-v2` (43 MB, ~1.5×
+   faster) stays converted and benchmarked as a one-line swap for M3-07.
+2. **Ship the `.mlpackage`, not a `.mlmodelc`**, and compile it at first launch
+   with `MLModel.compileModel(at:)` into Application Support. Measured cost:
+   47–86 ms, once. Plan §8's workaround has no downside — adopt it permanently,
+   not just until Xcode is installed.
+3. **Batch 1, not batch 8.** Core ML pipelines an `MLArrayBatchProvider` over a
+   batch-1 package as well as a batch-8 package does (4.06 vs 4.95 ms per
+   embedding) without the 10× penalty on single-query latency.
+4. **Demote the NaturalLanguage embedders.** `NLContextualEmbedding`
+   (mean-pooled) and `NLEmbedding.sentenceEmbedding` answered 4/20 spike queries
+   at rank 1, against 20/20 for both Core ML models and 16/20 for a plain BM25
+   baseline. They stay implemented behind `Embedder`, but the real degradation
+   path is **keyword-only FTS5 + Claude rerank**, which is measurably better
+   than either.
+5. **Pin the conversion toolchain** (`coremltools==9.0`, `torch==2.7.0`,
+   `transformers==4.56.2`, Python 3.11) and **gate every conversion on a
+   torch↔Core ML cosine ≥0.999**.
+
+**Consequences.**
+- Bundle grows by ~64 MB (plan §1 budgeted 35–65 MB); installs also spend ~64 MB
+  in Application Support for the compiled model. Palettization (8-bit ≈ 33 MB)
+  is the lever if that becomes a release blocker, gated on an M3-07 re-run.
+- `fp16 + transformers' -3.4e38 attention mask = NaN`, silently and
+  shape-dependently (every time at seq 64, never at seq 256). `convert.py` now
+  overrides the mask with -1e4; the parity check is what caught it, so
+  `--skip-golden` must not be used for anything shippable.
+- Fixed sequence length makes short and long inputs cost the same, so **chunk
+  size is a throughput decision**: M3-02 should target 180–250 tokens using
+  `CoreMLEmbedder.tokenCount(_:)`, and a seq-64 bucket is available at 2× the
+  throughput if short chunks dominate.
+- Intel remains unmeasured on real hardware (no Intel Mac, and universal builds
+  need Xcode). CPU-only on the M2 costs bge-small 6.6× on single embeddings and
+  1.8× batched, while MiniLM costs only 1.3× — if Intel first-run indexing is
+  too slow, the answer is MiniLM on Intel. M3-09/M4-07 must re-measure.
+- 20k notes × ~4 chunks ≈ 80k embeddings ≈ 5.4 min of one-time indexing on an
+  M2, and 61 MB of Float16 vectors in memory — plan §1's brute-force Accelerate
+  matrix holds; `sqlite-vec` stays a Phase-2 option.
+- The spike corpus (40 notes / 20 queries) is directional only. The ≥90% top-1
+  gate remains M3-07's job on a generated 5k/20k corpus.

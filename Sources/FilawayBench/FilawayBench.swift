@@ -10,7 +10,7 @@ struct FilawayBench: AsyncParsableCommand {
         commandName: "filaway-bench",
         abstract: "Corpus generation and performance benchmarks for Filaway.",
         version: FilawayCore.version,
-        subcommands: [Scan.self],
+        subcommands: [Scan.self, EmbedCommand.self],
         defaultSubcommand: Scan.self
     )
 }
