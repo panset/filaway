@@ -619,6 +619,7 @@ public actor PlanApplier: PlanApplying {
     ) async -> RecoveryOutcome {
         var restored: [String] = []
         var trashed: [String] = []
+        var trashURLs: [String] = []
         var problems: [String] = []
 
         // 1. Anything the apply brought into existence goes first, so the paths
@@ -626,7 +627,7 @@ public actor PlanApplier: PlanApplying {
         for entry in progress.reversed() where entry.kind == .createdNote {
             guard let path = entry.path, fileManager.fileExists(atPath: url(path).path) else { continue }
             do {
-                _ = try await store.deleteNote(path)
+                trashURLs.append(try await store.deleteNote(path).path)
                 trashed.append(path)
             } catch {
                 problems.append("could not trash \(path)")
@@ -641,7 +642,7 @@ public actor PlanApplier: PlanApplying {
                 _ = try await store.writeRaw(before.text, to: before.relativePath)
                 restored.append(before.relativePath)
                 if let current, current != before.relativePath, fileManager.fileExists(atPath: url(current).path) {
-                    _ = try await store.deleteNote(current)
+                    trashURLs.append(try await store.deleteNote(current).path)
                     trashed.append(current)
                 }
             } catch {
@@ -667,6 +668,7 @@ public actor PlanApplier: PlanApplying {
             resolution: resolution,
             restoredPaths: restored,
             trashedPaths: trashed,
+            trashURLs: trashURLs,
             detail: problems.joined(separator: "; ")
         )
     }

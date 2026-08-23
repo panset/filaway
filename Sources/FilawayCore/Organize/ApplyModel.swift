@@ -262,8 +262,11 @@ public struct RecoveryOutcome: Sendable, Hashable, Codable {
     public var resolution: Resolution
     /// Paths restored from before-images.
     public var restoredPaths: [String]
-    /// Paths trashed because the crashed apply had created them.
+    /// Library-relative paths trashed because the crashed apply had created
+    /// them (or had left a file at an intermediate path).
     public var trashedPaths: [String]
+    /// Where those files went — nothing is ever hard-deleted (FR-4.4).
+    public var trashURLs: [String]
     public var detail: String
 
     public init(
@@ -271,12 +274,14 @@ public struct RecoveryOutcome: Sendable, Hashable, Codable {
         resolution: Resolution,
         restoredPaths: [String] = [],
         trashedPaths: [String] = [],
+        trashURLs: [String] = [],
         detail: String = ""
     ) {
         self.eventID = eventID
         self.resolution = resolution
         self.restoredPaths = restoredPaths
         self.trashedPaths = trashedPaths
+        self.trashURLs = trashURLs
         self.detail = detail
     }
 }

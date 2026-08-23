@@ -165,17 +165,16 @@ final class ApplyHarness {
     }
 
     func track(_ outcomes: [RecoveryOutcome]) {
-        // Recovery reports library-relative paths; the files themselves are in
-        // the Trash, found by name.
-        for outcome in outcomes where !outcome.trashedPaths.isEmpty {
-            for path in outcome.trashedPaths {
-                temp.trackTrashed(
-                    FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first?
-                        .appendingPathComponent((path as NSString).lastPathComponent)
-                        ?? URL(fileURLWithPath: "/dev/null")
-                )
-            }
+        for outcome in outcomes {
+            for url in outcome.trashURLs { temp.trackTrashed(URL(fileURLWithPath: url)) }
         }
+    }
+
+    @discardableResult
+    func recover() async throws -> [RecoveryOutcome] {
+        let outcomes = try await applier.recoverIncompleteEvents()
+        track(outcomes)
+        return outcomes
     }
 
     // MARK: - Fingerprints
