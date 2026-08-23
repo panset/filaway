@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Functional Specification — Filaway</title>
+<style>
+  :root{
+    --ink:#1d1d1f; --ink-2:#55555a; --ink-3:#8e8e93;
+    --paper:#ffffff; --paper-2:#f5f5f7; --line:#d9d9de; --line-soft:#e8e8ec;
+    --accent:#0a66c2; --accent-bg:#eaf2fb; --ok:#2e7d32; --warn:#9a6700;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;}
+  .page{max-width:860px;margin:0 auto;padding:56px 28px 96px;}
+  h1{font-size:30px;line-height:1.25;margin:0 0 4px;font-weight:650;letter-spacing:-.01em}
+  .subtitle{font-size:18px;color:var(--ink-2);margin:0 0 20px}
+  h2{font-size:22px;margin:52px 0 14px;font-weight:650;letter-spacing:-.01em;
+     padding-top:18px;border-top:1px solid var(--line-soft)}
+  h3{font-size:17px;margin:28px 0 10px;font-weight:650}
+  p,li{color:var(--ink);}
+  li{margin:6px 0}
+  .meta{display:grid;grid-template-columns:130px 1fr;gap:2px 16px;font-size:14px;
+    background:var(--paper-2);border-radius:10px;padding:14px 18px;margin:20px 0 8px}
+  .meta dt{color:var(--ink-3)} .meta dd{margin:0}
+  code{font-family:var(--mono);font-size:.86em;background:var(--paper-2);
+    padding:1px 5px;border-radius:4px}
+  .req{margin:14px 0;padding:10px 14px;border-left:3px solid var(--line);}
+  .req b.id{font-family:var(--mono);font-size:13px;font-weight:600}
+  .must{border-left-color:var(--accent)} .should{border-left-color:#7a9ec9} .could{border-left-color:var(--line)}
+  .tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;
+    border-radius:4px;padding:1px 7px;margin-left:6px;vertical-align:1px}
+  .tag.must{background:var(--accent-bg);color:var(--accent)}
+  .tag.should{background:#eef3f9;color:#4a6d94}
+  .tag.could{background:var(--paper-2);color:var(--ink-3)}
+  .figref{color:var(--accent);font-size:14px;white-space:nowrap}
+  figure{margin:30px 0;padding:22px 22px 16px;background:var(--paper-2);border-radius:14px}
+  figcaption{font-size:14px;color:var(--ink-2);margin-top:14px;line-height:1.5}
+  figcaption b{color:var(--ink)}
+  .callouts{font-size:12.5px;color:var(--ink-3);margin-top:10px;line-height:1.6}
+  table.plain{border-collapse:collapse;width:100%;font-size:15px;margin:12px 0}
+  table.plain td,table.plain th{border:1px solid var(--line-soft);padding:8px 12px;text-align:left;vertical-align:top}
+  table.plain th{background:var(--paper-2);font-weight:600}
+  /* ---------- mockup primitives ---------- */
+  .mock{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+    box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:13px;max-width:680px;margin:0 auto}
+  .tbar{display:flex;align-items:center;gap:7px;padding:9px 12px;border-bottom:1px solid var(--line-soft);background:#fafafa}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .searchpill{flex:1;display:flex;align-items:center;gap:7px;margin-left:10px;background:#fff;
+    border:1px solid var(--line);border-radius:7px;padding:6px 10px;color:var(--ink-3);font-size:12.5px}
+  .kbd{margin-left:auto;font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+  .cols{display:flex;min-height:330px}
+  .sidebar{width:190px;flex-shrink:0;border-right:1px solid var(--line-soft);background:#fafafa;padding:12px 10px}
+  .sec{font-size:11px;color:var(--ink-3);margin:0 0 7px;text-transform:none}
+  .row{padding:6px 9px;border-radius:7px;margin-bottom:2px}
+  .row .t{font-size:12.5px;margin:0}
+  .row .s{font-size:11px;color:var(--ink-3);margin:0}
+  .row.sel{background:#e4e4ea}
+  .tree p{margin:0 0 5px;font-size:12.5px;color:var(--ink-2)}
+  .tree .in{margin-left:22px}
+  .editor{flex:1;padding:18px 22px;min-width:0}
+  .codeblk{background:#f6f6f8;border:1px solid var(--line-soft);border-radius:7px;
+    padding:10px 12px;font-family:var(--mono);font-size:12px;color:#3a3a40;
+    overflow-wrap:anywhere;position:relative}
+  .copybtn{position:absolute;top:7px;right:8px;font-size:10.5px;color:var(--ink-3);
+    border:1px solid var(--line);border-radius:5px;padding:1px 7px;background:#fff}
+  .card{background:#fff;border:1px solid var(--line);border-radius:11px;padding:14px 16px;max-width:460px;margin:0 auto;
+    box-shadow:0 1px 3px rgba(0,0,0,.06)}
+  .btn{display:inline-block;font-size:12px;padding:6px 14px;border:1px solid var(--line);
+    border-radius:7px;background:#fff;color:var(--ink)}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .provider{border:1px solid var(--line);border-radius:9px;padding:11px 13px;margin-bottom:9px}
+  .provider.sel{border:2px solid var(--accent);padding:10px 12px}
+  .badge{font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:10px;padding:1px 9px}
+  input.mockin{width:100%;margin-top:9px;font-family:var(--mono);font-size:12px;padding:7px 10px;
+    border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink)}
+  .kv{width:100%;font-size:12.5px;border-collapse:collapse}
+  .kv td{padding:7px 0;border-bottom:1px solid var(--line-soft)}
+  .kv tr:last-child td{border-bottom:none}
+  .kv td:first-child{color:var(--ink-2)}
+  .kv td:last-child{text-align:right}
+  .note{background:#f6f6f8;border-radius:7px;padding:9px 11px;font-size:11.5px;color:var(--ink-2);
+    margin-top:10px;line-height:1.55}
+  .ai-ico{color:var(--accent);font-weight:700}
+  .flexrow{display:flex;align-items:center;gap:9px}
+  .grow{flex:1;min-width:0}
+  hr.soft{border:none;border-top:1px solid var(--line-soft);margin:12px 0}
+  @media (max-width:640px){ .sidebar{width:150px} .editor{padding:14px} }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Functional Specification — Filaway</h1>
+<p class="subtitle">An AI-organized notes app for macOS</p>
+
+<dl class="meta">
+  <dt>Version</dt><dd>0.3 (Draft — product named Filaway; adds embedded UX mockups)</dd>
+  <dt>Date</dt><dd>August 22, 2026</dd>
+  <dt>Status</dt><dd>For handoff to design/engineering agent</dd>
+  <dt>Audience</dt><dd>This document defines <em>what</em> the product does and <em>how it looks</em> (Figures 1–4). The receiving agent produces a <b>Design Specification</b> covering implementation language, architecture, testing strategy, and technical design decisions. Where this document intentionally leaves implementation open, it says so explicitly.</dd>
+</dl>
+
+<p><b>Note on the mockups:</b> Figures 1–4 are embedded as live HTML/CSS in this file. The design agent should treat the rendered appearance as the visual target <em>and</em> may read this document's own markup as an exact reference for layout proportions, hierarchy, and copy. The mockups are wireframe-fidelity: exact colors, fonts, and spacing are refinable, but layout structure, the Recents/Library split, the answer-card search pattern, and the show-your-work AI interaction model are binding.</p>
+
+<h2>1. Product vision</h2>
+<p>Developers accumulate small, high-value fragments of knowledge — curl commands, shell one-liners, config snippets, debugging notes — scattered across notes apps with no reliable way to retrieve them later. Filaway is a macOS notes app with the capture simplicity of Apple Notes, where an AI silently organizes everything after each writing session and retrieval works through natural language (“the curl command I used two days ago”).</p>
+<p><b>Product principles (binding on all phases):</b></p>
+<ol>
+  <li><b>Capture is sacred.</b> Writing must be instant, blank-page, zero-decision. The AI never interferes while the user is typing.</li>
+  <li><b>The AI shows its work.</b> Every automated action is visible, summarized, reversible (undo), and inspectable (diff).</li>
+  <li><b>The user's data is plain files on their disk.</b> No proprietary database lock-in for note content. The user can open their notes folder in Finder and read everything.</li>
+  <li><b>Local-first.</b> The app is fully usable offline for capture and browsing; AI features degrade gracefully when the provider is unreachable.</li>
+</ol>
+
+<h2>2. Scope of this document</h2>
+<ul>
+  <li><b>Phase 1</b> is specified in full (Sections 4–10) with UX mockups (Figures 1–4). This is the build target.</li>
+  <li><b>Phases 2–4</b> are outlined at feature level only (Section 11), so architectural decisions in the design spec do not paint us into a corner.</li>
+</ul>
+
+<h2>3. Target user and platform</h2>
+<ul>
+  <li><b>User:</b> An individual software developer on macOS. Single user, single machine, no collaboration.</li>
+  <li><b>Platform (Phase 1):</b> macOS 14 (Sonoma) or later, Apple Silicon and Intel.</li>
+  <li><b>Distribution (Phase 1):</b> Downloadable DMG from a website. Signed and notarized so Gatekeeper accepts it. Mac App Store distribution is explicitly <b>out of scope</b> for Phase 1 (sandboxing constraints conflict with plain-folder storage; revisit in a later phase).</li>
+</ul>
+
+<h2>4. Phase 1 — Functional requirements</h2>
+<p>Requirement IDs use the pattern <code>FR-x.y</code>. Priorities: <span class="tag must">MUST</span> Phase 1 launch blocker · <span class="tag should">SHOULD</span> Phase 1 if time permits · <span class="tag could">COULD</span> nice to have.</p>
+
+<h3>4.1 Application shell and layout <span class="figref">→ Figure 1</span></h3>
+
+<figure>
+  <div class="mock">
+    <div class="tbar">
+      <span class="dot" style="background:#f2564d"></span><span class="dot" style="background:#f5b02e"></span><span class="dot" style="background:#57bb3f"></span>
+      <div class="searchpill"><span class="ai-ico">✦</span> Ask anything… “curl command from 2 days ago”<span class="kbd">⌘K</span></div>
+    </div>
+    <div class="cols">
+      <div class="sidebar">
+        <p class="sec">Recents</p>
+        <div class="row sel"><p class="t" style="font-weight:600">Untitled note</p><p class="s">Now · editing</p></div>
+        <div class="row"><p class="t">Auth API debug</p><p class="s">2d ago</p></div>
+        <div class="row"><p class="t">Docker cheats</p><p class="s">4d ago</p></div>
+        <hr class="soft">
+        <p class="sec"><span class="ai-ico">✦</span> Library</p>
+        <div class="tree">
+          <p>▾ &#128193; Commands</p>
+          <p class="in">curl</p>
+          <p class="in">git</p>
+          <p>▸ &#128193; Snippets</p>
+          <p>▸ &#128193; Meetings</p>
+        </div>
+      </div>
+      <div class="editor">
+        <p style="margin:0 0 2px;font-size:11px;color:var(--ink-3)">August 22, 2026 · 9:41</p>
+        <p style="margin:0 0 12px;font-size:17px;font-weight:600">Untitled note</p>
+        <p style="margin:0 0 9px;font-size:13px">curl to fetch docs from staging:</p>
+        <div class="codeblk">curl -H "Auth: Bearer $TOK" https://api.st.app/v2/docs<span class="copybtn">Copy</span></div>
+        <p style="margin:11px 0 0;font-size:13px">remember: token expires hourly<span style="display:inline-block;width:2px;height:15px;background:var(--accent);vertical-align:-3px;margin-left:1px"></span></p>
+      </div>
+    </div>
+  </div>
+  <figcaption><b>Figure 1 — Main window.</b> Toolbar with unified search/command bar (⌘K). Sidebar: <b>Recents</b> on top (chronological, never AI-reordered), <b>Library</b> below (AI-managed folder tree, ✦ marks AI-owned areas, user-browsable and editable). Editor pane: date stamp, title, body with a first-class code block including hover Copy button.</figcaption>
+</figure>
+
+<div class="req must"><b class="id">FR-1.1</b><span class="tag must">MUST</span> The app presents a two-pane window: a left sidebar and a right editor pane, per Figure 1 (Apple Notes-like aesthetic: light chrome, generous whitespace, native macOS feel).</div>
+<div class="req must"><b class="id">FR-1.2</b><span class="tag must">MUST</span> The sidebar has two sections: <b>Recents (top)</b> — notes ordered by last-opened/last-edited time, most recent first, title + relative timestamp, capped at ~10 items, purely chronological, never reordered by AI; and <b>Library (bottom)</b> — a collapsible tree of folders and notes, AI-managed (4.4) but fully browsable and manually editable by the user.</div>
+<div class="req must"><b class="id">FR-1.3</b><span class="tag must">MUST</span> A search/command bar is accessible at all times, both as a visible toolbar field and via in-app shortcut (⌘K). See 4.5.</div>
+<div class="req must"><b class="id">FR-1.4</b><span class="tag must">MUST</span> A “New note” action (⌘N and toolbar button) opens a blank untitled note with focus in the body, ready to type. No dialogs, no required metadata.</div>
+<div class="req should"><b class="id">FR-1.5</b><span class="tag should">SHOULD</span> Window state (size, sidebar width, last open note) persists across launches.</div>
+
+<h3>4.2 Editor</h3>
+<div class="req must"><b class="id">FR-2.1</b><span class="tag must">MUST</span> Plain-text-first editing with lightweight formatting: headings, bold/italic, bulleted and numbered lists, checkboxes, and <b>fenced code blocks</b>. Markdown is the storage format (Section 5); whether the editor renders Markdown live or shows styled text is a design-spec decision.</div>
+<div class="req must"><b class="id">FR-2.2</b><span class="tag must">MUST</span> Code blocks are first-class: monospaced, visually distinct, one-click “Copy” affordance (Figure 1), optional language tag. Commands/snippets are the core retrieval object.</div>
+<div class="req must"><b class="id">FR-2.3</b><span class="tag must">MUST</span> Autosave. No explicit Save action; content persists continuously (target: ≤ 2 seconds of typed content lost on force-quit).</div>
+<div class="req should"><b class="id">FR-2.4</b><span class="tag should">SHOULD</span> Paste intelligence: pasting content that looks like a shell command or code offers to wrap it in a code block.</div>
+<div class="req could"><b class="id">FR-2.5</b><span class="tag could">COULD</span> Attachments (images) embedded in notes. If deferred, the design spec should state how the storage format will accommodate them later.</div>
+
+<h3>4.3 Writing session model</h3>
+<div class="req must"><b class="id">FR-3.1</b><span class="tag must">MUST</span> A “writing session” begins when the user starts editing any note and ends when <b>all</b> of the following hold: no keystrokes in the editor for a configurable idle interval (default 3 minutes, range 1–15), and the note is not frontmost-with-focus being actively scrolled/selected. Switching away from the app or closing the window also ends the session immediately.</div>
+<div class="req must"><b class="id">FR-3.2</b><span class="tag must">MUST</span> Session end triggers the AI organization pipeline (4.4) for content written in that session. Organization runs in the background; the user can keep using the app, including resuming typing in the same note (which cancels or supersedes the pending organization for that note — exact semantics defined in the design spec, but the user must never lose text).</div>
+
+<h3>4.4 AI organization <span class="figref">→ Figure 2a</span></h3>
+
+<figure>
+  <div class="card">
+    <div class="flexrow" style="margin-bottom:8px"><span class="ai-ico" style="font-size:16px">✦</span><b style="font-size:13.5px">Session organized</b></div>
+    <p style="margin:0 0 12px;font-size:12.5px;color:var(--ink-2);line-height:1.55">Code block merged into <code>Commands / curl</code>. Token note appended to <code>Auth API debug</code>.</p>
+    <span class="btn">Undo</span>&nbsp;<span class="btn">View changes</span>
+  </div>
+  <figcaption><b>Figure 2a — Post-session organization card.</b> Shown after the AI applies (auto-file mode) or proposes (ask mode) an organization plan. Always states exactly what happened/will happen, with Undo and a View-changes diff. In ask mode the buttons read Accept / Edit / Dismiss instead.</figcaption>
+</figure>
+
+<div class="req must"><b class="id">FR-4.1</b><span class="tag must">MUST</span> After a session ends, the AI analyzes the session's content and produces an <b>organization plan</b> consisting of zero or more actions from this closed set: create a new note (with AI-generated title) in a Library folder; append/merge session content into an existing note; create a new folder in the Library (max depth: 2 levels); move a note between folders; retitle an untitled note; tag content (freeform tags stored in note metadata).</div>
+<div class="req must"><b class="id">FR-4.2</b><span class="tag must">MUST</span> Two operating modes, user-selectable in Settings: <b>Ask before filing (default)</b> — the plan is presented as a non-blocking card (“Merge code block into Commands/curl?”) with Accept / Edit / Dismiss; nothing changes until accepted. <b>Auto-file</b> — the plan is applied immediately, then summarized in the same card style with <b>Undo</b> and <b>View changes</b> (Figure 2a).</div>
+<div class="req must"><b class="id">FR-4.3</b><span class="tag must">MUST</span> Every applied plan is fully reversible via a single Undo for at least the last 10 organization events, and an “Activity” log lists all AI actions with timestamps and a diff view (before/after of affected notes).</div>
+<div class="req must"><b class="id">FR-4.4</b><span class="tag must">MUST</span> The AI never deletes user content. Merging must be additive (content appended with a divider/heading, or interleaved only if the user accepts an explicit merge preview). Original raw session text remains recoverable via the Activity log for at least 30 days.</div>
+<div class="req must"><b class="id">FR-4.5</b><span class="tag must">MUST</span> The user can exclude folders from AI processing entirely (organization and search indexing). Excluded content is never sent to the AI provider.</div>
+<div class="req should"><b class="id">FR-4.6</b><span class="tag should">SHOULD</span> The Library taxonomy should converge rather than sprawl: the AI prefers existing folders/notes over creating new ones, and proposes folder renames/merges (as plans, never silently) when structure fragments.</div>
+<div class="req could"><b class="id">FR-4.7</b><span class="tag could">COULD</span> A “Reorganize library” command the user can run on demand over the whole corpus.</div>
+
+<h3>4.5 Search and retrieval <span class="figref">→ Figure 2b</span></h3>
+
+<figure>
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="flexrow" style="padding:11px 14px;border-bottom:1px solid var(--line-soft)">
+      <span style="color:var(--ink-3)">🔍</span><span style="font-size:13px">curl command to fetch documents</span>
+    </div>
+    <div style="padding:11px 14px">
+      <div style="border:1px solid var(--accent);border-radius:8px;padding:10px 12px;margin-bottom:9px;background:var(--accent-bg)">
+        <p style="margin:0 0 5px;font-size:11px;color:var(--accent)">Best match · Commands / curl · edited 2d ago</p>
+        <div class="codeblk" style="background:#fff">curl -H "Auth: Bearer $TOK" https://api.st.app/v2/docs<span class="copybtn">Copy</span></div>
+      </div>
+      <table class="kv">
+        <tr><td>Auth API debug</td><td>2d ago</td></tr>
+        <tr><td>Docker cheats · curl healthcheck</td><td>4d ago</td></tr>
+      </table>
+    </div>
+  </div>
+  <figcaption><b>Figure 2b — ⌘K semantic search.</b> A natural-language query returns a <b>best-match answer card</b> — the snippet itself as a copyable code block with source note and recency — above a ranked list of matching notes. Clicking a result opens the note scrolled to the relevant section.</figcaption>
+</figure>
+
+<div class="req must"><b class="id">FR-5.1</b><span class="tag must">MUST</span> One search bar, two behaviors. <b>Keyword mode:</b> as-you-type literal/fuzzy filtering over titles and body text, instant (&lt;100 ms perceived), fully offline, no AI involved. <b>Semantic mode:</b> natural-language queries (“curl command to fetch documents”, “the thing I edited two days ago about auth”) answered using AI + a local semantic index. Trigger heuristics (question-like phrasing, explicit toggle, or Enter on a multi-word query) are a design-spec decision, but both modes must be reachable without mode-switching friction.</div>
+<div class="req must"><b class="id">FR-5.2</b><span class="tag must">MUST</span> Semantic results present a <b>best-match answer card</b> when the answer is a snippet/command (Figure 2b): the snippet rendered as a code block with one-click Copy, plus source note and last-edited time; below it, a ranked list of matching notes. Clicking any result opens the note scrolled to the relevant section.</div>
+<div class="req must"><b class="id">FR-5.3</b><span class="tag must">MUST</span> Temporal queries are supported: “two days ago”, “last week”, “yesterday” filter/boost by note edit timestamps.</div>
+<div class="req must"><b class="id">FR-5.4</b><span class="tag must">MUST</span> The semantic index updates incrementally as notes change; a full reindex command exists in Settings.</div>
+<div class="req should"><b class="id">FR-5.5</b><span class="tag should">SHOULD</span> Keyword search works even when the AI provider is unreachable; the UI states clearly that semantic answers are unavailable offline.</div>
+
+<h3>4.6 AI provider connection <span class="figref">→ Figures 3 &amp; 4</span></h3>
+
+<figure>
+  <div class="card" style="max-width:480px">
+    <p style="margin:0 0 2px;font-size:15px;font-weight:600">Connect your AI</p>
+    <p style="margin:0 0 13px;font-size:12.5px;color:var(--ink-2);line-height:1.55">Your AI organizes notes and powers search. Notes stay on your Mac; only note text being organized is sent to the provider.</p>
+    <div class="provider sel">
+      <div class="flexrow">
+        <span style="font-size:17px">☁︎</span>
+        <div class="grow"><p style="margin:0;font-size:13px;font-weight:600">Claude API</p>
+        <p style="margin:0;font-size:11.5px;color:var(--ink-2)">Best quality · needs API key</p></div>
+        <span style="color:var(--accent);font-weight:700">✓</span>
+      </div>
+      <input class="mockin" type="password" value="sk-ant-••••••••••••" aria-label="Claude API key">
+      <p style="margin:7px 0 0;font-size:11px;color:var(--ok)">✓ Key valid · stored in macOS Keychain</p>
+    </div>
+    <div class="provider" style="color:var(--ink-3)">
+      <div class="flexrow">
+        <span style="font-size:17px">💻</span>
+        <div class="grow"><p style="margin:0;font-size:13px">Local model (Ollama)</p>
+        <p style="margin:0;font-size:11.5px">Fully private · coming in v2</p></div>
+        <span class="badge">Soon</span>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:13px">
+      <span class="btn">Back</span><span class="btn primary">Continue</span>
+    </div>
+  </div>
+  <figcaption><b>Figure 3 — First-run onboarding, “Connect your AI” (step 2 of 3).</b> Claude API key entry with live validation and a Keychain confirmation. The local-model option is visible but disabled with a “Soon” badge — the provider abstraction exists in the UI from day one (FR-6.5) even though only Claude ships in Phase 1.</figcaption>
+</figure>
+
+<figure>
+  <div class="card" style="max-width:480px">
+    <div class="flexrow" style="padding-bottom:11px;border-bottom:1px solid var(--line-soft)">
+      <span style="font-size:15px;color:var(--accent)">☁︎</span>
+      <div class="grow"><p style="margin:0;font-size:13px;font-weight:600">Claude · connected</p>
+      <p style="margin:0;font-size:11.5px;color:var(--ink-2)">claude-sonnet-4-6</p></div>
+      <span class="btn" style="font-size:11.5px;padding:4px 11px">Change</span>
+    </div>
+    <table class="kv" style="margin-top:6px">
+      <tr><td>Auto-organize after idle</td><td>3 min</td></tr>
+      <tr><td>Mode</td><td>Ask before filing</td></tr>
+      <tr><td>Semantic search</td><td style="color:var(--ok)">On</td></tr>
+      <tr><td>Exclude folders from AI</td><td>Personal</td></tr>
+    </table>
+    <div class="note">🔒 Notes are stored on disk at ~/Notes. Nothing is uploaded except text sent to Claude during organization and search.</div>
+  </div>
+  <figcaption><b>Figure 4 — Settings → AI.</b> Connection status and model, idle interval, ask/auto mode, semantic search toggle, AI-excluded folders, and the always-visible privacy statement (FR-6.3, FR-8.1).</figcaption>
+</figure>
+
+<div class="req must"><b class="id">FR-6.1</b><span class="tag must">MUST</span> Phase 1 supports exactly one provider: <b>Anthropic Claude via the user's own API key.</b> First-run onboarding includes a “Connect your AI” step (Figure 3): paste key → validate with a test call → confirm. The key is stored in the macOS Keychain, never in plain files.</div>
+<div class="req must"><b class="id">FR-6.2</b><span class="tag must">MUST</span> Settings → AI (Figure 4) shows connection status, selected model, and lets the user replace or remove the key. Model selection may be a fixed sensible default with an “advanced” override; the design spec chooses the default model balancing cost/quality for organization and search tasks.</div>
+<div class="req must"><b class="id">FR-6.3</b><span class="tag must">MUST</span> A visible privacy statement in onboarding and Settings: notes live on local disk; only the text needed for organization/search is sent to the provider; excluded folders are never sent.</div>
+<div class="req must"><b class="id">FR-6.4</b><span class="tag must">MUST</span> Graceful degradation: invalid key, rate limits, network failure, or provider outage must never block capture, browsing, or keyword search. AI features queue or disable with clear, non-nagging status.</div>
+<div class="req should"><b class="id">FR-6.5</b><span class="tag should">SHOULD</span> The onboarding UI shows “Local model (Ollama)” as a visible-but-disabled option labeled for a future version (Figure 3), so the provider abstraction is designed in from the start (Section 11, NFR-5).</div>
+<div class="req should"><b class="id">FR-6.6</b><span class="tag should">SHOULD</span> A monthly cost/usage indicator (approximate tokens or request count) in Settings, since the user pays for their own API usage.</div>
+
+<h3>4.7 Onboarding (first run)</h3>
+<div class="req must"><b class="id">FR-7.1</b><span class="tag must">MUST</span> Three steps maximum: (1) welcome + choose/confirm notes folder location (default <code>~/Notes</code> or similar), (2) connect AI (Figure 3), (3) quick orientation of the sidebar/search. Skippable where safe; the app must be usable with AI connection skipped (capture + keyword search only, with a persistent gentle prompt to connect).</div>
+<div class="req should"><b class="id">FR-7.2</b><span class="tag should">SHOULD</span> Optional import from Apple Notes at first run or later (via Apple Notes export or automation), preserving note titles and bodies. If deferred to Phase 1.x, the design spec says so with a stub.</div>
+
+<h3>4.8 Settings</h3>
+<div class="req must"><b class="id">FR-8.1</b><span class="tag must">MUST</span> Settings pane covering: AI provider (4.6), idle interval, organization mode (ask/auto), excluded folders, notes folder location, semantic search on/off, reindex, and Activity log access (Figure 4 shows the AI section).</div>
+
+<h2>5. Data and storage (Phase 1)</h2>
+<div class="req must"><b class="id">DS-1</b><span class="tag must">MUST</span> Note content is stored as <b>plain Markdown files</b> in a user-visible folder (default <code>~/Notes</code>), with the Library folder tree mirrored as real subdirectories. Rationale: user ownership (Principle 3) and it makes Phase 2 sync (Google Drive et al.) a matter of pointing sync at a folder rather than inventing a sync protocol.</div>
+<div class="req must"><b class="id">DS-2</b><span class="tag must">MUST</span> Per-note metadata (tags, created/edited timestamps, AI provenance) is stored either as Markdown front-matter or in a sidecar index — design-spec decision — but the Markdown body must remain cleanly readable in any text editor.</div>
+<div class="req must"><b class="id">DS-3</b><span class="tag must">MUST</span> Derived data (semantic index/embeddings, activity log, undo history) lives in the app's Application Support directory, is rebuildable from the notes folder, and is explicitly <em>not</em> part of the user's owned data.</div>
+<div class="req must"><b class="id">DS-4</b><span class="tag must">MUST</span> External edits tolerated: if the user edits/adds/removes files in the notes folder outside the app, the app detects changes on next launch (or live, design-spec decision) and reconciles without data loss.</div>
+<div class="req must"><b class="id">DS-5</b><span class="tag must">MUST</span> No user content in any cloud service except transient API calls to the AI provider.</div>
+
+<h2>6. Non-functional requirements (Phase 1)</h2>
+<table class="plain">
+  <tr><th>ID</th><th>Requirement</th></tr>
+  <tr><td><b>NFR-1</b> Performance</td><td>Cold launch to editable note &lt; 2 s on Apple Silicon. Keyword search results &lt; 100 ms perceived. Semantic answers &lt; 5 s typical.</td></tr>
+  <tr><td><b>NFR-2</b> Scale</td><td>Smooth with 5,000 notes / 50 MB of Markdown; degrade gracefully to 20,000 notes.</td></tr>
+  <tr><td><b>NFR-3</b> Reliability</td><td>No data loss on crash beyond FR-2.3's 2-second window. AI failures never corrupt or lose notes.</td></tr>
+  <tr><td><b>NFR-4</b> Privacy/Security</td><td>API key in Keychain; TLS for all provider calls; no analytics that include note content; any telemetry is opt-in and content-free.</td></tr>
+  <tr><td><b>NFR-5</b> Extensibility</td><td>AI provider integration sits behind an internal abstraction so additional providers (local Ollama, other cloud APIs) are additive. Storage paths must not assume <code>~/Notes</code> is on the boot volume (Phase 2 points it at synced folders).</td></tr>
+  <tr><td><b>NFR-6</b> Accessibility</td><td>Standard macOS accessibility (VoiceOver labels, full keyboard navigation, respects system text-size settings where feasible).</td></tr>
+  <tr><td><b>NFR-7</b> Native feel</td><td>Follows macOS Human Interface Guidelines; light and dark mode support.</td></tr>
+</table>
+
+<h2>7. Out of scope for Phase 1 (explicit)</h2>
+<ul>
+  <li>Multi-device sync of any kind; iCloud; Google Drive.</li>
+  <li>Windows/Linux builds.</li>
+  <li>Collaboration, sharing, publishing.</li>
+  <li>Mobile apps.</li>
+  <li>Local LLM inference (UI placeholder only, per FR-6.5).</li>
+  <li>Mac App Store distribution.</li>
+  <li>End-to-end encryption of the notes folder (files are as secure as the user's disk; FileVault is assumed).</li>
+</ul>
+
+<h2>8. Success criteria for Phase 1</h2>
+<ul>
+  <li>A user can install from DMG, connect a Claude API key, and be typing a note within 3 minutes of download.</li>
+  <li>After a week of normal use, retrieval test: the user can find a specific stored command via natural language in under 10 seconds, ≥ 90% of the time on their own corpus.</li>
+  <li>Zero instances of AI-caused content loss in testing.</li>
+  <li>The user can quit the app, open <code>~/Notes</code> in a text editor, and read everything.</li>
+</ul>
+
+<h2>9. Open questions for the design specification</h2>
+<p>The design spec (produced by the receiving agent) should decide and justify at least:</p>
+<ol>
+  <li>Implementation stack (native Swift/SwiftUI vs. alternatives) given NFR-7 and the DMG distribution target.</li>
+  <li>Editor approach: live Markdown rendering vs. rich-text-over-Markdown, and which component/library.</li>
+  <li>Semantic index design: embedding model choice (via Claude-compatible pipeline or local embedding model), index storage, incremental update strategy — noting that keyword search must remain fully local.</li>
+  <li>Session/organization pipeline concurrency model and conflict semantics (FR-3.2).</li>
+  <li>Metadata storage (front-matter vs. sidecar) per DS-2.</li>
+  <li>File-watching/reconciliation strategy per DS-4.</li>
+  <li>Testing strategy: unit, integration (including AI-call mocking/recording), UI automation, and a corpus-based retrieval quality benchmark for FR-5.x; how NFR-1/2 performance budgets are enforced in CI.</li>
+  <li>Update mechanism for a non-App-Store app (e.g., Sparkle or equivalent) — required for shipping fixes.</li>
+  <li>Crash reporting/diagnostics consistent with NFR-4.</li>
+  <li>Prompt/versioning strategy for the organization and search prompts, and how prompt changes are tested against regressions.</li>
+</ol>
+
+<h2>10. Phase 1 milestone suggestion (indicative, not binding)</h2>
+<ol>
+  <li><b>M1 — Capture core:</b> shell, sidebar, editor, autosave, plain-folder storage, keyword search.</li>
+  <li><b>M2 — AI organize:</b> provider connection, session detection, organization plans, ask/auto modes, undo + activity log.</li>
+  <li><b>M3 — Semantic search:</b> index, natural-language answers, answer cards, temporal queries.</li>
+  <li><b>M4 — Polish &amp; ship:</b> onboarding, settings, DMG signing/notarization, updater, performance pass.</li>
+</ol>
+
+<h2>11. Future phases (feature-level outline)</h2>
+<h3>Phase 2 — Sync and portability</h3>
+<ul>
+  <li>Notes folder can live inside a user's existing sync client folder (Google Drive, Dropbox, iCloud Drive) — the app must handle sync-induced file churn, conflicts (<code>conflicted copy</code> files), and partial availability.</li>
+  <li>First-class “Open existing library”: on a fresh Mac, install the app, point it at the synced root folder, and the full library (including rebuilding local indexes) comes up.</li>
+  <li>Conflict resolution UX for the same note edited on two machines.</li>
+  <li>Local model support (Ollama) as a second AI provider, fulfilling the FR-6.5 placeholder.</li>
+  <li>Optional Apple Notes importer if deferred from Phase 1.</li>
+</ul>
+<h3>Phase 3 — Cross-platform</h3>
+<ul>
+  <li>Windows build, then Ubuntu/Linux. The Phase 1 design spec should note which stack choices help or hurt this (a legitimate input to open question 9.1, but it must not compromise NFR-7 on Mac).</li>
+  <li>Feature parity policy: capture/search everywhere; platform-native look per OS.</li>
+</ul>
+<h3>Phase 4 — Depth features (candidate pool, unprioritized)</h3>
+<ul>
+  <li>Attachments and image OCR (“the whiteboard photo from Tuesday”).</li>
+  <li>Clipboard/menu-bar quick-capture and a global system-wide hotkey.</li>
+  <li>Browser extension / share-sheet capture.</li>
+  <li>Team/shared libraries.</li>
+  <li>End-to-end encrypted sync.</li>
+  <li>iOS companion app.</li>
+</ul>
+
+<h2>Appendix A — Mockup index and binding elements</h2>
+<table class="plain">
+  <tr><th>Figure</th><th>Screen</th><th>Binding elements (must be preserved)</th></tr>
+  <tr><td>1</td><td>Main window</td><td>Two-pane layout; Recents/Library sidebar split; ⌘K bar in toolbar; code block with Copy.</td></tr>
+  <tr><td>2a</td><td>Session-organized card</td><td>Plain-language summary of AI actions; Undo; View changes; ask-mode variant with Accept/Edit/Dismiss.</td></tr>
+  <tr><td>2b</td><td>Semantic search</td><td>Best-match answer card with copyable snippet + provenance; ranked note list beneath.</td></tr>
+  <tr><td>3</td><td>Onboarding — Connect your AI</td><td>Claude key entry + validation + Keychain note; disabled local-model slot.</td></tr>
+  <tr><td>4</td><td>Settings — AI</td><td>Connection status, idle interval, ask/auto mode, excluded folders, privacy statement.</td></tr>
+</table>
+<p style="color:var(--ink-2);font-size:14px">Fidelity note: these mockups are wireframe-level. Emoji glyphs (🔍 ☁︎ 💻 🔒 ✦ 📁) are placeholders for proper SF Symbols / native icons. Colors and type are indicative; the design spec should map them to native macOS materials and system fonts.</p>
+
+</div>
+</body>
+</html>
