@@ -356,7 +356,9 @@ struct IndexerTests {
 
     @Test("the debounce loop coalesces a burst of saves")
     func debounceCoalescesSaves() async throws {
-        let fixture = try Fixture(debounce: .milliseconds(150))
+        // The real 2 s debounce, so the "not yet" window is wide enough to
+        // survive a loaded machine running the whole suite in parallel.
+        let fixture = try Fixture(debounce: .seconds(2))
         let note = try await fixture.addNote("Commands/curl.md", Self.curlNote)
         let indexer = fixture.indexer
         await indexer.start()
@@ -365,13 +367,16 @@ struct IndexerTests {
             await indexer.markDirty(note.id)
             try await Task.sleep(for: .milliseconds(20))
         }
-        // Still inside the debounce window: nothing written yet.
+        // Five saves in ~100 ms, well inside one debounce window: the queue
+        // holds exactly one note and nothing has been written.
+        #expect(await indexer.pendingCount == 1)
         #expect(try await indexer.chunkCount() == 0)
 
-        let indexed = await waitUntil(timeout: 5) {
+        let indexed = await waitUntil(timeout: 15) {
             ((try? await indexer.chunkCount()) ?? 0) > 0
         }
         #expect(indexed)
+        #expect(await indexer.pendingCount == 0)
         await indexer.stop()
     }
 
