@@ -35,6 +35,14 @@ enum SmokeDriver {
 
     static func start(phase: String) {
         isDriving = true
+        // Before the scene builds: `OrganizeCoordinator` reads the mode when
+        // `AppModel.bootstrap()` runs, and that is moments from now.
+        if phase.hasPrefix("organize") {
+            AppSettings.defaults.set(
+                phase == "organize-auto" ? OrganizeMode.auto.rawValue : OrganizeMode.ask.rawValue,
+                forKey: UserDefaultsOrganizeSettings.modeKey
+            )
+        }
         Task { @MainActor in
             // Let the scene build and `AppModel.bootstrap()` finish.
             await settle(seconds: 1.0)
@@ -43,6 +51,9 @@ enum SmokeDriver {
             case "search": await runSearchPhase()
             case "kill": await runKillPhase()
             case "killcheck": await runKillCheckPhase()
+            case "organize": await runOrganizePhase(mode: "ask")
+            case "organize-auto": await runOrganizePhase(mode: "auto")
+            case "organize-offline": await runOrganizePhase(mode: "offline")
             case "2": await runRelaunchPhase()
             default: await runCapturePhase()
             }
@@ -250,6 +261,21 @@ enum SmokeDriver {
         header()
         failures += await SearchSmokeCheck.run()
         print("SMOKE phase=search result failures=\(failures)")
+        finish()
+    }
+
+    // MARK: - Phase: organize (M2-09, M2-10, M2-12)
+
+    /// The whole AI rope on a replayed fixture: a session ends, the Figure 2a
+    /// card appears, the plan applies, Activity records it and Undo puts every
+    /// byte back — plus the auto-mode and offline variants. See
+    /// `Features/Organize/OrganizeSmokeCheck.swift`.
+    private static func runOrganizePhase(mode: String) async {
+        header()
+        print("SMOKE info ai-mode=\(ProcessInfo.processInfo.environment["FILAWAY_AI_MODE"] ?? "unset") "
+            + "fixtures=\(ProcessInfo.processInfo.environment["FILAWAY_AI_FIXTURES"] ?? "unset")")
+        failures += await OrganizeSmokeCheck.run(mode: mode)
+        print("SMOKE phase=organize-\(mode) result failures=\(failures)")
         finish()
     }
 

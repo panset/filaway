@@ -73,6 +73,10 @@ final class AppModel: ObservableObject {
 
     let search = SearchCoordinator()
 
+    /// The organize pipeline (M2-12). `nil` until ``bootstrap()`` has opened the
+    /// library — the shell paints, and capture works, without it.
+    @Published private(set) var organize: OrganizeCoordinator?
+
     // MARK: - Storage stack
 
     private(set) var library: Library
@@ -170,7 +174,28 @@ final class AppModel: ObservableObject {
             LaunchClock.mark("libraryOpen")
             await restoreLastNote()
 
+            // M2 (FR-3.1, FR-4.x): sessions, plans, Activity, Undo, the offline
+            // queue. Built after the first paint, because nothing in it is on
+            // the path to an editable note (NFR-1).
+            let organize = OrganizeCoordinator(
+                library: library, store: store, metadata: metadata, watcher: watcher
+            )
+            organize.onBanner = { [weak self] text, symbol in
+                self?.show(Banner(text: text, symbol: symbol))
+            }
+            organize.onLibraryChanged = { [weak self] noteIDs in
+                Task { [weak self] in await self?.organizerChanged(noteIDs) }
+            }
+            organize.onOpenAISettings = {
+                NotificationCenter.default.post(name: .filawayOpenAISettings, object: nil)
+            }
+            self.organize = organize
+
             Task { [weak self] in
+                // `recoverIncompleteEvents()` runs inside `start()`, and it must
+                // run *before* the reconcile: a rolled-back apply moves files
+                // and the stat-scan has to see the tree afterwards.
+                await organize.start(searchService: searchService, autosave: autosave)
                 await self?.reconcile()
                 _ = await watcher.start()
             }
@@ -267,6 +292,7 @@ final class AppModel: ObservableObject {
                 try? await metadata.markOpened(id: noteID)
                 await refreshSidebarNow()
             }
+            organize?.noteSwitched(to: noteID)
             focusEditor()
         } catch {
             show(Banner(text: "Could not open ‘\(row.title)’: \(error)",
@@ -345,11 +371,44 @@ final class AppModel: ObservableObject {
 
     // MARK: - Editor callbacks
 
-    /// Every keystroke in the body (FR-2.3).
+    /// Every keystroke in the body (FR-2.3, FR-3.1).
     func editorTextChanged(_ text: String) {
         guard let open = openNote, let autosave else { return }
         autosave.textChanged(noteID: open.id, relativePath: open.relativePath, text: text)
         dirtyNoteIDs = autosave.dirtyNoteIDs
+        // Starts or sustains the writing session, and supersedes anything the
+        // organizer has in flight or on screen for this note (FR-3.2).
+        organize?.noteEdited(open.id)
+    }
+
+    /// Scrolling and selecting sustain a session but never start one (FR-3.1).
+    func editorActivityHappened(_ activity: EditorActivity) {
+        guard let open = openNote else { return }
+        organize?.editorActivity(open.id, kind: activity)
+    }
+
+    /// An apply or an undo rewrote notes through `NoteStore`, whose own writes
+    /// are kept out of the watcher's stream — so the shell has to be told.
+    private func organizerChanged(_ noteIDs: Set<NoteID>) async {
+        await refreshSidebarNow()
+        guard let open = openNote, noteIDs.contains(open.id), let store, let metadata else { return }
+        // A dirty buffer wins: capture is sacred, and the CAS means the plan was
+        // computed against text the user has since replaced anyway.
+        guard !dirtyNoteIDs.contains(open.id) else { return }
+        let row = (try? await metadata.note(id: open.id)) ?? nil
+        let path = row?.relativePath ?? open.relativePath
+        guard let note = try? await store.read(path) else {
+            // The plan trashed the note it was merged out of (plan §1
+            // amendment 1) — its text is safe in the destination and in the
+            // Trash, but there is nothing left to show here.
+            closeOpenNote()
+            return
+        }
+        editorText = note.body
+        editorTitle = note.title
+        openNote?.title = note.title
+        openNote?.relativePath = note.relativePath
+        autosave?.noteRelocated(noteID: note.id, to: note.relativePath)
     }
 
     private func noteSaved(_ summary: NoteSummary) {

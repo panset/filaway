@@ -225,6 +225,15 @@ extension AppModel {
         return out
     }
 
+    /// What the organize sheets need to turn a `NoteRef` into a title and to
+    /// offer a destination folder (M2-10).
+    var planLibrary: PlanPresentation.Library {
+        PlanPresentation.Library(
+            notes: tree.map(allNotes(in:)) ?? [],
+            folders: moveDestinations
+        )
+    }
+
     /// Resolves a dragged relative path back to its summary.
     func note(atRelativePath path: String) -> NoteSummary? {
         guard let tree else { return nil }

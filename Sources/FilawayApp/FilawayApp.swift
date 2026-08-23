@@ -13,14 +13,37 @@ struct FilawayApp: App {
         }
         .defaultSize(width: 1000, height: 680)
         .commands { AppCommands(model: model) }
+
+        // FR-4.3 / FR-4.4 — the organization history, its diffs and Undo.
+        // A single `Window` (not a `WindowGroup`): there is one history, and
+        // SwiftUI puts "Activity" in the Window menu for free.
+        Window("Activity", id: ActivityWindowID.value) {
+            ActivityWindowView(model: model)
+        }
+        .keyboardShortcut("a", modifiers: [.option, .command])
+        .defaultSize(width: 880, height: 560)
     }
+}
+
+enum ActivityWindowID {
+    static let value = "activity"
 }
 
 /// Menu bar + shortcuts (FR-1.3, FR-1.4, NFR-6).
 struct AppCommands: Commands {
     @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        // FR-4.3. **⌥⌘Z, not ⇧⌘Z**: ⇧⌘Z is Redo in every macOS text view,
+        // including Filaway's own editor, and taking it would make the editor
+        // lie. ⌥⌘Z is free, and reads as "undo, but the bigger one".
+        CommandGroup(after: .undoRedo) {
+            Divider()
+            Button("Undo Last Organization") { model.organize?.undoLatest() }
+                .keyboardShortcut("z", modifiers: [.option, .command])
+                .disabled(model.organize == nil)
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Note") { model.newNote() }
                 .keyboardShortcut("n", modifiers: .command)
@@ -64,12 +87,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { _ in
-            Task { @MainActor in await AppModel.shared.reconcile() }
+            Task { @MainActor in
+                AppModel.shared.organize?.appDidBecomeActive()
+                await AppModel.shared.reconcile()
+            }
         }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
         ) { _ in
-            Task { @MainActor in await AppModel.shared.flushNow(trigger: .appResignActive) }
+            Task { @MainActor in
+                // FR-3.1 + amendment 2: ⌘-Tab ends the session, and the
+                // pipeline starts after the 30 s grace unless the user comes
+                // back to the keyboard.
+                AppModel.shared.organize?.appDidResignActive()
+                await AppModel.shared.flushNow(trigger: .appResignActive)
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { notification in
+            let window = notification.object as? NSWindow
+            Task { @MainActor in
+                // The Activity window closing is not the end of a session.
+                guard window?.title != "Activity" else { return }
+                AppModel.shared.organize?.windowClosed()
+            }
         }
 
         // Headless smoke check (plan §8): drive the real code paths, print what
@@ -93,6 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isTerminating else { return .terminateNow }
         isTerminating = true
 
+        // FR-3.1: quitting ends the session immediately — there may be no
+        // process left to run a grace period in. The organizer picks it up on
+        // the next launch through the durable queue if it cannot finish now.
+        MainActor.assumeIsolated { _ = AppModel.shared.organize?.appWillTerminate() }
         let flush = MainActor.assumeIsolated { AppModel.shared.terminateFlushTask() }
         var finished = true
         if let flush {
