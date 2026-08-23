@@ -49,6 +49,11 @@ public actor MetadataStore {
     private let dbQueue: DatabaseQueue
     private let textLoader: NoteTextLoader
 
+    /// Where the previous `filaway.sqlite` went when it turned out not to be a
+    /// database at all — `nil` in the normal case. Non-`nil` means the store is
+    /// empty and the caller owes it a ``rebuild(from:)`` (NFR-3, ADR-049).
+    public let recoveredFromCorruption: URL?
+
     /// A read handle onto the same database, usable off this actor.
     ///
     /// ``SearchService`` holds it so a keystroke's query never has to queue
@@ -86,8 +91,13 @@ public actor MetadataStore {
         // `.immediateError`, which would surface normal contention as an error
         // — ADR-027 noted this as the one-line change the integration pass owes.
         configuration.busyMode = .timeout(5)
-        dbQueue = try DatabaseQueue(path: library.databaseURL.path, configuration: configuration)
-        try Self.prepare(dbQueue, library: library)
+        // NFR-3: bytes that are not a database are moved aside rather than
+        // thrown at the user — `rebuild(from:)` puts everything derived back.
+        let opened = try DatabaseFile.open(at: library.databaseURL, configuration: configuration) { queue in
+            try Self.prepare(queue, library: library)
+        }
+        dbQueue = opened.queue
+        recoveredFromCorruption = opened.movedAside
     }
 
     /// In-memory database, for tests and for `filaway-bench`.
@@ -102,6 +112,7 @@ public actor MetadataStore {
         // — ADR-027 noted this as the one-line change the integration pass owes.
         configuration.busyMode = .timeout(5)
         dbQueue = try DatabaseQueue(configuration: configuration)
+        recoveredFromCorruption = nil
         try Self.prepare(dbQueue, library: library)
     }
 

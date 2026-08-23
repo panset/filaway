@@ -51,6 +51,22 @@ public struct SessionDelta: Sendable, Hashable {
     public var hasEffectiveChange: Bool {
         !addedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    /// FR-4.4's *raw session text*: everything the user wrote in this session,
+    /// verbatim, and nothing that was already on disk before it.
+    ///
+    /// One note gives its ``addedText`` unadorned; several get a `## <title>`
+    /// heading each so the Activity window's disclosure says which note a
+    /// paragraph came from. Returns `nil` when nothing was added, which is the
+    /// same thing as "there was no session worth recording".
+    public static func rawSessionText(of deltas: [SessionDelta]) -> String? {
+        let written = deltas.filter(\.hasEffectiveChange)
+        guard !written.isEmpty else { return nil }
+        if written.count == 1 { return written[0].addedText }
+        return written
+            .map { "## \($0.title)\n\n\($0.addedText)" }
+            .joined(separator: "\n\n")
+    }
 }
 
 /// A line-level "what is new here" diff.
@@ -247,6 +263,9 @@ public struct OrganizeRequestContext: Sendable {
         self.truncations = truncations
         self.snapshotTexts = snapshotTexts
     }
+
+    /// The raw session text to file with the Activity event (FR-4.4).
+    public var sessionText: String? { SessionDelta.rawSessionText(of: deltas) }
 }
 
 /// Builds the user half of an organize request (M2-06).

@@ -244,7 +244,11 @@ public actor UndoService {
         }
 
         let after = image.after
-        if after == nil || Hashing.sha256Hex(currentText) == after?.contentHash {
+        // The third case is a *retry*: an Undo the process died half-way
+        // through leaves some notes already restored, and a second attempt must
+        // call those done rather than run the reverse patch over text that is
+        // already the before-image and report a conflict (M4-08).
+        if after == nil || Hashing.sha256Hex(currentText) == after?.contentHash || currentText == before.text {
             // Untouched since the apply — byte-identical restore.
             _ = try await store.writeRaw(before.text, to: path)
             return (
