@@ -185,6 +185,25 @@ struct ReconcilerTests {
         #expect(try await watcher.reconcile().isEmpty, "a full reconcile finds nothing left over")
     }
 
+    @Test("A targeted reconcile that only names the destination still sees the move")
+    func targetedMoveWithoutSourceInScope() async throws {
+        let (temp, metadata, watcher) = try await fixture()
+        let note = try await temp.store.createNote(title: "curl")
+        try await watcher.reconcile()
+
+        try temp.makeExternalFolder("Commands")
+        try temp.moveExternal("curl.md", to: "Commands/curl.md")
+        // Only the destination is named, as a coalesced FSEvents batch may do.
+        let changes = try await watcher.reconcile(paths: ["Commands/curl.md"])
+
+        #expect(changes.contains { if case let .moved(from, to, _) = $0 {
+            return from == "curl.md" && to == "Commands/curl.md"
+        } else { return false } })
+        #expect(try await metadata.noteCount() == 1)
+        #expect(try await metadata.note(id: note.id)?.relativePath == "Commands/curl.md")
+        #expect(try await watcher.reconcile().isEmpty)
+    }
+
     @Test("An externally removed folder disappears from the database")
     func folderRemoval() async throws {
         let (temp, metadata, watcher) = try await fixture()

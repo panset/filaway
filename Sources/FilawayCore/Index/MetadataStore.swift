@@ -184,6 +184,34 @@ public actor MetadataStore {
         }
     }
 
+    /// Rows for a set of relative paths — the targeted-reconcile lookup, so a
+    /// live FSEvents batch does not read the whole table.
+    public func notes(relativePaths: Set<String>) throws -> [NoteSummary] {
+        guard !relativePaths.isEmpty else { return [] }
+        let paths = relativePaths.map(PathRules.normalize)
+        let placeholders = databaseQuestionMarks(paths.count)
+        return try dbQueue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM notes WHERE relpath IN (\(placeholders))",
+                arguments: StatementArguments(paths)
+            ).map(Self.summary(from:))
+        }
+    }
+
+    /// `true` when the `folders` table already knows this path.
+    public func folderExists(_ path: String) throws -> Bool {
+        let folder = PathRules.normalize(path)
+        guard !folder.isEmpty else { return true }
+        return try dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT 1 FROM folders WHERE path = ?", arguments: [folder]) != nil
+        }
+    }
+
+    private func databaseQuestionMarks(_ count: Int) -> String {
+        Array(repeating: "?", count: count).joined(separator: ", ")
+    }
+
     /// Notes in one folder, ordered by title.
     public func notes(inFolder folderPath: String) throws -> [NoteSummary] {
         try dbQueue.read { db in

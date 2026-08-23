@@ -153,28 +153,34 @@ public actor LibraryWatcher {
     }
 
     private func performReconcile(scope: Set<String>?) async throws -> [LibraryChange] {
-        let known = try await metadata.snapshot()
-        let knownByPath = known.notesByPath
+        var knownByPath: [String: NoteSummary] = [:]
         var knownByID: [NoteID: NoteSummary] = [:]
-        for note in known.notes { knownByID[note.id] = note }
-
         var diskByPath: [String: NoteSummary] = [:]
         var candidates: Set<String>
         var folderChanges: [LibraryChange] = []
 
         if let scope {
+            // Targeted: touch only the rows the event named. A live FSEvents
+            // batch must not read the whole notes table.
             candidates = scope.filter { PathRules.isNotePath($0) }
             for path in candidates {
                 guard await store.exists(path) else { continue }
                 if let summary = try? await store.summary(of: path) { diskByPath[path] = summary }
             }
+            for row in try await metadata.notes(relativePaths: candidates) {
+                knownByPath[row.relativePath] = row
+                knownByID[row.id] = row
+            }
+            var seenFolders: Set<String> = []
             for path in candidates where diskByPath[path] != nil {
                 let folder = PathRules.folderPath(of: path)
-                if !folder.isEmpty, !known.folderPaths.contains(folder) {
-                    folderChanges.append(.folderAdded(folder))
-                }
+                guard !folder.isEmpty, seenFolders.insert(folder).inserted else { continue }
+                if try await !metadata.folderExists(folder) { folderChanges.append(.folderAdded(folder)) }
             }
         } else {
+            let known = try await metadata.snapshot()
+            knownByPath = known.notesByPath
+            for note in known.notes { knownByID[note.id] = note }
             let snapshot = try await store.scan(reusing: knownByPath)
             diskByPath = snapshot.notesByPath
             candidates = Set(diskByPath.keys).union(knownByPath.keys)
@@ -206,9 +212,17 @@ public actor LibraryWatcher {
         // rename or a drag in Finder), content hash as the fallback for notes
         // Filaway has never saved and which therefore carry no id.
         var leftoverAdditions: [NoteSummary] = []
+        var consumedIDs: Set<NoteID> = []
         for addition in additions {
             let path = addition.relativePath
-            if !addition.id.isDerived(fromRelativePath: path), let previous = knownByID[addition.id] {
+            // In targeted mode the source row may be outside the event's scope,
+            // so fall back to an indexed lookup by identity.
+            var previousRow = knownByID[addition.id]
+            if previousRow == nil, scope != nil, !consumedIDs.contains(addition.id) {
+                previousRow = try await metadata.note(id: addition.id)
+            }
+            if !addition.id.isDerived(fromRelativePath: path),
+               let previous = previousRow, previous.relativePath != path {
                 var stillThere = false
                 if removals[previous.relativePath] == nil {
                     stillThere = await store.exists(previous.relativePath)
@@ -216,6 +230,7 @@ public actor LibraryWatcher {
                 if !stillThere {
                     removals[previous.relativePath] = nil
                     knownByID[addition.id] = nil
+                    consumedIDs.insert(addition.id)
                     changes.append(.moved(from: previous.relativePath, to: path, note: addition))
                     continue
                 }

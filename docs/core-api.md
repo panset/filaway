@@ -252,6 +252,10 @@ enum LibraryChange: Sendable, Equatable {
   content hash for notes Filaway has never saved.
 * Both `reconcile` overloads return the changes they emitted, if you would rather
   poll than subscribe.
+* `reconcile(paths:)` touches only the rows the paths name, so the live path
+  stays cheap on a large library; `reconcile()` reads the whole notes table and
+  stat-scans the tree, which is why it is a launch/activation call, not a
+  per-keystroke one.
 
 ### The conflict rule
 
@@ -309,7 +313,7 @@ times a cold scan and a full rebuild. Release build, M-series, 2026-08:
 
 ## Testing
 
-`Tests/FilawayCoreTests` — 74 tests, ~1.3 s without the slow tags.
+`Tests/FilawayCoreTests` — 75 tests, ~1.3 s without the slow tags.
 
 * `FrontMatterTests` — round trips (CRLF, BOM, foreign keys, missing block,
   400-case fuzz), ISO-8601 against Foundation.
@@ -317,7 +321,7 @@ times a cold scan and a full rebuild. Release build, M-series, 2026-08:
   trash-not-delete, atomic write, scan reuse.
 * `MetadataStoreTests` — migration, rebuild equivalence and idempotence, Recents.
 * `ReconcilerTests` — add/edit/remove/move externally, id and hash move
-  detection, copies, echo suppression, the conflict rule.
+  detection, copies, echo suppression, targeted vs full scope, the conflict rule.
 * `WatcherTests` — the live FSEvents stream (tagged `.fsevents`).
 * `ChurnTests` — randomised external churn interleaved with app writes, asserting
   no loss, no duplicates, moves tracked, conflict copy only when dirty.
