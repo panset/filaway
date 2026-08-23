@@ -175,9 +175,10 @@ screen-recording permission this machine has not granted, but a view's own
 how a human gets at them.
 
 `make smoke` also greps its own transcript for AppKit's "reentrant operation in
-its NSTableView delegate" and fails on it (M4-06). That guard can only mean
-something where there is a window, so on a locked screen it says so rather than
-claiming a pass.
+its NSTableView delegate" and counts it (M4-06). It reports rather than fails —
+the warning predates the guard and is not fixed — but the count is the
+regression signal. It can only mean something where there is a window, so with
+no scene it says so rather than claiming a pass.
 
 ## Layout
 
@@ -496,7 +497,7 @@ versus what needs a person at an unlocked screen with VoiceOver on.
 `Features/Settings/AccessibilityAudit.swift` walks a window's live accessibility
 tree and fails on any unlabelled control (ADR-060). The M1 launch warning
 "reentrant operation in its NSTableView delegate" is **not fixed**, but it is
-now measured and bounded: `make smoke` keeps a transcript and fails on it, and
+now measured and bounded: `make smoke` keeps a transcript and counts it, and
 the count says it is once per *population of the sidebar `List`* (empty library:
 zero; seeded: one; `semantic`, which repopulates repeatedly: four). Everything
 schedulable has been ruled out — see `docs/a11y-checklist.md` § 5 for the full

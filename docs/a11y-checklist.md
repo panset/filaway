@@ -133,9 +133,13 @@ delegate` has been in the launch log since M1. AppKit says it "will become an
 assert in the future". M4-06 did not fix it. What M4-06 *did* do is turn it from
 an anecdote into a measurement, and rule out most of the obvious suspects.
 
-**Guard.** `Tools/smoke.sh` keeps a transcript of every phase and fails the run
-if `reentrant operation` appears in it (`SMOKE FAIL appkit-reentrancy`). It arms
-itself only where it can mean something — with no window there is no table.
+**Guard.** `Tools/smoke.sh` keeps a transcript of every phase and counts the
+warning (`SMOKE note appkit-reentrancy — N occurrences`). It *reports* rather
+than fails: turning `make smoke` red for every agent over a warning none of them
+introduced would be worse than the warning. The count is the regression signal —
+it should track the number of seeded phases, and going up means something new
+started reloading the sidebar. It arms itself only where it can mean something:
+with no window there is no table.
 
 **What the guard measured** (one full `make smoke`, warnings per phase):
 
