@@ -47,10 +47,26 @@ public struct FolderInfo: Sendable, Equatable, Identifiable {
 public actor MetadataStore {
     public let library: Library
     private let dbQueue: DatabaseQueue
+    private let textLoader: NoteTextLoader
+
+    /// A read handle onto the same database, usable off this actor.
+    ///
+    /// ``SearchService`` holds it so a keystroke's query never has to queue
+    /// behind the writer's actor mailbox (M1-06). GRDB still serialises the two
+    /// on one connection, so search reads are deliberately kept to a few
+    /// milliseconds; the upgrade path, if that ever bites, is WAL + a
+    /// `DatabasePool`.
+    public nonisolated var reader: any DatabaseReader { dbQueue }
 
     /// Opens (creating if needed) the database for a library and migrates it.
-    public init(library: Library) throws {
+    ///
+    /// - Parameter textLoader: how the store fetches a note's body when it needs
+    ///   to (re)index it for search. Defaults to reading the file and stripping
+    ///   front matter; pass ``NoteTextLoader/none`` to keep the text index out
+    ///   of the write path entirely.
+    public init(library: Library, textLoader: NoteTextLoader? = nil) throws {
         self.library = library
+        self.textLoader = textLoader ?? .reading(from: library)
         try FileManager.default.createDirectory(at: library.supportDirectory, withIntermediateDirectories: true)
         var configuration = Configuration()
         configuration.foreignKeysEnabled = true
@@ -59,9 +75,12 @@ public actor MetadataStore {
     }
 
     /// In-memory database, for tests and for `filaway-bench`.
-    public init(inMemoryFor library: Library) throws {
+    public init(inMemoryFor library: Library, textLoader: NoteTextLoader? = nil) throws {
         self.library = library
-        dbQueue = try DatabaseQueue()
+        self.textLoader = textLoader ?? .reading(from: library)
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        dbQueue = try DatabaseQueue(configuration: configuration)
         try Self.prepare(dbQueue, library: library)
     }
 
@@ -93,6 +112,25 @@ public actor MetadataStore {
         try dbQueue.write { db in try Self.setMeta(db, key, value) }
     }
 
+    /// Bumps the counter that tells readers the `notes` table changed.
+    ///
+    /// A rename or a move changes neither the row count nor any mtime, so a
+    /// digest of the table cannot see it — but ``SearchService``'s title cache
+    /// has to. Every write path through this store bumps this instead.
+    private static func bumpGeneration(_ db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO meta(key, value) VALUES('notes_generation', '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+            """)
+    }
+
+    /// Increments on every change to `notes`; readers cache against it.
+    public func generation() throws -> Int {
+        try dbQueue.read { db in
+            Int(try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'notes_generation'") ?? "0") ?? 0
+        }
+    }
+
     private static func setMeta(_ db: Database, _ key: String, _ value: String) throws {
         try db.execute(sql: "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                        arguments: [key, value])
@@ -104,12 +142,23 @@ public actor MetadataStore {
     ///
     /// Idempotent: rebuilding twice from the same snapshot yields the same rows,
     /// which is what the "rebuild equivalence" test asserts.
-    public func rebuild(from snapshot: LibrarySnapshot) throws {
+    ///
+    /// - Parameter indexingText: also rebuild the search index (M1-06), which
+    ///   means reading every note's body off disk. `false` leaves the index
+    ///   empty and defers the work to ``indexText(_:)`` /
+    ///   ``staleTextNotes(limit:)`` — use it when the caller wants the sidebar
+    ///   on screen before search is ready.
+    public func rebuild(from snapshot: LibrarySnapshot, indexingText: Bool = true) throws {
         try dbQueue.write { db in
             var lastOpened: [String: Double] = [:]
             for row in try Row.fetchAll(db, sql: "SELECT id, last_opened FROM notes WHERE last_opened IS NOT NULL") {
                 lastOpened[row["id"]] = row["last_opened"]
             }
+            // Bulk load: the triggers would fire once per row, where FTS5's own
+            // 'rebuild' does the whole index in a single pass.
+            try Self.dropFTSTriggers(db)
+            try db.execute(sql: "DELETE FROM note_text")
+            try Self.clearFTS(db)
             try db.execute(sql: "DELETE FROM notes")
             try db.execute(sql: "DELETE FROM folders")
             for path in Self.impliedFolders(snapshot) {
@@ -119,8 +168,37 @@ public actor MetadataStore {
                 try Self.upsert(db, note, lastOpened: lastOpened[note.id.uuidString])
             }
             try Self.setMeta(db, "last_scan", ISO8601.string(from: snapshot.scannedAt))
+            try Self.bumpGeneration(db)
         }
+
+        // Bodies are read off-transaction, in batches, so neither the write lock
+        // nor memory is held for the whole library.
+        var indexingError: Error?
+        if indexingText {
+            do {
+                var index = 0
+                while index < snapshot.notes.count {
+                    let batch = Array(snapshot.notes[index ..< min(index + Self.indexBatchSize, snapshot.notes.count)])
+                    let texts = batch.compactMap(loadText(for:))
+                    try dbQueue.write { db in
+                        for text in texts { try Self.insertText(db, text) }
+                    }
+                    index += batch.count
+                }
+            } catch {
+                indexingError = error
+            }
+        }
+
+        try dbQueue.write { db in
+            try Self.rebuildFTS(db)
+            try Self.createFTSTriggers(db)
+        }
+        if let indexingError { throw indexingError }
     }
+
+    /// How many notes' bodies are held in memory at once while indexing.
+    private static let indexBatchSize = 512
 
     /// All folder paths implied by a snapshot, including ancestors of notes.
     static func impliedFolders(_ snapshot: LibrarySnapshot) -> [String] {
@@ -140,13 +218,17 @@ public actor MetadataStore {
 
     /// Inserts or updates one note, keyed by ``NoteID``.
     public func upsert(_ note: NoteSummary) throws {
-        try dbQueue.write { db in try Self.upsert(db, note, lastOpened: nil) }
+        try upsert([note])
     }
 
-    /// Inserts or updates several notes in one transaction.
+    /// Inserts or updates several notes in one transaction, refreshing their
+    /// search index entries.
     public func upsert(_ notes: [NoteSummary]) throws {
+        let texts = loadTexts(for: notes)
         try dbQueue.write { db in
             for note in notes { try Self.upsert(db, note, lastOpened: nil) }
+            for text in texts { try Self.insertText(db, text) }
+            try Self.bumpGeneration(db)
         }
     }
 
@@ -154,6 +236,7 @@ public actor MetadataStore {
     public func remove(relativePath: String) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM notes WHERE relpath = ?", arguments: [PathRules.normalize(relativePath)])
+            try Self.bumpGeneration(db)
         }
     }
 
@@ -161,6 +244,7 @@ public actor MetadataStore {
     public func remove(id: NoteID) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM notes WHERE id = ?", arguments: [id.uuidString])
+            try Self.bumpGeneration(db)
         }
     }
 
@@ -278,6 +362,7 @@ public actor MetadataStore {
             try db.execute(sql: "DELETE FROM folders WHERE path = ? OR path LIKE ?", arguments: [folder, folder + "/%"])
             try db.execute(sql: "DELETE FROM notes WHERE folder_path = ? OR folder_path LIKE ?",
                            arguments: [folder, folder + "/%"])
+            try Self.bumpGeneration(db)
         }
     }
 
@@ -307,14 +392,39 @@ public actor MetadataStore {
     // MARK: - Applying reconciler output
 
     /// Applies a batch of ``LibraryChange`` values in one transaction.
+    ///
+    /// The search index follows: added/modified/moved notes are re-read and
+    /// re-indexed, and removals unindex themselves through `note_text`'s
+    /// cascading foreign key.
     public func apply(_ changes: [LibraryChange]) throws {
+        var touched: [NoteSummary] = []
+        // A move keeps the note's bytes, so its content hash is unchanged and
+        // the "already indexed" check would skip it — but its row is about to
+        // be deleted and reinserted at the new path, and its title may have
+        // changed with the filename. Moves are therefore always reloaded.
+        var moved: Set<String> = []
+        for change in changes {
+            switch change {
+            case let .added(note), let .modified(note):
+                touched.append(note)
+            case let .moved(_, _, note):
+                touched.append(note)
+                moved.insert(note.id.uuidString)
+            case .removed, .conflict, .folderAdded, .folderRemoved:
+                break
+            }
+        }
+        let texts = loadTexts(for: touched, reloading: moved)
         try dbQueue.write { db in
             for change in changes {
                 switch change {
                 case let .added(note), let .modified(note):
                     try Self.upsert(db, note, lastOpened: nil)
                 case let .moved(from, _, note):
-                    try db.execute(sql: "DELETE FROM notes WHERE relpath = ?", arguments: [from])
+                    // Guarded by id: the row at the old path *is* this note, and
+                    // deleting it would cascade its indexed text away.
+                    try db.execute(sql: "DELETE FROM notes WHERE relpath = ? AND id <> ?",
+                                   arguments: [from, note.id.uuidString])
                     try Self.upsert(db, note, lastOpened: nil)
                 case let .removed(relativePath, _):
                     try db.execute(sql: "DELETE FROM notes WHERE relpath = ?", arguments: [relativePath])
@@ -328,6 +438,137 @@ public actor MetadataStore {
                     break  // the copy itself arrives as a separate `.added`
                 }
             }
+            for text in texts { try Self.insertText(db, text) }
+            try Self.bumpGeneration(db)
+        }
+    }
+
+    // MARK: - Search text index (M1-06, FR-5.1)
+
+    /// Inserts or refreshes the searchable text of the given notes.
+    ///
+    /// Only needed by callers that construct bodies themselves (an importer, or
+    /// a background catch-up after `rebuild(from:indexingText: false)`); the
+    /// ordinary write paths index automatically.
+    public func indexText(_ entries: [NoteText]) throws {
+        guard !entries.isEmpty else { return }
+        try dbQueue.write { db in
+            for entry in entries { try Self.insertText(db, entry) }
+        }
+    }
+
+    /// How many notes currently have searchable text.
+    public func textIndexCount() throws -> Int {
+        try dbQueue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM note_text") ?? 0 }
+    }
+
+    /// Notes whose text is missing from the index or was indexed from different
+    /// bytes — the work list for a background catch-up.
+    public func staleTextNotes(limit: Int = 1_000) throws -> [NoteSummary] {
+        try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT notes.* FROM notes
+                LEFT JOIN note_text ON note_text.note_id = notes.id
+                WHERE note_text.note_id IS NULL OR note_text.content_hash <> notes.content_hash
+                ORDER BY notes.mtime DESC
+                LIMIT ?
+                """, arguments: [limit]).map(Self.summary(from:))
+        }
+    }
+
+    /// The indexed text of one note, front matter stripped.
+    public func text(id: NoteID) throws -> NoteText? {
+        try dbQueue.read { db in
+            try Row.fetchOne(db, sql: "SELECT * FROM note_text WHERE note_id = ?", arguments: [id.uuidString])
+                .map(Self.noteText(from:))
+        }
+    }
+
+    /// Reads the bodies of notes whose indexed hash no longer matches.
+    ///
+    /// - Parameter reloading: note ids to re-read even when the hash matches.
+    private func loadTexts(for notes: [NoteSummary], reloading: Set<String> = []) -> [NoteText] {
+        guard !notes.isEmpty else { return [] }
+        let known: [String: String]
+        do {
+            let ids = notes.map(\.id.uuidString)
+            let placeholders = databaseQuestionMarks(ids.count)
+            known = try dbQueue.read { db in
+                var map: [String: String] = [:]
+                for row in try Row.fetchAll(
+                    db,
+                    sql: "SELECT note_id, content_hash FROM note_text WHERE note_id IN (\(placeholders))",
+                    arguments: StatementArguments(ids)
+                ) {
+                    map[row["note_id"]] = row["content_hash"]
+                }
+                return map
+            }
+        } catch {
+            known = [:]
+        }
+        return notes.compactMap { note in
+            let id = note.id.uuidString
+            guard reloading.contains(id) || known[id] != note.contentHash else { return nil }
+            return loadText(for: note)
+        }
+    }
+
+    private func loadText(for note: NoteSummary) -> NoteText? {
+        guard let body = textLoader.load(note) else { return nil }
+        return NoteText(
+            id: note.id,
+            relativePath: note.relativePath,
+            title: note.title,
+            body: body,
+            contentHash: note.contentHash
+        )
+    }
+
+    private static func insertText(_ db: Database, _ text: NoteText) throws {
+        try db.execute(
+            sql: """
+            INSERT INTO note_text(note_id, relpath, title, body, content_hash) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(note_id) DO UPDATE SET
+                relpath = excluded.relpath,
+                title = excluded.title,
+                body = excluded.body,
+                content_hash = excluded.content_hash
+            """,
+            arguments: [text.id.uuidString, text.relativePath, text.title, text.body, text.contentHash]
+        )
+    }
+
+    private static func noteText(from row: Row) -> NoteText {
+        NoteText(
+            id: NoteID(row["note_id"] as String) ?? NoteID(),
+            relativePath: row["relpath"],
+            title: row["title"],
+            body: row["body"],
+            contentHash: row["content_hash"]
+        )
+    }
+
+    private static func dropFTSTriggers(_ db: Database) throws {
+        for name in DatabaseSchema.ftsTriggerNames {
+            try db.execute(sql: "DROP TRIGGER IF EXISTS \(name)")
+        }
+    }
+
+    private static func createFTSTriggers(_ db: Database) throws {
+        try dropFTSTriggers(db)
+        for sql in DatabaseSchema.ftsTriggerStatements { try db.execute(sql: sql) }
+    }
+
+    private static func clearFTS(_ db: Database) throws {
+        for table in DatabaseSchema.ftsTables {
+            try db.execute(sql: "INSERT INTO \(table)(\(table)) VALUES('delete-all')")
+        }
+    }
+
+    private static func rebuildFTS(_ db: Database) throws {
+        for table in DatabaseSchema.ftsTables {
+            try db.execute(sql: "INSERT INTO \(table)(\(table)) VALUES('rebuild')")
         }
     }
 

@@ -1,0 +1,203 @@
+import AppKit
+import FilawayCore
+import SwiftUI
+
+/// The two-pane window of Figure 1 (FR-1.1): sidebar left, editor right, a
+/// toolbar carrying New Note and the unified search field.
+///
+/// System colors and materials only, so light and dark both come for free
+/// (NFR-6/7).
+struct ShellView: View {
+
+    @ObservedObject var model: AppModel
+    @StateObject private var editor = MarkdownEditorController()
+    @FocusState private var searchFocused: Bool
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    /// Read once per launch: `navigationSplitViewColumnWidth` only honours its
+    /// ideal at first layout (FR-1.5).
+    private let initialSidebarWidth = AppSettings.sidebarWidth
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SidebarView(model: model)
+                .navigationSplitViewColumnWidth(
+                    min: AppSettings.sidebarMinWidth,
+                    ideal: initialSidebarWidth,
+                    max: AppSettings.sidebarMaxWidth
+                )
+                .background(WidthReporter { AppSettings.sidebarWidth = $0 })
+        } detail: {
+            detail
+        }
+        .navigationTitle(model.openNote?.title ?? "Filaway")
+        .toolbar { toolbar }
+        .background(WindowAccessor(onWindow: configure(window:)))
+        .task {
+            LaunchClock.mark("shellAppeared")
+            await model.bootstrap()
+            LaunchClock.mark("editorReady")
+        }
+        .onChange(of: model.focusEditorRequest) { _, _ in
+            DispatchQueue.main.async { editor.focus() }
+        }
+        .onChange(of: model.focusSearchRequest) { _, _ in
+            searchFocused = true
+        }
+        .onChange(of: model.focusSidebarRequest) { _, _ in
+            searchFocused = false
+            FirstResponder.focusSidebar()
+        }
+    }
+
+    // MARK: - Detail
+
+    @ViewBuilder
+    private var detail: some View {
+        ZStack(alignment: .top) {
+            if let open = model.openNote {
+                NoteEditorView(
+                    title: $model.editorTitle,
+                    markdown: $model.editorText,
+                    createdAt: open.created,
+                    controller: editor,
+                    onTitleCommit: { model.commitTitle($0) },
+                    onTextChange: { text in
+                        EditorCallbackLog.recordTextChange()
+                        model.editorTextChanged(text)
+                    },
+                    onEditorActivity: { activity in
+                        // M2-03 session tracker hooks in here.
+                        EditorCallbackLog.record(activity)
+                    }
+                )
+                // A fresh editor per note: resets scroll, selection and the
+                // title field's committed value on every switch.
+                .id(open.id)
+            } else {
+                welcome
+            }
+
+            if let banner = model.banner {
+                BannerView(banner: banner) { model.dismissBanner() }
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: model.banner)
+        .navigationSplitViewColumnWidth(min: 420, ideal: 720)
+    }
+
+    private var welcome: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 40, weight: .ultraLight))
+                .foregroundStyle(.tertiary)
+            Text(model.noteCount == 0 ? "Start writing" : "No note selected")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text("⌘N makes a new note. Everything is saved as Markdown in \(model.library.root.path).")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            Button("New Note") { model.newNote() }
+                .keyboardShortcut("n", modifiers: .command)
+                .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                NSApp.keyWindow?.firstResponder?.tryToPerform(
+                    #selector(NSSplitViewController.toggleSidebar(_:)), with: nil
+                )
+            } label: {
+                Image(systemName: "sidebar.leading")
+            }
+            .help("Hide or show the sidebar")
+            .accessibilityLabel("Toggle Sidebar")
+        }
+
+        ToolbarItem(placement: .principal) {
+            SearchFieldView(coordinator: model.search, isFocused: $searchFocused)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                model.newNote()
+            } label: {
+                Image(systemName: "square.and.pencil")
+            }
+            .help("New Note (⌘N)")
+            .accessibilityLabel("New Note")
+        }
+    }
+
+    // MARK: - Window (FR-1.5, FR-2.3)
+
+    private func configure(window: NSWindow) {
+        LaunchClock.mark("windowVisible")
+        window.setFrameAutosaveName(AppSettings.windowFrameAutosaveName)
+        window.tabbingMode = .disallowed
+        WindowFlushObserver.shared.observe(window: window, model: model)
+    }
+}
+
+/// The non-blocking conflict/status strip (DS-4).
+struct BannerView: View {
+    var banner: AppModel.Banner
+    var onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: banner.symbol)
+                .foregroundStyle(banner.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+            Text(banner.text)
+                .font(.callout)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Dismiss message")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(.separator, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .padding(.horizontal, 16)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(banner.text)
+    }
+}
+
+/// Flushes the autosave buffer when the window stops being key (FR-2.3).
+@MainActor
+final class WindowFlushObserver {
+    static let shared = WindowFlushObserver()
+    private var observed = Set<ObjectIdentifier>()
+
+    func observe(window: NSWindow, model: AppModel) {
+        guard observed.insert(ObjectIdentifier(window)).inserted else { return }
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: window, queue: .main
+        ) { _ in
+            Task { @MainActor in await model.flushNow(trigger: .windowResignKey) }
+        }
+    }
+}

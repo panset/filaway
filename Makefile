@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: setup build test bench app run dmg notarize clean release
+.PHONY: setup build test smoke bench app run dmg notarize clean release
 
 ## setup: check the toolchain and report optional tools
 setup:
@@ -21,6 +21,10 @@ build:
 ## test: run the Swift Testing suite
 test:
 	swift test
+
+## smoke: headless UI smoke test of the shell (builds the app if needed)
+smoke: app
+	Tools/smoke.sh
 
 ## bench: run the benchmark CLI (pass ARGS="...")
 bench:

@@ -30,7 +30,7 @@ enum EditorCallbackLog {
 enum EditorSmokeCheck {
 
     @MainActor
-    static func run() -> Int {
+    static func run(printResult: Bool = true) -> Int {
         var failures = 0
 
         func check(_ label: String, _ condition: Bool, _ detail: String = "") {
@@ -264,7 +264,7 @@ enum EditorSmokeCheck {
         print(String(format: "SMOKE perf decorations steady-state %.3f ms/pass", steadyMs))
         check("decoration-pass-under-a-frame", steadyMs < 8.0, String(format: "%.3f ms", steadyMs))
 
-        print("SMOKE result failures=\(failures)")
+        if printResult { print("SMOKE result failures=\(failures)") }
         return failures
     }
 
