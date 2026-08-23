@@ -894,3 +894,149 @@ default (`.immediateError`) would have surfaced normal contention as an error.
 - `note_baselines` rides along on the same connection: `DatabaseBaselineStore`
   is a thin `BaselineStore` façade over `ActivityLog`, so the session tracker
   never opens a third connection.
+
+## ADR-028 — A session starts on an edit, and returning to the app does not cancel the grace
+
+**Date:** 2026-08-23 · **Task:** M2-03 · **Status:** accepted (implements plan §1 amendment 2)
+
+**Context.** FR-3.1 says a session "begins when the user starts editing any
+note" and ends when there are no keystrokes for the idle interval *and* the note
+is not being actively scrolled or selected; switching away ends it immediately.
+Amendment 2 delays the *pipeline* by 30 s after a deactivation or window close,
+"cancelled if activity resumes". Two things are left open: whether scrolling can
+*start* a session, and whether coming back to the app counts as resuming.
+
+**Decision.** `SessionMachine` — a pure state machine with three phases (idle,
+active, end-pending) — settles both:
+
+- Only `edit` starts a session and only `edit` marks a note as *touched*.
+  Scroll, selection and note switches sustain a session but never open one, and
+  a session with no touched notes is discarded rather than organized.
+- `appDidBecomeActive` is **inert**. The grace is cancelled by touching the
+  editor (edit, scroll, selection, note switch), not by the app becoming
+  frontmost.
+- A second deactivation while the grace is running does not extend it.
+- `appWillTerminate` fires a pending session immediately, keeping its original
+  end time and reason.
+
+**Consequences.**
+- The ⌘-Tab-to-Terminal-and-back loop that amendment 2 exists for still files
+  the session, 30 s later, if the user comes back only to read. If `becomeActive`
+  cancelled the grace, that session would never be filed at all.
+- Every rule is a synchronous table test; the actor's only extra job is a timer
+  on an injected `SessionClock` and the flush hook, so the suite spends no real
+  seconds on a 3-minute interval.
+- The idle interval is clamped to FR-3.1's 1–15 minutes on the way in, so a
+  malformed setting cannot disable filing.
+
+---
+
+## ADR-029 — Autosave flush, then baseline snapshot, then organize
+
+**Date:** 2026-08-23 · **Task:** M2-03 / M2-05 · **Status:** accepted
+
+**Context.** Autosave is debounced 750 ms (plan §1), so when a session ends the
+file on disk can be a keystroke or two behind the editor buffer. The organizer
+computes its delta from the file. Nothing in the type system stops the app from
+starting the pipeline before the flush.
+
+**Decision.** `SessionTracker` owns a `flushHook` and **awaits it before
+publishing `SessionEvent.ended`**. The organizer takes its snapshot (current
+text + organized baseline) when it receives that event, and compare-and-swap
+preconditions are recorded from that same snapshot. The ordering is documented
+on the actor and in `docs/organize.md`, and a test asserts the hook runs first.
+
+**Consequences.**
+- The last burst of typing is always in the delta.
+- A hook that hangs delays filing but blocks nothing else — the tracker is an
+  actor and the app never awaits it.
+- The app must not call `Organizer.sessionEnded(_:)` from anywhere but the
+  `.ended` event.
+
+---
+
+## ADR-030 — Baselines and the pending-session queue are protocols with in-memory implementations
+
+**Date:** 2026-08-23 · **Task:** M2-05 · **Status:** accepted
+
+**Context.** The organized baseline per note and the offline session queue are
+both durable state that belongs in `filaway.sqlite` (plan §1 "Derived DB", and
+migration `v4-activity` which owns `note_baselines`). M2-05 has to be finished,
+tested and reviewable before that migration exists, and its race-matrix tests
+must not need a database.
+
+**Decision.** `BaselineStore` and `PendingSessionStore` are `Sendable`
+protocols in `FilawayCore`, with `InMemoryBaselineStore` and
+`InMemoryPendingSessionStore` actors shipping now. `PlanApplying`,
+`OrganizeLibrarySource` and `CandidateFinder` follow the same rule: the
+organizer names what it needs and owns none of it.
+
+**Consequences.**
+- Losing baselines is a **cost** problem, not a correctness one: an absent
+  baseline makes the next session look like "the whole note is new", so the AI
+  re-reads text it has already filed. Nothing is lost or double-applied, because
+  the plan still goes through validation and compare-and-swap.
+- The GRDB implementations drop in without touching the organizer, and the
+  in-memory ones stay as the reference behaviour for their tests.
+- `CandidateFinder` is the seam M3-08 replaces with the hybrid ranker.
+
+---
+
+## ADR-031 — An invalid action is dropped, unless that would make the summary a lie
+
+**Date:** 2026-08-23 · **Task:** M2-05 · **Status:** accepted
+
+**Context.** `PlanValidator` can reject part of a plan (a hallucinated note id,
+a folder three levels deep) while the rest is perfectly good. Throwing the whole
+plan away costs the user real filing; keeping the good actions changes what
+happens without changing `plan.summary` — and FR-4.2 requires the card to state
+*exactly* what happened or will happen (risk #6).
+
+**Decision.** `Organizer.repair(plan:unknownActions:context:)`:
+
+1. drops every action the validator pinned an error to, and re-validates;
+2. discards the whole plan if a plan-level error has no action index, if
+   nothing survives, or if the reduced plan still fails;
+3. **checks the summary against what is left**: if it names a note title or
+   folder path that only the dropped actions touched, the plan is discarded.
+
+Actions the *decoder* could not read at all stay warnings — they never entered
+the plan.
+
+**Consequences.**
+- The common case (one bad target among five good actions, summary unaffected)
+  still files the good ones, and `ProposedPlan.droppedActions` records what went.
+- The card never describes an action that will not happen.
+- The rule is mechanical and testable — two golden fixtures pin both branches —
+  rather than a judgement call about "does the summary still read right".
+
+---
+
+## ADR-032 — The organize prompt is one rendered system string, and candidates are the first thing cut
+
+**Date:** 2026-08-23 · **Task:** M2-06 · **Status:** accepted
+
+**Context.** `organize.v1` and `plan-format.v1` are versioned separately
+(spec §9), but the API takes one `system` string. Separately, the request has a
+token budget (~6 k input) that a large library or a long note will blow through,
+and something has to give.
+
+**Decision.** `organize.v1.txt` carries `{{include:plan-format.v1}}` and
+`OrganizeRequestBuilder.systemPrompt()` splices the two together, so either
+prompt moving moves the request hash and the golden fixtures. The user message
+is built by `OrganizeContextBuilder` and reduced, when over budget, in a fixed
+order: candidate previews (20 → 10 → 5 lines), then candidates from the
+lowest-ranked up, then the library's note titles, then session note bodies
+truncated *around* the delta. **The delta itself is never truncated.** Every
+reduction is recorded in `truncations`. Token estimation is `bytes / 4` — crude,
+pessimistic, free.
+
+**Consequences.**
+- Losing a candidate costs a possible merge; losing session text would cost the
+  plan and could break `moveSegment`'s byte-exact segment, so it goes last.
+- `Prompt: organize.v1` is rendered into the message body, which makes every
+  recorded request self-describing and gives the golden tests something to
+  assert on.
+- The FR-4.5 gate shows up as a property of the fixtures: the scenario whose
+  session touched an excluded note hashes to the *same request* as the one
+  without it.
