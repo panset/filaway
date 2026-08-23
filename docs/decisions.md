@@ -538,7 +538,7 @@ so schema and codec cannot drift.
 
 ---
 
-## ADR-018 — A session starts on an edit, and returning to the app does not cancel the grace
+## ADR-025 — A session starts on an edit, and returning to the app does not cancel the grace
 
 **Date:** 2026-08-23 · **Task:** M2-03 · **Status:** accepted (implements plan §1 amendment 2)
 
@@ -574,7 +574,7 @@ active, end-pending) — settles both:
 
 ---
 
-## ADR-019 — Autosave flush, then baseline snapshot, then organize
+## ADR-026 — Autosave flush, then baseline snapshot, then organize
 
 **Date:** 2026-08-23 · **Task:** M2-03 / M2-05 · **Status:** accepted
 
@@ -598,7 +598,7 @@ on the actor and in `docs/organize.md`, and a test asserts the hook runs first.
 
 ---
 
-## ADR-020 — Baselines and the pending-session queue are protocols with in-memory implementations
+## ADR-027 — Baselines and the pending-session queue are protocols with in-memory implementations
 
 **Date:** 2026-08-23 · **Task:** M2-05 · **Status:** accepted
 
@@ -625,7 +625,7 @@ organizer names what it needs and owns none of it.
 
 ---
 
-## ADR-021 — An invalid action is dropped, unless that would make the summary a lie
+## ADR-028 — An invalid action is dropped, unless that would make the summary a lie
 
 **Date:** 2026-08-23 · **Task:** M2-05 · **Status:** accepted
 
@@ -655,7 +655,7 @@ the plan.
 
 ---
 
-## ADR-022 — The organize prompt is one rendered system string, and candidates are the first thing cut
+## ADR-029 — The organize prompt is one rendered system string, and candidates are the first thing cut
 
 **Date:** 2026-08-23 · **Task:** M2-06 · **Status:** accepted
 
