@@ -27,7 +27,7 @@ import Foundation
 public actor PlanApplier: PlanApplying {
     private let store: NoteStore
     private let activity: ActivityLog
-    private let excludedFolders: [String]
+    private var excludedFolders: [String]
     private let clock: @Sendable () -> Date
     private let failureHook: ApplyFailureHook?
     private let fileManager = FileManager.default
@@ -45,6 +45,14 @@ public actor PlanApplier: PlanApplying {
         self.excludedFolders = excludedFolders
         self.clock = clock
         self.failureHook = failureHook
+    }
+
+    /// FR-4.5: Settings changed the exclusion list while the app was running
+    /// (M4-02). The applier validates every destination against it, so a folder
+    /// excluded a second ago must not receive the plan that is already in
+    /// flight.
+    public func setExcludedFolders(_ folders: [String]) {
+        excludedFolders = folders
     }
 
     // MARK: - Apply

@@ -96,6 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // opens is always the one the user just chose. See ADR-049.
         OnboardingPresenter.runIfNeeded()
 
+        // M4-02: the one listener for `.filawayOpenAISettings` — the status
+        // pill, the ⌘K notice and the sidebar prompt all post it.
+        SettingsWindow.observeOpenRequests()
+
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         Log.app.info("Filaway \(FilawayCore.version, privacy: .public) launched")

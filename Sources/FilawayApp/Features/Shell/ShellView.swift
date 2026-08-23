@@ -185,7 +185,7 @@ struct ShellView: View {
         // FR-6.4: degradation is one quiet pill, never an alert.
         ToolbarItem(placement: .status) {
             if let organize = model.organize {
-                AIStatusIndicatorHost(coordinator: organize)
+                AIStatusPillHost(coordinator: organize)
             }
         }
 
@@ -211,14 +211,20 @@ struct ShellView: View {
 }
 
 /// Observes the coordinator so the pill redraws when the status moves.
-struct AIStatusIndicatorHost: View {
+///
+/// The coordinator is the single place both inputs meet: pipeline outcomes
+/// (`AIHealth.status(for:)` on a failure) and the connection manager's own
+/// verdict, which it folds in through `connectionStatusChanged(_:)`. M4-02
+/// retired the second, near-identical `AIStatusIndicator` in favour of
+/// Settings' ``AIStatusPill``.
+struct AIStatusPillHost: View {
     @ObservedObject var coordinator: OrganizeCoordinator
 
     var body: some View {
-        AIStatusIndicator(
+        AIStatusPill(
             status: coordinator.status,
             queuedCount: coordinator.queuedSessionCount,
-            onOpenSettings: { coordinator.onOpenAISettings?() }
+            action: { coordinator.onOpenAISettings?() }
         )
     }
 }

@@ -10,16 +10,17 @@ import SwiftUI
 /// Activity milestone finish.
 struct SettingsRootView: View {
     @ObservedObject var model: SettingsModel
+    /// Which tab is showing, kept outside the view so `SettingsWindow.open(tab:)`
+    /// can pick one before the window exists (M4-02).
+    @ObservedObject private var selection = SettingsTabSelection.shared
 
     /// Which tab is showing. Named so the smoke driver can select one.
     enum Tab: String, Hashable, CaseIterable {
         case general, ai, activity
     }
 
-    @State private var tab: Tab = .ai
-
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $selection.tab) {
             GeneralSettingsView(model: model)
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(Tab.general)
@@ -39,6 +40,19 @@ struct SettingsRootView: View {
         .background(SettingsWindowAccessor())
         .task { await model.refresh() }
     }
+}
+
+/// The selected Settings tab, as a shared object.
+///
+/// `@State` inside ``SettingsRootView`` cannot be reached from outside, and
+/// every programmatic open — the toolbar pill, the ⌘K panel's notice, the
+/// sidebar's "connect your AI" row — has an opinion about which pane it means
+/// (FR-6.4). Setting this *before* invoking the menu item means the window is
+/// built showing the right tab rather than switching to it a frame later.
+@MainActor
+final class SettingsTabSelection: ObservableObject {
+    static let shared = SettingsTabSelection()
+    @Published var tab: SettingsRootView.Tab = .ai
 }
 
 /// Hands the Settings scene's `NSWindow` to ``SettingsWindow``.
