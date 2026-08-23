@@ -20,7 +20,11 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make release` | app → dmg → notarize |
 | `make clean` | Removes `.build/` and `build/` |
 
-Headless UI smoke tests (no Xcode/XCTest needed, works on a locked screen):
+Headless UI smoke tests (no Xcode/XCTest needed, no synthetic key events —
+but **the screen must be unlocked**: on macOS 26 a newly launched app gets no
+window while the screen is locked, SwiftUI never builds the scene, and every
+phase fails at `library-open` with no `SMOKE window …` lines. `Tools/smoke.sh`
+detects it and says so):
 
 ```
 make smoke          # or: Tools/smoke.sh [--keep]
@@ -152,7 +156,9 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
     is installed (needed for NFR Intel support).
   - **XCTest UI tests are unavailable.** Use (a) Core-level tests for all logic,
     (b) the `FILAWAY_SMOKE=1` hook above / `osascript` + `screencapture`
-    drivers, (c) manual DoD checklists.
+    drivers, (c) manual DoD checklists. The smoke phases need no unlocked
+    *screen saver* interaction, but they do need the screen **unlocked**: a
+    locked session gives a launched app no window at all (see above).
   - **Core ML `coremlcompiler` is Xcode-only** → compile `.mlpackage` at first
     launch with `MLModel.compileModel(at:)` and cache it. The embedder fallback
     ladder gains `NLContextualEmbedding` (macOS 14+) as a zero-download option.

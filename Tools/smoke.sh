@@ -43,6 +43,20 @@ if [ ! -x "$APP" ]; then
   Tools/make_app.sh >/dev/null || { echo "smoke: make_app.sh failed"; exit 1; }
 fi
 
+# A newly launched app cannot create a window while the screen is locked
+# (macOS 26). Every phase then fails at "library open" with no window lines at
+# all, because SwiftUI never builds the scene and `AppModel.bootstrap()` never
+# runs — a confusing 26-failure report for an environment problem. Say so.
+#
+# `grep -c`, not `grep -q`: under `set -o pipefail` a quiet grep exits early,
+# `ioreg` dies of SIGPIPE, and the pipeline reports 141 even on a match.
+SCREEN_LOCKED=0
+if [ "$(ioreg -n Root -d1 -a 2>/dev/null | grep -c CGSSessionScreenIsLocked)" != "0" ]; then
+  SCREEN_LOCKED=1
+  echo "smoke: WARNING — the screen is locked. A launched app gets no window, so"
+  echo "smoke:           every phase will fail at library-open. Unlock and re-run."
+fi
+
 STAMP="$(date +%s)-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
@@ -217,5 +231,9 @@ run_phase 1 90
 run_phase 2 60
 
 echo
+if [ "$failures" -gt 0 ] && [ "$SCREEN_LOCKED" = "1" ]; then
+  echo "smoke: the screen was locked for this run — the failures above are almost"
+  echo "smoke: certainly that, not the code. Unlock the screen and re-run."
+fi
 echo "SMOKE result failures=$failures"
 exit $((failures > 120 ? 120 : failures))
