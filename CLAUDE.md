@@ -25,6 +25,14 @@ Headless UI smoke tests (no Xcode/XCTest needed, works on a locked screen):
 ```
 make smoke          # or: Tools/smoke.sh [--keep]
 # -> === smoke phase: editor ===   M1-10 editor checks, on a note read from disk
+# -> === smoke phase: search ===   M1-12 ⌘K on a 3-note corpus seeded on disk
+#                                  *before* launch: as-you-type hits, match and
+#                                  snippet ranges, ↑↓⏎esc, open-scrolled-to-
+#                                  match, fuzzy titles, recents, "No matches"
+# -> === smoke phase: kill ===     type -> wait out the 750 ms debounce -> type
+#                                  again -> park; the script sends SIGKILL
+# -> === smoke phase: killcheck === relaunch: the debounced burst is on disk,
+#                                  the library opens clean (FR-2.3, NFR-3)
 # -> === smoke phase: 1 ===        empty sidebar -> ⌘N -> type -> autosave hits
 #                                  disk -> retitle renames the file -> an
 #                                  external note reaches the sidebar -> quit
@@ -34,10 +42,12 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> SMOKE result failures=0       (exit status = number of failures)
 ```
 
-`Tools/smoke.sh` runs `build/Filaway.app` three times against a throwaway notes
-root, preferences domain and Application Support (`FILAWAY_NOTES_ROOT`,
+`Tools/smoke.sh` runs `build/Filaway.app` six times against throwaway notes
+roots, one preferences domain and one Application Support (`FILAWAY_NOTES_ROOT`,
 `FILAWAY_DEFAULTS_SUITE`, `FILAWAY_SUPPORT_ROOT`), kills any phase that
-overstays, and never leaves the app running. A single phase directly:
+overstays, and never leaves the app running. `editor`, `search` and
+`kill`/`killcheck` each get their own notes root; `1` and `2` share one so the
+relaunch has state to restore. A single phase directly:
 
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
@@ -48,7 +58,12 @@ The phases drive the real objects — `AppModel`, `NoteStore`, the live
 and state restoration. Add a `check(...)` line for each new UI behaviour that
 cannot be unit-tested: shell behaviour in
 `Sources/FilawayApp/Features/Shell/SmokeDriver.swift`, editor behaviour in
-`Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`.
+`Sources/FilawayApp/Features/Editor/EditorSmokeCheck.swift`, search behaviour in
+`Sources/FilawayApp/Features/Search/SearchSmokeCheck.swift`.
+
+CI runs `swift build`, `swift test`, `swift run filaway-bench keyword --notes
+5000` (the NFR-1 gate: non-zero at p95 ≥ 100 ms), `Tools/make_app.sh` and
+`Tools/smoke.sh`.
 
 ## Layout
 
@@ -58,9 +73,11 @@ Sources/FilawayCore/       # all logic; library; Swift 6 language mode
   Util/Log.swift           # OSLog factory, subsystem com.tejaspanse.filaway
 Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
   Features/Shell/          # AppModel (owns the storage stack), ShellView,
-                           #   toolbar search field, AppSettings, SmokeDriver
+                           #   AppSettings, SmokeDriver
   Features/Sidebar/        # Recents + Library tree (Figure 1, FR-1.2)
   Features/Editor/         # TextKit 2 editor, AutosaveController
+  Features/Search/         # toolbar field, SearchCoordinator, ⌘K results panel
+                           #   (Figure 2b, FR-1.3, FR-5.1/5.2)
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
 Tools/                     # make_app.sh, make_dmg.sh, notarize.sh, smoke.sh
@@ -149,23 +166,57 @@ Rules the layout encodes:
   (`PathRules.maxFolderDepth`), root-level notes below the folders. Context
   menu: New Note, New Folder…, Rename…, Move to…, Show in Finder, Delete (to
   the Trash). Notes drag onto folders.
-- **Toolbar** — sidebar toggle, the search pill (⌘K focuses it; every keystroke
-  goes to `SearchCoordinator.query(_:)`, whose backend M1-12 supplies), New Note
-  (⌘N).
+- **Toolbar** — sidebar toggle, the search pill (⌘K focuses it and selects its
+  text; every keystroke goes to `SearchCoordinator.query(_:)`), New Note (⌘N).
 - System colors and materials only, so light and dark both come for free
   (NFR-6/7). SF Symbols for every glyph; `accessibilityLabel` on every control.
 
+## Search UI (spec Figure 2b, FR-1.3, FR-5.1, FR-5.2)
+
+⌘K's results are a **non-focusable overlay** on the window, centred under the
+toolbar's search field — not an `NSPopover` and not a separate panel. The text
+field keeps first responder for the whole interaction and forwards keys to
+`SearchCoordinator`, which owns `results` *and* `selectedIndex`; the panel is a
+pure function of that state. Full rationale in ADR-025.
+
+- `SearchCoordinator` (`Features/Search/`) is the whole seam: 80 ms debounce,
+  one query in flight, and only the newest *generation* may publish, so a slow
+  query for `cur` can never overwrite a fast one for `curl`. The empty query is
+  a real query — `SearchService.keyword("")` returns Recents, which is what ⌘K
+  shows before anything is typed.
+- Keys: ↑/↓ move (clamped, no wrap), ⏎ opens the selection, Esc closes and
+  returns focus to the editor (a second Esc clears the field), ⌘K focuses the
+  field and selects its text. Every one of those is a method call on a
+  `@MainActor` object, which is what lets the `search` smoke phase drive them
+  with no synthetic key events.
+- A row is title · folder · relative modified time, with the matched span of the
+  snippet in primary bold. Opening a hit selects the note in the sidebar, loads
+  it, then scrolls the editor to `KeywordHit.matchRange` and selects it — via
+  `AppModel.reveal`, which `ShellView` turns into
+  `MarkdownEditorController.scrollTo(range:)`. Hits inside the note already open
+  work the same way. A title-only hit (`matchRange == nil`) opens at the top.
+- **`SearchMode.semantic` is a declared, unimplemented extension point for
+  M3-06.** Nothing in M1 sets it. The answer card and Find/Ask toggle belong at
+  the `// MARK: - Extension point (M3-06)` marker in `SearchResultsPanel`.
+  Keyword search must keep working with no AI and no network at all (FR-5.5).
+
 ## Current state
 
-M1-01 through M1-05 and M1-09 / M1-10 / M1-11 / M1-13 plus the wiring half of
-M1-14: Filaway is a working notes app on `~/Notes`. Two-pane window per Figure 1,
-Recents + Library sidebar, ⌘N, 750 ms autosave with flushes on switch / resign /
-quit, external edits reconciled live (conflict copies announced by a banner),
-window frame, sidebar width, last-open note and folder expansion restored across
-launches. Storage is `FilawayCore/{Storage,Index,Watch}` — see `docs/core-api.md`.
+**M1 is complete.** Filaway is a working notes app on `~/Notes`: two-pane window
+per Figure 1, Recents + Library sidebar, ⌘N, TextKit 2 styled-source editor,
+750 ms autosave with flushes on switch / resign / quit, external edits
+reconciled live (conflict copies announced by a banner), window frame, sidebar
+width, last-open note and folder expansion restored across launches, and ⌘K
+keyword search over FTS5 with open-scrolled-to-match. Storage and search are
+`FilawayCore/{Storage,Index,Watch,Search}` — see `docs/core-api.md`.
 
-Not yet wired: **M1-06 keyword search** (`SearchService`) and **M1-12 search UI**.
-`Sources/FilawayApp/Features/Shell/SearchCoordinator.swift` is the seam — the
-field, ⌘K and the as-you-type call are real; set its `backend` and render
-`results`. The onboarding folder picker is M4-01, so the notes root is `~/Notes`
-(override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a bookmark.
+The M1 Definition-of-Done walk-through, with numbers and the remaining gaps, is
+`docs/verification/M1.md`. The open ones: notarization and the universal build
+are blocked on Developer Program enrolment + Xcode (M4-05); the visual Figure-1/
+Figure-2b and VoiceOver passes need an unlocked screen (M4-06); launch timing at
+5k/20k notes is unmeasured (M4-07).
+
+Next up: **M2** (AI organize) and **M3** (semantic search, which fills
+`SearchMode.semantic`). The onboarding folder picker is M4-01, so the notes root
+is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as a
+bookmark.

@@ -44,6 +44,18 @@ jobs:
       - name: Assemble app bundle
         run: Tools/make_app.sh
 
+      # NFR-1's hard gate, as a command rather than only as a test: the bench
+      # exits non-zero at p95 >= 100 ms.
+      - name: Keyword perf gate (NFR-1)
+        run: swift run filaway-bench keyword --notes 5000
+
+      # The only UI verification available without Xcode (plan §8). Drives the
+      # real AppModel / NoteStore / NSTextView in six phases and exits with the
+      # failure count. Needs a window server; if the runner turns out not to
+      # provide one, drop this step rather than weakening the phases.
+      - name: UI smoke (plan §8)
+        run: Tools/smoke.sh
+
       - name: Upload app bundle
         uses: actions/upload-artifact@v4
         with:
