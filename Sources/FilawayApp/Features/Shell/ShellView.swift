@@ -89,8 +89,9 @@ struct ShellView: View {
                         model.editorTextChanged(text)
                     },
                     onEditorActivity: { activity in
-                        // M2-03 session tracker hooks in here.
                         EditorCallbackLog.record(activity)
+                        // FR-3.1: scrolling and selecting sustain a session.
+                        model.editorActivityHappened(activity)
                     }
                 )
                 // A fresh editor per note: resets scroll, selection and the
@@ -104,6 +105,30 @@ struct ShellView: View {
                 BannerView(banner: banner) { model.dismissBanner() }
                     .padding(.top, 8)
                     .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        // The organization card (Figure 2a) is bottom-trailing so it never
+        // covers the caret or fights the top banner — ADR-036.
+        .overlay(alignment: .bottomTrailing) {
+            if let organize = model.organize {
+                OrganizationCardStack(coordinator: organize)
+                    .sheet(item: Binding(
+                        get: { organize.editingCard },
+                        set: { organize.editingCard = $0 }
+                    )) { card in
+                        EditPlanSheet(
+                            card: card,
+                            library: model.planLibrary,
+                            onApply: { organize.accept(card, editedPlan: $0) },
+                            onCancel: {}
+                        )
+                    }
+                    .sheet(item: Binding(
+                        get: { organize.changesCard },
+                        set: { organize.changesCard = $0 }
+                    )) { card in
+                        ChangesSheetLoader(card: card, model: model, coordinator: organize)
+                    }
             }
         }
         .animation(.easeInOut(duration: 0.18), value: model.banner)
@@ -151,6 +176,13 @@ struct ShellView: View {
             SearchFieldView(coordinator: model.search, isFocused: $searchFocused)
         }
 
+        // FR-6.4: degradation is one quiet pill, never an alert.
+        ToolbarItem(placement: .status) {
+            if let organize = model.organize {
+                AIStatusIndicatorHost(coordinator: organize)
+            }
+        }
+
         ToolbarItem(placement: .primaryAction) {
             Button {
                 model.newNote()
@@ -169,6 +201,41 @@ struct ShellView: View {
         window.setFrameAutosaveName(AppSettings.windowFrameAutosaveName)
         window.tabbingMode = .disallowed
         WindowFlushObserver.shared.observe(window: window, model: model)
+    }
+}
+
+/// Observes the coordinator so the pill redraws when the status moves.
+struct AIStatusIndicatorHost: View {
+    @ObservedObject var coordinator: OrganizeCoordinator
+
+    var body: some View {
+        AIStatusIndicator(
+            status: coordinator.status,
+            queuedCount: coordinator.queuedSessionCount,
+            onOpenSettings: { coordinator.onOpenAISettings?() }
+        )
+    }
+}
+
+/// Loads the diff for a card before showing the sheet — `ActivityLog.diff(for:)`
+/// is a database read, and a sheet body cannot await.
+struct ChangesSheetLoader: View {
+    let card: OrganizeCoordinator.Card
+    @ObservedObject var model: AppModel
+    let coordinator: OrganizeCoordinator
+    @State private var diffs: [NoteDiff] = []
+
+    var body: some View {
+        ViewChangesSheet(
+            card: card,
+            library: model.planLibrary,
+            diffs: diffs,
+            onReveal: { model.select(noteID: $0) }
+        )
+        .task {
+            guard let eventID = card.eventID, let activity = coordinator.activity else { return }
+            diffs = (try? await activity.diff(for: eventID)) ?? []
+        }
     }
 }
 

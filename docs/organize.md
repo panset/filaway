@@ -339,6 +339,87 @@ FILAWAY_AI_MODE=record       swift test --filter "Organize goldens"   # when a k
 
 ---
 
+## The app wiring (M2-09, M2-10, M2-12) — done
+
+`Sources/FilawayApp/Features/Organize/OrganizeCoordinator.swift` is the whole
+seam. `AppModel` owns the storage stack and builds one of these after the first
+paint; nothing in it is on the path to an editable note (NFR-1).
+
+```text
+editor keystroke ─┬─▶ SessionTracker.noteEdited      starts/sustains the session
+                  └─▶ Organizer.noteEdited           FR-3.2's supersede rules
+scroll / selection ─▶ SessionTracker.editorActivity
+note switch ────────▶ SessionTracker.noteSwitched
+⌘-Tab / close / quit ▶ appDidResignActive / windowClosed / appWillTerminate
+
+tracker.events ─▶ flushHook (autosave) ─▶ .ended ─▶ Organizer.sessionEnded
+organizer.events ─▶ @MainActor cards, status pill, banners
+after apply/undo ─▶ LibraryWatcher.reconcile(paths:) ─▶ sidebar, index, editor
+```
+
+| Need | What it is now | Who swaps it |
+|---|---|---|
+| library snapshot + bodies | `OrganizeLibrarySourceLive` (**disk**, not the database) | — |
+| merge candidates | `KeywordCandidateFinder` over `SearchService.keyword` + title overlap | M3-08 → hybrid |
+| baselines | `ActivityLog` (`note_baselines`) | — |
+| apply | `PlanApplier` | — |
+| offline queue | `PendingSessionStoreGRDB` (`pending_sessions`, `v5-pending-sessions`) | — |
+| settings | `OrganizeSettingsSource`, UserDefaults-backed | M2-11 → `AppSettings` |
+| provider | `AIProviderFactory`, `FILAWAY_AI_MODE` defaulting to **`live`** (ADR-041) | — |
+
+Three things are worth knowing because they are easy to get wrong:
+
+* **The snapshot comes from `NoteStore.scan`, not `MetadataStore`.** Preconditions
+  are a compare-and-swap against the bytes the applier is about to check, and the
+  database is updated asynchronously after every save. A snapshot one autosave
+  behind turns a good plan into a spurious `.stale`.
+* **`recoverIncompleteEvents()` runs before the launch `reconcile()`.** A
+  rolled-back apply moves files; the stat-scan has to see the tree afterwards.
+* **The applier's writes never reach the watcher's stream** — they are the
+  store's own operations, which is exactly why autosave does not bounce back as
+  a `.modified`. So the coordinator explicitly calls `reconcile(paths:)` and
+  tells `AppModel` to reload the open note (unless its buffer is dirty, in which
+  case capture wins).
+
+### The card, the sheets and the window (M2-10)
+
+* `OrganizationCardView` / `OrganizationCardStack` — Figure 2a, bottom-trailing,
+  queued, never first responder. Ask: **Accept** (⏎) / **Edit** / **Dismiss**
+  (⎋), waits indefinitely. Auto: **Undo** / **View changes**, fades after 20 s.
+  ADR-042 has the placement rationale.
+* `EditPlanSheet` — include/exclude each action, re-target a folder or a note,
+  fix a proposed title. It can only produce actions the model could have
+  produced. **Apply** goes through `Organizer.accept(_:plan:)`, which
+  re-validates against a fresh snapshot and keeps the original preconditions.
+* `ViewChangesSheet` + `NoteDiffView` — the real unified diff from
+  `ActivityLog.diff(for:)` for an applied event; for a *proposal* there are no
+  images yet (nothing touched the disk), so it shows the plan's actions as a
+  structured preview and says the diff arrives after Accept. Simulating the
+  applier to fake one would be a second implementation of apply.
+* `ActivityWindowView` (Window ▸ Activity, ⌥⌘A) — events newest first with
+  model and prompt version, a diff pane, Undo with the LIFO blocked reason
+  spelled out (`ActivityLog.laterEvent(touching:after:)`), and the raw session
+  text behind a disclosure (FR-4.4). Edit ▸ **Undo Last Organization** is ⌥⌘Z;
+  ⇧⌘Z stays the editor's Redo.
+
+### Degradation (M2-09)
+
+`AIStatusIndicator` in the toolbar: `AI ready` · `AI queued · N` · `AI offline`
+· `Key invalid` · `AI paused` · `AI off`. Clicking it calls
+`onOpenAISettings`, which posts `.filawayOpenAISettings` for M2-11's Settings
+scene. Queued sessions live in `pending_sessions` and are retried on a 60 s
+loop, on `aiStatusChanged(.connected)`, and once at launch. No modal alert
+anywhere, and nothing on this path can block a keystroke.
+
+### Known gap
+
+The organizer calls `PlanApplying.apply(_:)`, which has no room for the session's
+raw text, so **FR-4.4's raw session text is not recorded on the automatic path**
+— `PlanApplier.apply(_:sessionText:)` supports it and `ActivityLog` stores and
+prunes it, but nothing between the tracker and the applier carries the text. The
+Activity window shows the disclosure only when a row has it. Closing this needs
+either a second parameter on the apply contract (ADR-033) or a setter on the log.
+
 ## What the app layer has to wire
 
 1. `SessionTracker` ← editor: `onTextChange` → `noteEdited`, `onEditorActivity`
@@ -359,9 +440,8 @@ FILAWAY_AI_MODE=record       swift test --filter "Organize goldens"   # when a k
    (bodies).
 6. The `PlanApplier` actor as the `PlanApplying`, and the `ActivityLog` (or the
    `DatabaseBaselineStore` façade over it) as the `BaselineStore` — both real
-   since M2-07/M2-08, over `note_baselines` in `filaway.sqlite`.
-   `PendingSessionStore` is still in-memory (`InMemoryPendingSessionStore`),
-   which is correct, just forgetful, until M2-09.
+   since M2-07/M2-08, over `note_baselines` in `filaway.sqlite`. The
+   `PendingSessionStore` is `PendingSessionStoreGRDB` since M2-09.
 7. `organizer.aiStatusChanged(_:)` whenever the status pill changes, and
    `setSettings` whenever Settings does.
 8. The card (M2-10) from `.proposed` / `.applied`, taken down on `.withdrawn`

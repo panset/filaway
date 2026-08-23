@@ -81,6 +81,11 @@ public actor MetadataStore {
         try FileManager.default.createDirectory(at: library.supportDirectory, withIntermediateDirectories: true)
         var configuration = Configuration()
         configuration.foreignKeysEnabled = true
+        // Three connections share `filaway.sqlite` (this one, ``ActivityLog``'s
+        // and ``PendingSessionStoreGRDB``'s). GRDB's default busy mode is
+        // `.immediateError`, which would surface normal contention as an error
+        // — ADR-027 noted this as the one-line change the integration pass owes.
+        configuration.busyMode = .timeout(5)
         dbQueue = try DatabaseQueue(path: library.databaseURL.path, configuration: configuration)
         try Self.prepare(dbQueue, library: library)
     }
@@ -91,6 +96,11 @@ public actor MetadataStore {
         self.textLoader = textLoader ?? .reading(from: library)
         var configuration = Configuration()
         configuration.foreignKeysEnabled = true
+        // Three connections share `filaway.sqlite` (this one, ``ActivityLog``'s
+        // and ``PendingSessionStoreGRDB``'s). GRDB's default busy mode is
+        // `.immediateError`, which would surface normal contention as an error
+        // — ADR-027 noted this as the one-line change the integration pass owes.
+        configuration.busyMode = .timeout(5)
         dbQueue = try DatabaseQueue(configuration: configuration)
         try Self.prepare(dbQueue, library: library)
     }
