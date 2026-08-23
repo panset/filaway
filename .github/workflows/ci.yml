@@ -32,6 +32,10 @@ jobs:
       - name: Build
         run: swift build
 
+      # The churn, scale (NFR-2) and live-FSEvents suites run here too — the
+      # whole suite is a few seconds. Set FILAWAY_SKIP_SLOW_TESTS=1 to skip all
+      # three, or FILAWAY_SKIP_FSEVENTS_TESTS=1 for just the timing-sensitive
+      # stream test, if a loaded runner turns out to be flaky.
       - name: Test
         run: swift test
 

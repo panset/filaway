@@ -184,3 +184,168 @@ measured at 0.2 ms on 1 MB in release).
   headings, reference links, HTML blocks and indented (4-space) code blocks are
   not styled. `swift-markdown` remains the source of truth for structure
   (chunking, code extraction) per plan §1.
+
+## ADR-006 — Front-matter is a hand-rolled, lossless, minimal YAML subset
+
+**Date:** 2026-08-22 · **Task:** M1-03 · **Status:** accepted
+
+**Context.** DS-2 lets metadata live in front-matter *or* a sidecar; plan §1
+picks the hybrid (user-meaningful fields in front-matter, derived/AI fields in
+SQLite). The tolerance requirement is the hard part: a note may already carry
+Obsidian, Jekyll or a colleague's script's front-matter, and Filaway must not
+reformat, reorder or drop any of it. A real YAML library (Yams) would parse the
+block into a dictionary and re-emit it in *its* style, silently rewriting the
+user's file — and it would be a new dependency for three keys.
+
+**Decision.** Hand-roll the codec (`FrontMatter`, `MarkdownDocument`, ~250 LOC).
+The block is modelled as an ordered list of entries, each holding a key and its
+**raw lines with their original terminators**. Filaway understands `id`,
+`created` and `tags`; every other entry is opaque and re-emitted verbatim.
+Setting a known key to the value it already holds is a no-op, so saving a note
+whose metadata did not change does not perturb its bytes. Parsing never throws:
+an unterminated or unparseable block is simply body text.
+
+The invariant, asserted by a 400-case fuzz test:
+`MarkdownDocument.parse(text).serialized() == text` for every input — LF, CRLF,
+mixed line endings, a UTF-8 BOM, a `...` terminator, no block at all.
+
+ISO-8601 is likewise hand-rolled (`ISO8601`): `ISO8601DateFormatter` is not
+`Sendable`, and allocating one per note is measurable across a 5,000-note scan.
+The formatter is checked against Foundation's over a ±60-year range.
+
+**Consequences.**
+- No Yams dependency; no reformatting of anyone's front-matter.
+- The subset is deliberately narrow. Flow mappings, anchors and multi-line block
+  scalars parse as opaque lines — correct, but Filaway cannot *read* values in
+  those forms. If a later milestone needs to read a foreign key, extend the value
+  parser, not the block model.
+- `tags` accepts block sequences, flow sequences and a bare comma-separated
+  scalar on read, and always writes a block sequence.
+
+---
+
+## ADR-007 — Notes without an `id` get a deterministic, path-derived identity
+
+**Date:** 2026-08-22 · **Task:** M1-05 · **Status:** accepted
+
+**Context.** DS-2 writes `id` only when *the app* saves a note, so an adopted
+folder (FR-7.1) is full of notes with no identity — but the `notes` table needs a
+primary key, and DS-4 move detection is defined in terms of `id`. Minting a fresh
+UUID on each scan would make every scan look like a library of new notes.
+
+**Decision.** `NoteID.derived(fromRelativePath:)` hashes the relative path into a
+version-8 UUID. A scan of an id-less file yields the same identity twice, and
+`isDerived(fromRelativePath:)` recomputes it, which tells the reconciler "this
+file has never been saved by Filaway". Where a derived identity meets a database
+row for the same path, the database's identity wins, so an external edit never
+re-keys a note. Move detection falls back from `id` to content hash for these
+notes. A file that *does* carry an `id` is authoritative — except when that id is
+already claimed by a live path, which means the user duplicated a note: the copy
+gets a fresh identity so the library never holds two notes with one id.
+
+**Consequences.**
+- An external rename *and* edit of an id-less note in one go is indistinguishable
+  from delete + create, and is reported that way. It loses `last_opened` only.
+  Once the app saves a note it carries an `id` and is immune.
+- Derived identities are stable but not globally unique across libraries; that is
+  fine — they are scoped to one database, and the first app save replaces them.
+
+---
+
+## ADR-008 — Atomic writes stage outside the notes root; deletes never hard-delete
+
+**Date:** 2026-08-22 · **Task:** M1-03 · **Status:** accepted
+
+**Context.** DS-1 says nothing but `.md` files and folders lives in the user's
+tree, and NFR-3 wants crash safety. `Data.write(options: .atomic)` satisfies the
+second but not the first: Foundation stages its temp file *in the destination
+directory*, so a Finder window open on `~/Notes` would flicker dotfiles, and any
+crash mid-write leaves one behind. NFR-5 also forbids assuming the root is on the
+boot volume, so a fixed `/tmp` staging area is not safe either (cross-volume
+renames are not atomic).
+
+**Decision.** Stage in an OS-provided `.itemReplacementDirectory` obtained with
+`appropriateFor:` the destination — guaranteed to be on the same volume — then
+`replaceItemAt` (or `moveItem` when the file is new). Deletes go to the macOS
+Trash via `FileManager.trashItem`, which returns the item's new URL for undo. On
+a volume with no Trash (some network shares) the fallback is a timestamped folder
+under `Library.recoveryBinURL`, never `removeItem`.
+
+**Consequences.**
+- `deleteNote` / `deleteFolder` return a `URL`; the UI can say where the note
+  went, and M2-08's Undo has somewhere to look.
+- Tests assert both halves: `strayEntries()` stays empty across 20 saves, and the
+  trashed file's bytes are intact.
+
+---
+
+## ADR-009 — Echo suppression is by (path, content hash), consumed once
+
+**Date:** 2026-08-22 · **Task:** M1-05 · **Status:** accepted
+
+**Context.** FSEvents cannot distinguish Filaway's own autosave from the user
+editing the same file in another app. Without suppression, every autosave would
+bounce back into the editor as an external `.modified`, and the 750 ms autosave
+debounce (FR-2.3) would produce a steady stream of spurious changes.
+
+**Decision.** `NoteStore` records every write, move and delete in a bounded,
+self-pruning `OwnOperationLedger` (path, content hash, mtime, timestamp; 30 s
+TTL, 512 entries). The watcher *consumes* a matching record instead of emitting
+the change — matching on path **and** content hash for writes, so a genuine
+external edit that lands after our own write is not swallowed. Suppressed changes
+are still applied to the database; only the emission is skipped.
+
+**Consequences.**
+- The UI needs no filtering of its own: anything on the stream is external.
+- A record expires after 30 s, so a crash mid-reconcile cannot suppress a real
+  change indefinitely.
+- Two different apps writing byte-identical content within the TTL would be
+  mistaken for an echo. Harmless: the file and the database agree either way.
+
+---
+
+## ADR-010 — The external-edit conflict rule is an API the UI calls, not a watcher heuristic
+
+**Date:** 2026-08-22 · **Task:** M1-05 · **Status:** accepted
+
+**Context.** Plan §1 (DS-4): when a file changes on disk while the app holds
+unsaved edits, keep the in-app buffer and preserve the external version as
+`<Title> (external edit <timestamp>).md`. The buffer lives in the editor, in the
+app target — `FilawayCore` cannot see it and must not try to guess.
+
+**Decision.** `LibraryWatcher.resolveExternalChange(noteID:inMemoryText:)` is
+called by the autosave layer when it knows its buffer is dirty. It writes the
+external bytes to the conflict copy **with a fresh `id`** (otherwise the library
+would hold two notes with one identity), saves the buffer over the original path,
+emits `.conflict` plus an `.added` for the copy, and updates the database. It is
+a no-op when the buffer matches the file, and it simply restores the buffer when
+the file was externally deleted.
+
+**Consequences.**
+- M1-11 (autosave) owns the "am I dirty?" decision and must call this on a
+  `.modified`/`.removed` for the open note.
+- Repeated conflicts in the same minute get ` 2`, ` 3` suffixes from the normal
+  collision ladder, so nothing is overwritten.
+- The timestamp is `yyyy-MM-dd HHmm` in the *local* time zone, which is what the
+  user sees in Finder.
+
+---
+
+## ADR-011 — Corpus generation lives in `FilawayCore`, not the bench target
+
+**Date:** 2026-08-22 · **Task:** M1-05 / M1-07 · **Status:** accepted (revisit at M1-07)
+
+**Context.** Plan §4 puts the corpus generator in `filaway-bench`, but a SwiftPM
+executable target cannot be imported by a test target, and the NFR-2 scale test
+needs exactly the same corpus as the benchmark for the numbers to be comparable.
+
+**Decision.** `SyntheticCorpus.generate(noteCount:into:…)` lives in
+`FilawayCore/Util`, seeded by a deterministic SplitMix64 PRNG. `filaway-bench
+scan` and `ScaleTests` both call it.
+
+**Consequences.**
+- A little development-support code ships in the library. It is ~120 lines, pure
+  Foundation, and M1-07 extends it for the keyword and retrieval corpora.
+- Release-build numbers (M-series, 2026-08): 5,000 notes / 48 MB scan 413 ms +
+  rebuild 191 ms; 20,000 notes 1.62 s + 751 ms. `ScaleTests` gates the 5,000-note
+  case at 3 s on a debug build, where it currently runs in ~1.1 s.

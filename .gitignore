@@ -10,3 +10,4 @@ DerivedData/
 /Tools/venv/
 __pycache__/
 .env
+.claude/worktrees/
