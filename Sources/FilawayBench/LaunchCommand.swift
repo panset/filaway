@@ -61,6 +61,12 @@ struct LaunchCommand: AsyncParsableCommand {
     @Option(help: "Fail when the p50 to the first sidebar paint reaches this many ms (NFR-1 is 2000).")
     var budgetMillis = 2_000.0
 
+    @Option(help: """
+        Milliseconds the headless driver waits for a scene before opening the library itself. \
+        Subtracted from the stages that follow it, and only when no window arrived.
+        """)
+    var driverSettleMillis = 1_000.0
+
     @Flag(help: "Keep a generated corpus and print its path.")
     var keep = false
 
@@ -111,6 +117,23 @@ struct LaunchCommand: AsyncParsableCommand {
         let suite = "com.tejaspanse.filaway.launchbench.\(UUID().uuidString.prefix(8))"
         defer { _ = try? shell("/usr/bin/defaults", ["delete", suite]) }
 
+        if warm {
+            // A warm launch is one whose database already holds the library —
+            // every launch after the first. The timed runs stop the moment the
+            // sidebar paints, long before the launch reconcile has written
+            // 20,000 rows, so the database is primed here instead, through the
+            // same `Library` the app computes (`supportRoot/<libraryKey>`) and
+            // the same scan and rebuild the app's reconcile performs.
+            let library = Library(root: notesRoot, supportRoot: support)
+            let start = Date()
+            let snapshot = try await NoteStore(library: library).scan()
+            let metadata = try MetadataStore(library: library)
+            try await metadata.rebuild(from: snapshot)
+            print("prime:    \(snapshot.notes.count) notes scanned and indexed in "
+                + "\(format(Date().timeIntervalSince(start)))")
+            print("")
+        }
+
         var perStage: [String: [Double]] = [:]
         var sceneArrived = false
         for run in 1 ... max(1, runs) {
@@ -128,6 +151,24 @@ struct LaunchCommand: AsyncParsableCommand {
                 .compactMap { label in stages[label].map { "\(label) \(Int($0.rounded())) ms" } }
                 .joined(separator: " · ")
             print("run \(run):    \(rendered)")
+        }
+
+        // `SmokeDriver.start` sleeps for a fixed second before it decides the
+        // scene is never coming and opens the library itself, so on a locked
+        // screen every stage from `dbOpen` on carries that second. It is a
+        // constant of the harness, not of the app, and it is subtracted here
+        // rather than reported as if the database took a second to open. On an
+        // unlocked screen SwiftUI calls `bootstrap()` itself and nothing is
+        // adjusted.
+        let settle = sceneArrived ? 0 : driverSettleMillis
+        let adjusted = Set(["dbOpen", "libraryOpen", "editorReady"])
+        if settle > 0 {
+            print("")
+            print("adjust:   −\(Int(settle)) ms from dbOpen/libraryOpen/editorReady — "
+                + "the driver's fixed wait for a scene that never arrived")
+        }
+        for label in adjusted where settle > 0 {
+            perStage[label] = perStage[label]?.map { max(0, $0 - settle) }
         }
 
         print("")
@@ -175,8 +216,19 @@ struct LaunchCommand: AsyncParsableCommand {
     private func measure(
         executable: URL, notesRoot: URL, support: URL, suite: String
     ) async throws -> [String: Double] {
+        // A launch bench kills the app it measures, and macOS remembers that.
+        // After a few runs `NSPersistentUIRestorer` decides the app has a crash
+        // history and opens "Do you want to try to reopen its windows?" — an
+        // `NSAlert` run *before* `applicationDidFinishLaunching`, so the app
+        // prints nothing at all and every later run measures a modal dialog.
+        // On a locked screen the dialog is invisible and the process simply
+        // hangs. The argument domain beats every other, and removing the saved
+        // state removes the crash history the prompt is counting.
+        try? FileManager.default.removeItem(at: Self.savedStateURL)
+
         let process = Process()
         process.executableURL = executable
+        process.arguments = ["-ApplePersistenceIgnoreState", "YES"]
         var environment = ProcessInfo.processInfo.environment
         environment["FILAWAY_TIMING"] = "1"
         environment["FILAWAY_NOTES_ROOT"] = notesRoot.path
@@ -217,14 +269,22 @@ struct LaunchCommand: AsyncParsableCommand {
             if stages["libraryOpen"] != nil, stages["shellAppeared"] == nil { break }
         }
 
-        process.terminate()
-        // A terminate the app answers with its FR-2.3 flush; do not wait long.
-        let killDeadline = Date().addingTimeInterval(10)
-        while process.isRunning, Date() < killDeadline { usleep(50_000) }
-        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        // SIGKILL, not `terminate()`. This process exists to print six lines;
+        // it has an empty editor, nothing dirty and nothing to flush, and a
+        // SIGTERM to an app sitting in a headless smoke phase is not reliably
+        // answered — the launches that were merely asked politely stayed alive
+        // and the next run then measured a machine with a stray app on it.
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
         try? handle.close()
         return stages
     }
+
+    /// Where AppKit keeps the window state — and the crash history — of the
+    /// bundle id `Tools/make_app.sh` writes into `Info.plist`.
+    static let savedStateURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Saved Application State", isDirectory: true)
+        .appendingPathComponent("com.tejaspanse.filaway.savedState", isDirectory: true)
 
     /// `"[timing] libraryOpen          +404 ms"` → `("libraryOpen", 404)`.
     static func parse(_ line: String) -> (label: String, milliseconds: Double)? {
