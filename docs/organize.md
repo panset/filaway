@@ -32,7 +32,7 @@ to organize.
 
 ```swift
 let tracker = SessionTracker(configuration: SessionConfiguration(idleInterval: 180))
-await tracker.setFlushHook { await autosave.flush() }
+await tracker.setFlushHook { await autosave.flushNow() }
 await tracker.noteEdited(noteID)                        // from onTextChange
 await tracker.editorActivity(noteID, kind: .scroll)     // from onEditorActivity
 await tracker.appDidResignActive()
@@ -315,7 +315,15 @@ FILAWAY_AI_MODE=record       swift test --filter "Organize goldens"   # when a k
 1. `SessionTracker` ← editor: `onTextChange` → `noteEdited`, `onEditorActivity`
    → `editorActivity`, plus `noteSwitched`, `appDidResignActive`,
    `appDidBecomeActive`, `windowClosed`, `appWillTerminate`.
-2. `tracker.setFlushHook { await autosave.flush() }` — before anything else.
+
+   `FilawayApp` has its own AppKit-side `EditorActivity` enum; map it to
+   `FilawayCore.EditorActivityKind` — `.typing → .keystroke`,
+   `.selection → .selection`, `.scroll → .scroll`. (A `.keystroke` and a
+   `noteEdited` are the same thing to the tracker; only the edit path marks the
+   note as touched.)
+2. `tracker.setFlushHook { await autosave.flushNow() }` — before anything
+   else. `AutosaveController.flushNow()` (trigger `.manual`) exists for exactly
+   this.
 3. `for await case .ended(let session) in tracker.events { await organizer.sessionEnded(session) }`.
 4. `organizer.noteEdited(noteID)` on every edit, for the supersede rules.
 5. An `OrganizeLibrarySource` over `MetadataStore` (snapshot) and `NoteStore`
