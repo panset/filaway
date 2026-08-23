@@ -41,6 +41,7 @@ enum SmokeDriver {
             switch phase {
             case "editor": await runEditorPhase()
             case "search": await runSearchPhase()
+            case "semantic": await runSemanticPhase()
             case "kill": await runKillPhase()
             case "killcheck": await runKillCheckPhase()
             case "2": await runRelaunchPhase()
@@ -250,6 +251,16 @@ enum SmokeDriver {
         header()
         failures += await SearchSmokeCheck.run()
         print("SMOKE phase=search result failures=\(failures)")
+        finish()
+    }
+
+    // MARK: - Phase: semantic (M3-06)
+
+    /// ⌘K → Ask: the answer card, Copy, open-scrolled-to-chunk, the temporal
+    /// filter and the offline notice, on a corpus seeded with fixed mtimes.
+    private static func runSemanticPhase() async {
+        header()
+        failures += await SemanticSmokeCheck.run()
         finish()
     }
 

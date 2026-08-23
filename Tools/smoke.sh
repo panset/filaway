@@ -10,6 +10,9 @@
 #   search  the M1-12 ⌘K checks on a three-note corpus seeded *before* launch:
 #           as-you-type hits, ↑/↓/⏎/Esc, open-scrolled-to-match, fuzzy titles,
 #           recents on an empty query
+#   semantic the M3-06 ⌘K Ask checks on the same corpus with fixed mtimes:
+#           ⏎ → answer card, Copy, open-scrolled-to-chunk, the temporal filter
+#           and the offline notice
 #   kill    type → wait out the 750 ms debounce → type again → the script sends
 #           SIGKILL (no terminate handler, no flush)
 #   killcheck relaunch after the SIGKILL: the debounced burst is on disk and the
@@ -44,6 +47,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/filaway-smoke-XXXXXX")"
 ROOT="$WORK/Notes"
 EDITOR_ROOT="$WORK/EditorNotes"
 SEARCH_ROOT="$WORK/SearchNotes"
+SEMANTIC_ROOT="$WORK/SemanticNotes"
 KILL_ROOT="$WORK/KillNotes"
 SETTINGS_ROOT="$WORK/SettingsNotes"
 SUPPORT="$WORK/Support"
@@ -51,7 +55,7 @@ SUITE="com.tejaspanse.filaway.smoke.$STAMP"
 # The settings phases need their own defaults domain: they write preferences the
 # capture phases must not inherit, and phase `settings2` reads them back.
 SETTINGS_SUITE="com.tejaspanse.filaway.smoke.settings.$STAMP"
-mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT"
+mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" "$SETTINGS_ROOT"
 
 # Three notes on disk before the app ever runs, so the search phase also proves
 # a cold launch indexes a library Filaway has never seen. Titles and the tail
@@ -96,6 +100,19 @@ seed_search_corpus() {
 }
 seed_search_corpus "$SEARCH_ROOT"
 
+# The semantic phase reuses the same three notes, then pins their modification
+# times so FR-5.3's "two days ago" has exactly one note to find. Titles, the
+# command and the ages are asserted in Features/Search/SemanticSmokeCheck.swift
+# — keep in step.
+seed_semantic_corpus() {
+  local root="$1"
+  seed_search_corpus "$root"
+  touch -t "$(date -v-10d +%Y%m%d%H%M)" "$root/Commands/Staging docs.md"
+  touch -t "$(date -v-2d  +%Y%m%d%H%M)" "$root/Auth API debug.md"
+  touch -t "$(date -v-20d +%Y%m%d%H%M)" "$root/Docker cheats.md"
+}
+seed_semantic_corpus "$SEMANTIC_ROOT"
+
 failures=0
 app_pid=""
 
@@ -121,6 +138,7 @@ run_phase() {
   local root="$ROOT" suite="$SUITE"
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
+  [ "$phase" = "semantic" ] && root="$SEMANTIC_ROOT"
   [ "$phase" = "killcheck" ] && root="$KILL_ROOT"
   case "$phase" in
     settings|settings2) root="$SETTINGS_ROOT"; suite="$SETTINGS_SUITE" ;;
@@ -131,6 +149,7 @@ run_phase() {
   FILAWAY_NOTES_ROOT="$root" \
   FILAWAY_SUPPORT_ROOT="$SUPPORT" \
   FILAWAY_DEFAULTS_SUITE="$suite" \
+  FILAWAY_AI_MODE="${FILAWAY_AI_MODE:-replay}" \
     "$APP" 2>&1 &
   app_pid=$!
 
@@ -197,6 +216,9 @@ run_phase 1 90
 run_phase 2 60
 run_phase settings 90
 run_phase settings2 60
+# Last: the embedder compiles the bundled Core ML package on first use, which
+# can take a few seconds on a cold Application Support.
+run_phase semantic 240
 
 echo
 echo "SMOKE result failures=$failures"
