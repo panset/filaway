@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Developer ID build (M4-05).
+
+  Deliberately almost empty. What is *not* here matters more than what is:
+
+  * `com.apple.security.app-sandbox` is false, and stated explicitly rather than
+    omitted. Spec §3 ships outside the App Store precisely so the app can read
+    and write an arbitrary user-chosen notes folder with plain POSIX calls and
+    hand those paths to Finder; a sandbox would force security-scoped bookmarks
+    on every note. This also means Sparkle needs no XPC services and no
+    `SUEnableInstallerLauncherService` / `SUEnableDownloaderService` Info.plist
+    keys — `Tools/make_app.sh` strips `Sparkle.framework/Versions/B/XPCServices`
+    for exactly that reason (ADR-045).
+
+  * No `com.apple.security.cs.allow-unsigned-executable-memory` and no
+    `com.apple.security.cs.allow-jit`. Checked against what the app actually
+    does: `FilawayCore/Embeddings` calls `MLModel.compileModel(at:)` at first
+    launch and then `MLModel(contentsOf:)` with `MLComputeUnits.all`. Core ML
+    compilation runs out of process in the system's own compiler service and the
+    compiled `.mlmodelc` it loads back is data, not code, so neither the JIT nor
+    the unsigned-memory exception applies. Add one only if a notarized build is
+    observed to crash in Espresso/ANE — never speculatively, since both widen
+    the attack surface a hardened runtime exists to narrow.
+
+  * No `com.apple.security.cs.disable-library-validation`. Every bundled
+    executable — the app, Sparkle.framework, Autoupdate, Updater.app — is signed
+    by the same Developer ID in one inner-out pass, so library validation is
+    satisfied without being disabled.
+
+  * No Keychain access group. Outside the sandbox, `AIConnectionManager`'s
+    Keychain items are reachable without an entitlement; adding a group would
+    only make the items harder to migrate later.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

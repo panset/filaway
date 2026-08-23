@@ -1449,3 +1449,171 @@ fixture, `122cfeeded98ffbb.json`.
   not `AppliedPlan.summary` — the latter is the applier's account of what it did
   ("Moved a section from Scratch."), where FR-4.2 asks for the model's
   plain-language sentence.
+
+---
+
+## ADR-043 — Sparkle comes from SPM, and it brings its own command-line tools
+
+**Date:** 2026-08-23 · **Task:** M4-04 · **Status:** accepted
+
+**Context.** Plan §1 picks Sparkle 2 via SPM. The risk was that it would not
+resolve on this machine at all: there is no Xcode, only the Command Line Tools
+(Swift 6.0.3), and GRDB already had to be pinned below 7.9.0 because its
+manifest declares swift-tools-version 6.1 (ADR-003). The brief allowed a
+fallback of downloading the release xcframework into `Tools/sparkle/` and
+wiring it up as a local `binaryTarget`.
+
+**Decision.** Plain SPM: `.package(url: "…/sparkle-project/Sparkle", from:
+"2.9.0")`, resolved at 2.9.6. The fallback is not needed. Sparkle's own manifest
+is **swift-tools-version 5.3** — far below anything 6.0.3 objects to — and its
+single target is a `binaryTarget` pointing at a checksummed
+`Sparkle-for-Swift-Package-Manager.zip` on the GitHub release, containing a
+prebuilt `Sparkle.xcframework` with a `macos-arm64_x86_64` slice. Nothing has to
+be compiled, so the toolchain's age is irrelevant. Verified by building and
+linking `SPUStandardUpdaterController` before touching the real package.
+
+The second, more useful discovery: that zip is the *whole* Sparkle
+distribution, so `swift build` also unpacks
+`.build/artifacts/sparkle/Sparkle/bin/{generate_keys,sign_update,generate_appcast,BinaryDelta}`.
+`Tools/lib.sh` locates them there. There is no separate download step, no
+`Tools/sparkle/bin` to gitignore, and CI gets the tools from the same
+`swift build` it already runs.
+
+**Consequences.**
+- `swift build` now downloads a ~32 MB binary artifact on a cold cache. It is
+  cached by `Package.resolved` hash in both workflows.
+- The framework is universal already, so embedding it does not constrain the
+  app's own architecture — only `make_app.sh`'s build flags do.
+- Sparkle links into `FilawayApp` only. `FilawayCore` stays UI-free and
+  Sparkle-free, so `swift test` is unaffected.
+- If a future Sparkle raises its tools-version above the local toolchain, the
+  documented fallback (download the xcframework, local `binaryTarget`) is still
+  open; pin the last working tag rather than vendoring in a hurry.
+
+---
+
+## ADR-044 — "Updates not configured" is a real implementation, not an error path
+
+**Date:** 2026-08-23 · **Task:** M4-04 · **Status:** accepted
+
+**Context.** Sparkle needs `SUFeedURL` and `SUPublicEDKey` in the Info.plist.
+Neither exists on this machine and neither will until the user generates keys
+and publishes an appcast (plan §8). Meanwhile every `make app`, every CI run and
+every one of the six smoke phases launches the app. `SPUStandardUpdaterController`
+with no feed logs an error and leaves an updater that can never succeed, so the
+unconfigured build cannot simply construct one and hope.
+
+**Decision.** A two-line protocol, `UpdaterProviding`, with two real
+implementations: `SparkleUpdaterProvider` wrapping
+`SPUStandardUpdaterController`, and `UnconfiguredUpdaterProvider` whose
+`unavailableReason` is `"Updates not configured in this build"`.
+`UpdaterController` reads the Info.plist — both keys present, non-empty, and not
+an unsubstituted `@…` placeholder — and picks one. The menu item is disabled
+with that reason as its tooltip.
+
+The provider is built **lazily, and never during launch**. SwiftUI evaluates
+`commands` while the first window is coming up, which is precisely the interval
+NFR-1 budgets for "cold launch to editable"; constructing Sparkle's controller
+there would put its bundle and Keychain work on the critical path for no
+benefit, since nothing can be checked before the app is running anyway. The
+menu item reads only the plist; the controller appears on
+`didFinishLaunching`, or on the first click, whichever comes first.
+
+`startIfPossible()` is additionally a no-op under `FILAWAY_SMOKE`: a smoke phase
+must never reach the network, and `Tools/smoke.sh` launches the app six times in
+a row, which would otherwise look like six update checks.
+
+**Consequences.**
+- The app-side footprint is one new file plus one line
+  (`UpdaterCommands()`) in `FilawayApp.swift` — `AppDelegate` is untouched,
+  because `UpdaterController` observes `didFinishLaunching` itself.
+- `make app` on a machine with no Sparkle key produces a working app with a
+  disabled, self-explaining menu item rather than a broken updater.
+- The seam is the natural place for a fake in a future test; nothing about
+  `UpdaterProviding` assumes Sparkle.
+
+---
+
+## ADR-045 — Not sandboxed, so Sparkle's XPC services are stripped
+
+**Date:** 2026-08-23 · **Task:** M4-04 / M4-05 · **Status:** accepted
+
+**Context.** `Sparkle.framework` ships `XPCServices/Installer.xpc` and
+`XPCServices/Downloader.xpc`. They exist so a **sandboxed** app can still
+install an update and reach the network, and they are activated by the
+`SUEnableInstallerLauncherService` / `SUEnableDownloaderService` Info.plist
+keys. Filaway is deliberately not sandboxed: spec §3 ships outside the App Store
+so the app can read and write an arbitrary user-chosen notes folder with plain
+POSIX calls, which a sandbox would turn into security-scoped bookmarks on every
+note.
+
+**Decision.** `Tools/make_app.sh` deletes `XPCServices` (and the framework's
+`Headers`, `PrivateHeaders` and `Modules`, which are build-time artefacts) after
+`ditto`-ing the framework into `Contents/Frameworks`, and the two Info.plist
+keys stay unset — which is what Sparkle's sandboxing guide prescribes for a
+non-sandboxed app. `Tools/Filaway.entitlements` states
+`com.apple.security.app-sandbox = false` explicitly rather than omitting it, so
+the reasoning is visible at the point of decision.
+
+The entitlements file is otherwise close to empty, and deliberately so.
+Specifically **no** `allow-unsigned-executable-memory` and no `allow-jit`:
+`FilawayCore/Embeddings` calls `MLModel.compileModel(at:)` at first launch and
+then `MLModel(contentsOf:)`, and Core ML compilation runs out of process in the
+system's compiler service while the compiled `.mlmodelc` it loads back is data,
+not code. Neither exception applies. Also no
+`disable-library-validation`: every bundled executable — the app,
+`Sparkle.framework`, `Autoupdate`, `Updater.app` — is signed by the same
+Developer ID in one inner-out pass, so library validation is satisfied rather
+than switched off.
+
+**Consequences.**
+- Signing is explicit and inner-out (`Autoupdate`, `Updater.app`, the framework,
+  then the app), never `codesign --deep`, which is deprecated and cannot apply
+  entitlements to nested code.
+- Ad-hoc builds are signed **without** `--options runtime`. An ad-hoc signature
+  carries no team identifier, so a hardened ad-hoc app would fail library
+  validation against the equally ad-hoc `Sparkle.framework` and refuse to
+  launch. Hardened runtime switches on with a real `$DEVELOPER_ID`.
+- The app binary needs an `@executable_path/../Frameworks` rpath that SwiftPM
+  does not emit (it gives only `@loader_path`); `make_app.sh` adds it with
+  `install_name_tool` and drops the Command Line Tools' developer-frameworks
+  rpath. `ci.yml` asserts `otool -L` still resolves Sparkle, because this breaks
+  silently and only at launch.
+- Should Filaway ever be sandboxed, this is the ADR to reverse: restore
+  `XPCServices`, sign each `.xpc` with its own entitlements, and set both keys.
+
+---
+
+## ADR-046 — CFBundleVersion is the commit count, and the appcast is signed per tag
+
+**Date:** 2026-08-23 · **Task:** M4-05 · **Status:** accepted
+
+**Context.** Sparkle decides "is this newer?" by comparing `CFBundleVersion`,
+not `CFBundleShortVersionString`. It has to increase monotonically and never
+repeat. The marketing version fails both — 0.1.0 can plausibly ship twice — and
+a timestamp is not reproducible from a checkout.
+
+**Decision.** `CFBundleShortVersionString` comes from `$FILAWAY_VERSION`, else
+an exact `v*` tag on HEAD, else the `VERSION` file (a dirty tree or a commit
+past the tag falls through, so a local build never claims to be the tagged
+release). `CFBundleVersion` is `git rev-list --count HEAD`.
+
+GitHub Releases put assets under `…/releases/download/<tag>/`, which is a
+different prefix for every release, while `generate_appcast` takes one
+`--download-url-prefix` per run. `Tools/sparkle/make_appcast.sh` therefore
+passes *this* tag's prefix each time: the tool applies it only to new items and
+leaves existing entries' URLs alone, which is exactly the required behaviour.
+`build/releases/` accumulates recent DMGs so binary deltas can be built against
+them; `release.yml` re-downloads the last three releases' assets for that.
+
+**Consequences.**
+- A shallow clone produces the wrong build number, so `release.yml` uses
+  `fetch-depth: 0`.
+- Two silent failure modes were found by building it both ways, and are now
+  asserted in CI and documented in `docs/release.md`:
+  `generate_appcast` writes `sparkle:edSignature` **only** when the archived
+  app declares `SUPublicEDKey` (otherwise the entry is silently unsigned and
+  every client rejects it), and it stamps `sparkle:hardwareRequirements` from
+  the slices in the archive, so an arm64-only release is never offered to Intel
+  Macs at all.
+- `build/releases/` is gitignored: the DMGs live on the GitHub Release.

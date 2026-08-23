@@ -40,6 +40,7 @@ struct AppCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        UpdaterCommands()  // "Check for Updates…" under About Filaway (M4-04)
         // FR-4.3. **⌥⌘Z, not ⇧⌘Z**: ⇧⌘Z is Redo in every macOS text view,
         // including Filaway's own editor, and taking it would make the editor
         // lie. ⌥⌘Z is free, and reads as "undo, but the bigger one".

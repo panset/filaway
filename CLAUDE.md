@@ -13,11 +13,13 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make build` | `swift build` (debug, all targets) |
 | `make test` | `swift test` — **must be green before any task is reported done** |
 | `make bench` | Runs `filaway-bench` (pass `ARGS="keyword --notes 5000"`) |
-| `make app` | Release build → `build/Filaway.app`, ad-hoc signed |
+| `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
-| `make dmg` | `build/Filaway.dmg` (create-dmg, hdiutil fallback) |
-| `make notarize` | Developer ID sign + notarize + staple (currently BLOCKED, see below) |
-| `make release` | app → dmg → notarize |
+| `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
+| `make notarize` | Developer ID sign + notarize + staple + `spctl` (currently BLOCKED, see below) |
+| `make sparkle-keys` | Create/print the EdDSA key pair Sparkle signs updates with |
+| `make appcast` | `build/releases/appcast.xml`, EdDSA-signed |
+| `make release VERSION=x.y.z` | test → app → dmg → notarize → appcast → GitHub Release (`DRY_RUN=1` publishes nothing) |
 | `make clean` | Removes `.build/` and `build/` |
 
 Headless UI smoke tests (no Xcode/XCTest needed, no synthetic key events —
@@ -125,9 +127,18 @@ Sources/FilawayApp/        # SwiftUI + AppKit shell; executable; Swift 5 mode
                            #   Activity, AIStatusPill, SettingsSmokeCheck
 Sources/FilawayBench/      # filaway-bench CLI (swift-argument-parser)
 Tests/FilawayCoreTests/    # Swift Testing (import Testing, @Test)
-Tools/                     # make_app.sh, make_dmg.sh, notarize.sh, smoke.sh
-.github/workflows/ci.yml   # macos-15: build, test, assemble app
+Sources/FilawayApp/
+  Features/Updates/        # UpdaterMenu.swift — UpdaterProviding + Sparkle 2
+                           #   "Check for Updates…" (M4-04)
+Tools/                     # lib.sh (versions/release.env/Sparkle paths/identity),
+                           #   make_app.sh, make_dmg.sh, notarize.sh, release.sh,
+                           #   smoke.sh, sparkle/{generate_keys,make_appcast}.sh,
+                           #   Filaway.entitlements, release.env.example
+VERSION                    # CFBundleShortVersionString fallback
+.github/workflows/ci.yml   # macos-15: build, test, universal app, smoke
+.github/workflows/release.yml  # tag v*: sign, notarize, DMG, appcast, Release
 docs/plan.md               # Phase 1 plan (authoritative)
+docs/release.md            # signing/notarization/Sparkle setup + release flow
 docs/decisions.md          # ADR-lite — append every notable decision
 docs/spec/                 # functional spec
 ```
@@ -180,6 +191,13 @@ Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index
   Signing, notarization and Sparkle EdDSA are blocked. `Tools/notarize.sh` runs
   every precondition check and exits with a `BLOCKED: …` message; implement
   release tasks up to the signing step and verify once credentials exist.
+  **The full pipeline is written and everything not needing credentials has been
+  run end to end — see `docs/release.md` for the user's unblock checklist.**
+  Sparkle itself works: it resolves under 6.0.3 because its manifest is
+  tools-version 5.3 and its target is a prebuilt universal xcframework
+  (ADR-041). Local builds get no `SUPublicEDKey`, so the "Check for Updates…"
+  item is disabled with the tooltip "Updates not configured in this build"
+  (ADR-042) — that is the intended state, not a bug.
 - **GRDB is pinned below 7.9.0**: 7.9.0+ declares swift-tools-version 6.1, which
   the 6.0.3 toolchain cannot read. Raise the bound with the toolchain.
 - **Action for the user:** install Xcode from the App Store and enrol in the
@@ -307,6 +325,18 @@ Next up: **M3** (semantic search, which fills `SearchMode.semantic`, and M3-08's
 hybrid `CandidateFinder`). The onboarding folder picker is M4-01, so the notes
 root is `~/Notes` (override with `FILAWAY_NOTES_ROOT`) and is not yet stored as
 a bookmark.
+
+**M4-04 / M4-05 are in.** Sparkle 2.9.x arrives through SPM and is embedded in
+`Contents/Frameworks` by `Tools/make_app.sh`, which also writes the Sparkle
+Info.plist keys, applies `Tools/Filaway.entitlements`, and signs inner-out with
+`$DEVELOPER_ID` when one exists. `Tools/release.sh` (`make release`) and
+`.github/workflows/release.yml` are the pipeline; every secret-dependent step in
+the workflow degrades to a visible warning so it can be dispatched before
+enrolment. Two Sparkle traps worth knowing, both verified by building it both
+ways and both asserted in CI: `generate_appcast` signs an entry **only** when
+the archived app declares `SUPublicEDKey`, and it derives
+`sparkle:hardwareRequirements` from the slices in the archive, so an arm64-only
+release is never offered to Intel Macs (ADR-046).
 
 **M2-11 Settings** is in: a `Settings` scene (⌘,) with General / AI / Activity,
 the AI pane built to Figure 4, and `FilawayCore/Settings/` holding `AppSettings`
