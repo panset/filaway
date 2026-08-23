@@ -47,6 +47,12 @@ final class MarkdownEditorController: ObservableObject {
         textView.window?.makeFirstResponder(textView)
     }
 
+    /// `true` when the body has keyboard focus — FR-1.4's "focus in the body".
+    var isFirstResponder: Bool {
+        guard let textView else { return false }
+        return textView.window?.firstResponder === textView
+    }
+
     /// Scrolls `range` into view, selecting it by default: "open note scrolled
     /// to match".
     func scrollTo(range: NSRange, select: Bool = true) {

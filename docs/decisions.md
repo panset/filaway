@@ -689,3 +689,85 @@ exceeds the budget.
 - The title cache is a few hundred kilobytes at 20,000 notes and is revalidated
   against the `notes_generation` counter, so a keystroke that changed nothing
   costs one indexed lookup.
+
+## ADR-022 — Autosave is a Core state machine with an app-side timer
+
+**Date:** 2026-08-23 · **Task:** M1-11 · **Status:** accepted
+
+**Context.** FR-2.3/NFR-3 make autosave the one thing that must never lose text:
+750 ms debounce, flush on note switch / window resign key / app resign active /
+terminate, and the ADR-010 conflict route when the file changed under a dirty
+buffer. Timing rules verified by sleeping in a test are slow and flaky, and
+`FilawayCore` may not import AppKit, so the obvious "actor with a timer" would
+have been untestable where it matters.
+
+**Decision.** `FilawayCore/Session/AutosaveScheduler` is a pure state machine:
+`bufferChanged(…, at:)` takes the clock as a parameter, `jobsDue(at:)` /
+`flushAll(trigger:)` / `flush(noteID:trigger:)` return `AutosaveJob` values, and
+`finish(_:)` / `fail(_:)` report the outcome. It owns no timer and no file
+handle. `FilawayApp/Features/Editor/AutosaveController` supplies the `Timer`
+(in `.common` mode) and performs the writes against `NoteStore`.
+
+**Consequences.**
+- Every rule is a fast, deterministic Swift Testing case, including the two that
+  matter most: a keystroke landing mid-write leaves the note dirty at the newer
+  text (`finish` returns false on a stale revision), and a terminate flush
+  replays notes in the order they went dirty.
+- `AutosaveJob` carries a `revision`, so the controller can be naive.
+- The debounce is the scheduler's, so M2-03's session tracker can call
+  `flushNow()` without knowing about timers.
+
+---
+
+## ADR-023 — Launch paints from the database, then reconciles
+
+**Date:** 2026-08-23 · **Task:** M1-09 / M1-13 · **Status:** accepted
+
+**Context.** NFR-1 wants a window that is visible and editable fast, but DS-4
+wants a full stat-scan of the notes folder on launch, which is ~400 ms at 5,000
+notes (and seconds at 20,000).
+
+**Decision.** `AppModel.init` does no I/O. `bootstrap()` opens `NoteStore`,
+opens GRDB on a detached task, subscribes to the watcher's change stream, then
+paints the sidebar and restores the last note **from `MetadataStore` alone** —
+`recents()`, `tree()` and `note(id:)` never touch the disk. Only afterwards does
+a background task run `watcher.reconcile()` and `watcher.start()`; the sidebar
+is refreshed again if that produced changes.
+
+**Consequences.**
+- Observed on this machine (release build, empty library): window visible ~230
+  ms, editor ready ~240 ms, both from the kernel's process start time.
+- The first frame can be up to one reconcile stale. Since the reconcile emits
+  ordinary `LibraryChange` values, the sidebar corrects itself through the same
+  code path as any external edit — no special first-launch handling.
+- Restoring the last note counts as opening it, so it leads Recents after a
+  relaunch (FR-1.2 orders by `max(lastOpened, mtime)`).
+
+---
+
+## ADR-024 — The quit-time flush runs off the main actor
+
+**Date:** 2026-08-23 · **Task:** M1-11 · **Status:** accepted
+
+**Context.** FR-2.3 requires that quitting waits for unwritten buffers, and the
+write path is `async` (it goes through the `NoteStore` actor). Neither obvious
+approach works. Returning `.terminateLater` and calling
+`reply(toApplicationShouldTerminate:)` from a `Task` deadlocks: AppKit waits in
+a private run-loop mode that never runs main-actor jobs. Pumping the run loop
+from inside `applicationShouldTerminate` deadlocks too, because the main
+dispatch queue will not drain reentrantly. Both were reproduced with the smoke
+driver, which hung until its watchdog killed it.
+
+**Decision.** `AutosaveController.terminateFlush()` snapshots the main-actor
+keystroke buffers synchronously, then returns a `Task.detached` that touches
+only actors (`AutosaveScheduler`, `NoteStore`, `LibraryWatcher`).
+`applicationShouldTerminate` blocks the main thread on a `DispatchSemaphore`
+with a 5 s budget and returns `.terminateNow`.
+
+**Consequences.**
+- The main thread blocking is safe precisely because the flush never needs it.
+- A wedged write cannot prevent quitting; it is logged and the app exits.
+- This is also why `AutosaveController` keeps its own main-actor `pending`
+  dictionary: a burst typed in the same run-loop turn as ⌘Q has not reached the
+  scheduler actor yet, and the snapshot picks it up. `smoke.sh` phase 1 types a
+  line and quits immediately; phase 2 asserts it came back.
