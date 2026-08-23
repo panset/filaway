@@ -68,8 +68,21 @@ public struct SemanticResults: Sendable, Equatable {
     /// `false` when the query had nothing a word tokenizer could match.
     public let usedKeywords: Bool
 
-    /// The top-8 chunks M3-05 feeds to `answer.v1` (plan §3 M3-05).
-    public var promptChunks: [RankedChunk] { Array(chunks.prefix(8)) }
+    /// How many chunks the answer step is shown.
+    ///
+    /// Plan §3 M3-05 says eight. M3-07 measured what eight actually contains:
+    /// on the development corpus the chunk holding the answer was inside the
+    /// top eight only **65%** of the time, and inside the top twenty **94%**.
+    /// The reason is structural — a short note splits into a prose chunk
+    /// (written in the language of the *question*, so it ranks first) and a
+    /// code chunk (which carries the command and shares almost no vocabulary
+    /// with the question, so it ranks tenth) — and no amount of reranking
+    /// inside eight chunks can recover a chunk that was never in them. Twenty
+    /// chunks of ~150 tokens is still a small prompt (ADR-047).
+    public static let promptChunkLimit = 20
+
+    /// The chunks M3-05 feeds to `answer.v1` (plan §3 M3-05).
+    public var promptChunks: [RankedChunk] { Array(chunks.prefix(Self.promptChunkLimit)) }
 
     public var isEmpty: Bool { chunks.isEmpty }
 
@@ -108,8 +121,15 @@ public actor HybridSearch {
         public var chunkLimit: Int
         /// Notes returned.
         public var noteLimit: Int
-        /// RRF's smoothing constant. 60 is the value the original paper used
-        /// and the one every later comparison keeps landing on.
+        /// RRF's smoothing constant.
+        ///
+        /// The paper's 60 was tuned for TREC runs with thousands of documents
+        /// per list; here each arm contributes fifty. At k = 60 the whole list
+        /// spans `1/61 … 1/110` — under a 2× spread — so fusion degenerates
+        /// into "how many arms found it" and rank barely matters. At k = 20 it
+        /// spans `1/21 … 1/70`, and being first is worth something again.
+        /// M3-07 measured the difference on the development corpus: note top-1
+        /// 90% → 91%, answer-chunk top-1 84% → 90% (ADR-047).
         public var rrfK: Double
         /// Applied when no hard date range was parsed.
         public var recencyPrior: RecencyPrior
@@ -125,7 +145,7 @@ public actor HybridSearch {
             candidateLimit: Int = 50,
             chunkLimit: Int = 20,
             noteLimit: Int = 10,
-            rrfK: Double = 60,
+            rrfK: Double = 20,
             recencyPrior: RecencyPrior = .default,
             exclusions: ExclusionFilter = .none,
             folderPath: String? = nil,

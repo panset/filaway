@@ -13,14 +13,23 @@ public struct RecencyPrior: Sendable, Equatable {
     /// Age at which the boost has decayed to half of ``maxBoost``.
     public var halfLife: TimeInterval
     /// Boost applied to a note modified *now*: `1 + maxBoost`.
+    ///
+    /// Read this against the thing it multiplies. Fused scores are RRF sums,
+    /// and adjacent ranks there differ by about **1.6%** (`1/61` vs `1/62`), so
+    /// a "+20%" ceiling is not a nudge — it is worth roughly twelve rank
+    /// positions, and M3-07 measured it dragging note top-1 from 90% down to
+    /// 78% on the development corpus. The ceilings below are quarter of what
+    /// ADR-040 first shipped, which is where the prior goes back to breaking
+    /// ties instead of deciding them (ADR-047).
     public var maxBoost: Double
 
-    public init(halfLife: TimeInterval = 30 * 86_400, maxBoost: Double = 0.2) {
+    public init(halfLife: TimeInterval = 30 * 86_400, maxBoost: Double = 0.05) {
         self.halfLife = max(1, halfLife)
         self.maxBoost = max(0, maxBoost)
     }
 
-    /// The default: a 30-day half-life and at most +20%.
+    /// The default: a 30-day half-life and at most +5% — about three rank
+    /// positions of RRF, which is a tie-break and not a re-sort.
     public static let `default` = RecencyPrior()
 
     /// No prior at all — used whenever a hard date range applies, because
@@ -30,12 +39,12 @@ public struct RecencyPrior: Sendable, Equatable {
     /// What "recently" buys: a much sharper 7-day curve and a bigger ceiling,
     /// still short of overturning a large relevance gap.
     public static let recent = RecencyPrior(
-        halfLife: TemporalQueryParser.recentWindow, maxBoost: 0.6
+        halfLife: TemporalQueryParser.recentWindow, maxBoost: 0.15
     )
 
     /// A prior with a caller-chosen window, for
     /// ``TemporalQuery/boostWindow``.
-    public static func window(_ seconds: TimeInterval, maxBoost: Double = 0.6) -> RecencyPrior {
+    public static func window(_ seconds: TimeInterval, maxBoost: Double = 0.15) -> RecencyPrior {
         RecencyPrior(halfLife: seconds, maxBoost: maxBoost)
     }
 

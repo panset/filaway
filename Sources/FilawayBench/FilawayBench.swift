@@ -12,7 +12,8 @@ struct FilawayBench: AsyncParsableCommand {
         version: FilawayCore.version,
         subcommands: [
             Scan.self, Keyword.self, All.self, EmbedCommand.self,
-            IndexCommand.self, SemanticCommand.self,
+            IndexCommand.self, SemanticCommand.self, RetrievalCommand.self,
+            CorpusCommand.self,
         ],
         defaultSubcommand: Scan.self
     )

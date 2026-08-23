@@ -13,6 +13,10 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make build` | `swift build` (debug, all targets) |
 | `make test` | `swift test` — **must be green before any task is reported done** |
 | `make bench` | Runs `filaway-bench` (pass `ARGS="keyword --notes 5000"`) |
+| `make bench ARGS="retrieval --embedder bge --failures"` | M3-07 retrieval gate: note top-1, MRR@10, answer-card accuracy, p95 over `Tests/Fixtures/{corpus/dev,queries/dev.json}`; exits non-zero below the bar |
+| `make bench ARGS="corpus generate"` | Regenerates the committed dev corpus from `DevCorpusContent` |
+| `make bench ARGS="index --notes 5000"` | Semantic index build cost (add `--embed-batch`/`--min-tokens` to probe the levers) |
+| `make bench ARGS="semantic --notes 5000"` | Offline semantic query p50/p95 and the resident matrix |
 | `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
 | `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
@@ -145,6 +149,10 @@ docs/spec/                 # functional spec
 
 Planned `FilawayCore` subdirectories (plan §2.7): `Storage`, `Markdown`, `Index`,
 `Search`, `Session`, `Organize`, `AI`, `Embeddings`, `Activity`, `Settings`, `Util`.
+Plus `Bench/` — the M3-07 development corpus and retrieval benchmark. It lives
+in Core, not in `FilawayBench`, because a SwiftPM executable target cannot be
+imported by a test target and the CI gate must measure exactly what the CLI
+measures (ADR-011, ADR-042).
 
 ## Conventions
 
