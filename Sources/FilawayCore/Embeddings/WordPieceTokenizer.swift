@@ -110,17 +110,16 @@ public struct WordPieceTokenizer: Sendable {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {
             throw LoadError.vocabularyUnreadable(url)
         }
+        // One raw token per line, the line number *is* the id — so nothing may
+        // be skipped, or every later id shifts. Only the empty string after a
+        // trailing newline is dropped.
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.last?.isEmpty == true { lines.removeLast() }
         var vocabulary: [String: Int32] = [:]
-        vocabulary.reserveCapacity(32_768)
-        var index: Int32 = 0
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            // vocab.txt is one raw token per line; a trailing \r or final empty
-            // line is file noise, not a token.
-            var token = Substring(line)
-            if token.hasSuffix("\r") { token = token.dropLast() }
-            if token.isEmpty, index > 0 || text.isEmpty { continue }
-            vocabulary[String(token)] = index
-            index += 1
+        vocabulary.reserveCapacity(lines.count)
+        for (index, line) in lines.enumerated() {
+            let token = line.hasSuffix("\r") ? line.dropLast() : line
+            vocabulary[String(token)] = Int32(index)
         }
         try self.init(vocabulary: vocabulary, configuration: configuration)
     }
