@@ -1,7 +1,9 @@
 # FilawayCore AI layer — provider, harness, plans
 
 What M2-01, M2-02 and M2-04 landed: the Claude provider, the record/replay test
-harness, and the organization-plan model with its validator. Everything is in
+harness, and the organization-plan model with its validator. The pipeline that
+*uses* them — sessions, the organizer, the prompt and the context builder
+(M2-03/05/06) — is in `docs/organize.md`. Everything is in
 `FilawayCore` (Swift 6, no AppKit/SwiftUI). Requirement IDs refer to
 `docs/spec/functional-spec.html`.
 
@@ -232,14 +234,27 @@ and the command that would record it. It never falls through to the network.
 | `organize/32ec1410dbe6c865.json` | a plan the validator must reject (depth 3, unknown id, unsafe title, paraphrased segment, an invented `deleteNote`) |
 | `organize/4f70a56d54dd90e1.json` | nothing to do — an empty, valid plan |
 | `organize/872b5453e4c26ce8.json` | `stop_reason: "refusal"` with `stop_details` |
+| `organize/a30b6dc9e77d1f98.json` | M2-06 golden — new note in the best existing folder |
+| `organize/d2e2f83a3797a9c5.json` | M2-06 golden — merge a code block (`moveSegment`); also the FR-4.5 scenario, byte-identical |
+| `organize/ff85f840620485b5.json` | M2-06 golden — retitle an untitled note + tags |
+| `organize/f43b5fe592641fe8.json` | M2-06 golden — a new folder when nothing fits |
+| `organize/c6cf49c152d2c08e.json` | M2-06 golden — nothing to do |
+| `organize/2dc861ef725e4cdb.json` | M2-06 golden — convergence, an existing note wins |
+| `organize/44e5fb2f32b1ba4c.json` | M2-06 golden — an invalid action dropped, the good one kept |
+| `organize/dbc77db013ee6a8b.json` | M2-06 golden — the summary no longer matches, so the plan goes |
 
 Rate limiting is deliberately *not* a fixture: it is a transport behaviour, and
 lives in the `URLProtocol` stub suite (429 + `retry-after`, 529 backoff, network
 failure, non-JSON body) instead.
 
-These are stand-ins written by hand, with a placeholder system prompt. M2-06
-records real ones against `organize.v1`; when it does, the keys change and these
-can go.
+The first four are stand-ins written by hand against a placeholder system
+prompt. The M2-06 goldens use the **real** `organize.v1` and a request captured
+from the real builder — only the responses are hand-authored, because this
+machine has no key. Re-record everything live once one exists (plan M4-09):
+
+```bash
+FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter "OrganizeGoldenTests/regenerate"
+```
 
 ### Recording, once a key exists
 
@@ -359,22 +374,28 @@ committed fixture.
 ## Prompts
 
 ```swift
-PromptVersion.organize          // organize.v1
+PromptVersion.organize                       // organize.v1
 try PromptLibrary.text(.planFormat)
+try OrganizeRequestBuilder.systemPrompt()    // organize.v1 with plan-format.v1 spliced in
 ```
 
 Files live in `Sources/FilawayCore/AI/Prompts/` as `<id>.v<N>.txt` and are
 SwiftPM resources of `FilawayCore` (ADR-014 — this is the package's only
 `resources:` entry). `$FILAWAY_PROMPTS_DIR` or an explicit directory overrides
-the bundle. `plan-format.v1.txt` ships now; M2-06 adds `organize.v1.txt` and
-M3-05 `answer.v1.txt`, neither of which needs a `Package.swift` change.
+the bundle. `plan-format.v1.txt` and `organize.v1.txt` ship now; M3-05 adds
+`answer.v1.txt`, which needs no `Package.swift` change.
+
+`organize.v1` carries `{{include:plan-format.v1}}`: the two versioned prompts are
+rendered into **one** system string, so a change to either moves the fixture key
+and the golden tests notice. See `docs/organize.md` for what the prompt says and
+how the user message is built.
 
 ---
 
 ## Testing
 
-`Tests/FilawayCoreTests/AI*.swift` and `Organize*.swift` — 162 tests, all
-offline, ~0.3 s.
+`Tests/FilawayCoreTests/AI*.swift`, `Organize*.swift` and `Session*.swift` —
+243 tests, all offline, well under a second.
 
 * `AIProviderTests` — exact request JSON, response decoding (text, tool_use,
   refusal, max_tokens, unknown block types), the error taxonomy and retry
@@ -387,6 +408,10 @@ offline, ~0.3 s.
 * `OrganizePlanTests` / `OrganizeValidatorTests` / `OrganizeExclusionTests` —
   codec and schema round trips, the validator matrix, property-style runs
   asserting that random unknown ids and over-deep folders never validate.
+* `SessionTrackerTests`, `OrganizerTests`, `OrganizeContextBuilderTests`,
+  `OrganizeGoldenTests` — M2-03/05/06: the FR-3.1 rule table, the FR-3.2 race
+  matrix on a manual clock, the token budget, and nine golden scenarios run end
+  to end through replay. See `docs/organize.md`.
 
 ### What could not be verified without a key
 
