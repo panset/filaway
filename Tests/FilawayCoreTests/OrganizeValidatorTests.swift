@@ -429,3 +429,126 @@ struct PlanValidatorTests {
         }
     }
 }
+
+// MARK: - Content has to come from the session (P2-11, ADR-074)
+
+/// The second half of the live junk plan of 2026-08-24: two `appendToNote`
+/// actions whose content was `OIDC Commands` and `OIDC Configuration` — bare
+/// labels, nowhere in the session, written into the very note the session was
+/// typed in, each under its own `---` rule.
+///
+/// The guard's whole difficulty is the false positive, so most of what is
+/// pinned here is what it must **not** reject.
+@Suite("Plan validator — content from the session (P2-11)")
+struct PlanContentFromSessionTests {
+    private let context = SampleLibrary.context
+
+    /// `SampleLibrary.scratchBody` is the session: a line of prose, a fenced
+    /// `curl`, and a closing line.
+    private var validator: PlanValidator {
+        PlanValidator(context: context, sessionText: SampleLibrary.scratchBody)
+    }
+
+    private func plan(_ actions: [PlanAction]) -> OrganizationPlan {
+        var plan = OrganizationPlan(summary: "Do it", actions: actions)
+        plan.preconditions = context.preconditions(for: plan)
+        return plan
+    }
+
+    private func appending(_ content: String) -> OrganizationPlan {
+        plan([.appendToNote(AppendToNoteAction(target: .id(SampleLibrary.curlID), content: content))])
+    }
+
+    // MARK: What it rejects
+
+    @Test("the two labels the live failure wrote", arguments: ["OIDC Commands", "OIDC Configuration"])
+    func liveLabels(_ label: String) {
+        let result = validator.validate(appending(label))
+        #expect(result.hasError(.contentNotFromSession), "\(label): \(result.summary)")
+        #expect(result.errors.first?.actionIndex == 0)
+        #expect(!result.summary.contains(label), "NFR-4: the line itself is never in the issue")
+    }
+
+    @Test("a createNote of nothing but a label is rejected the same way")
+    func labelAsANewNote() {
+        let result = validator.validate(plan([
+            .createNote(CreateNoteAction(title: "OIDC", folderPath: "Commands", content: "OIDC Configuration")),
+        ]))
+        #expect(result.hasError(.contentNotFromSession))
+    }
+
+    @Test("a Markdown heading of a phrase the session never used is still a label")
+    func markdownHeadingLabel() {
+        #expect(validator.validate(appending("## Token Rotation")).hasError(.contentNotFromSession))
+    }
+
+    // MARK: What it must never reject
+
+    @Test("a line carried out of the session, however it is decorated", arguments: [
+        "Random thoughts from today.",
+        "  Random thoughts from today.  ",
+        "RANDOM THOUGHTS FROM TODAY.",
+        "- Random thoughts from today.",
+        "## Random thoughts",
+        "1. Random thoughts",
+    ])
+    func carriedLines(_ content: String) {
+        let result = validator.validate(appending(content))
+        #expect(!result.hasError(.contentNotFromSession), "\(content): \(result.summary)")
+    }
+
+    @Test("content composed from several session lines is never a label")
+    func multiLineContent() {
+        let composed = "The token expires hourly.\nRotate it before the demo.\n"
+        #expect(!SampleLibrary.scratchBody.contains(composed), "the premise: not carried verbatim")
+        #expect(!validator.validate(appending(composed)).hasError(.contentNotFromSession))
+    }
+
+    @Test("a long single line is material even when it was paraphrased")
+    func longSingleLine() {
+        // 88 characters, nowhere in the session — over `labelLengthLimit`, so
+        // the guard leaves it alone.
+        let paraphrase = "The staging token that the documents endpoint wants expires again after about an hour"
+        #expect(paraphrase.count > PlanValidator.labelLengthLimit)
+        #expect(!validator.validate(appending(paraphrase)).hasError(.contentNotFromSession))
+    }
+
+    @Test("the shortest material line in the committed goldens survives the guard")
+    func goldenTuningConstraint() {
+        // `invalid-action-dropped` (OrganizeGoldenTests): 37 characters and six
+        // words, a paraphrase of the session — this is the measurement the word
+        // limit is set *below*, and no golden plan may become rejected.
+        let golden = "the deploy script retries three times"
+        #expect(golden.count <= PlanValidator.labelLengthLimit)
+        #expect(golden.split(separator: " ").count > PlanValidator.labelWordLimit)
+        #expect(!validator.validate(appending(golden)).hasError(.contentNotFromSession))
+    }
+
+    @Test("with no session text the guard does not run at all")
+    func noSessionNoGuard() {
+        // `PlanApplier` re-validates with the bodies of the notes the plan
+        // *references*, which cannot answer the question — so it never asks.
+        let bare = PlanValidator(context: context)
+        #expect(!bare.validate(appending("OIDC Commands")).hasError(.contentNotFromSession))
+    }
+
+    @Test("an empty content is still emptyContent, not a label")
+    func emptyIsNotALabel() {
+        let result = validator.validate(appending("   \n "))
+        #expect(result.hasError(.emptyContent))
+        #expect(!result.hasError(.contentNotFromSession))
+    }
+
+    @Test("the guard rejects the action, never the plan: the good ones survive")
+    func onlyTheJunkAction() {
+        let junk = plan([
+            .appendToNote(AppendToNoteAction(
+                target: .id(SampleLibrary.curlID), content: "Random thoughts from today."
+            )),
+            .appendToNote(AppendToNoteAction(target: .id(SampleLibrary.curlID), content: "OIDC Commands")),
+        ])
+        let result = validator.validate(junk)
+        #expect(result.errors.count == 1)
+        #expect(result.errors.first?.actionIndex == 1)
+    }
+}

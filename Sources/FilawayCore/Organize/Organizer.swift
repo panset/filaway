@@ -653,11 +653,17 @@ public actor Organizer {
         repairingCollisions: Bool = false
     ) -> Repair {
         var plan = originalPlan
-        var repairWarnings: [PlanIssue] = []
+        // P2-11 rule 6 runs for **every** provider: a `createFolder` nothing
+        // files into is an empty folder in the sidebar whoever wrote it, and
+        // dropping a creation is not the taste judgement
+        // `repairsPlanCollisions` gates (ADR-074).
+        let junk = PlanRepair.droppingUnusedFolders(plan)
+        plan = junk.plan
+        var repairWarnings: [PlanIssue] = junk.warnings
         if repairingCollisions {
             let result = PlanRepair.repair(plan, in: context)
             plan = result.plan
-            repairWarnings = result.warnings
+            repairWarnings += result.warnings
         }
         func annotate(_ validation: PlanValidation) -> PlanValidation {
             guard !repairWarnings.isEmpty else { return validation }
@@ -666,7 +672,22 @@ public actor Organizer {
             return annotated
         }
 
-        let validator = PlanValidator(context: context)
+        // P2-11: only here is the session text known, so only here does the
+        // "content must be carried from the session" guard run (ADR-074).
+        let validator = PlanValidator(context: context, sessionText: context.sessionBodies)
+
+        // A dropped folder is subject to the same rule a dropped action is: the
+        // card shows the summary, and FR-4.2 wants it to state exactly what
+        // happens. A summary that promises a folder nothing files into is a lie
+        // about the plan, so the plan goes rather than the sentence (P2-11).
+        if junk.didRepair {
+            let droppedFolders = originalPlan.actions.filter { !plan.actions.contains($0) }
+            guard summaryStillMatches(plan.summary, kept: plan.actions, dropped: droppedFolders, context: context)
+            else {
+                return .discard(annotate(validator.validate(originalPlan, unknownActions: unknownActions)))
+            }
+        }
+
         let validation = validator.validate(plan, unknownActions: unknownActions)
         if validation.isValid { return .keep(plan, annotate(validation), dropped: []) }
 

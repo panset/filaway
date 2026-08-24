@@ -175,7 +175,10 @@ struct PlanRepairTests {
         let original = Self.plan([
             .appendToNote(AppendToNoteAction(target: .id(SampleLibrary.curlID), content: "more\n")),
             .tagNote(TagNoteAction(note: .id(SampleLibrary.curlID), tags: ["http"])),
+            // The folder is created *and filed into*; rule 6 drops only the
+            // ones nothing files into (P2-11).
             .createFolder(CreateFolderAction(path: "Snippets")),
+            .createNote(CreateNoteAction(title: "ripgrep", folderPath: "Snippets", content: "rg -n TODO\n")),
         ])
         let result = PlanRepair.repair(original, in: Self.context)
         #expect(!result.didRepair)
@@ -272,10 +275,14 @@ struct PlanRepairTests {
             let result = PlanRepair.repair(original, in: Self.context)
             let after = Self.validate(result.plan)
 
-            // 1. A plan the validator already accepts is never touched.
+            // 1. A plan the validator already accepts is never touched —
+            //    except that rule 6 takes a `createFolder` nothing files into
+            //    out of it, which the validator only ever *warned* about
+            //    (P2-11).
             if before.isValid {
-                #expect(!result.didRepair, "a valid plan was rewritten: \(original.actions)")
-                #expect(result.plan == original)
+                #expect(result.warnings.allSatisfy { $0.kind == .droppedUnusedFolder },
+                        "a valid plan was rewritten: \(original.actions)")
+                #expect(result.plan.actions == Self.withoutUnusedFolders(original.actions))
                 continue
             }
             guard result.didRepair else {
@@ -311,9 +318,11 @@ struct PlanRepairTests {
             }
             #expect(!after.hasError(.segmentNotFound))
 
-            // 5. Every warning says which action it describes, and points into
-            //    the plan.
-            for warning in result.warnings {
+            // 5. Every warning about an action that is *still there* says which
+            //    one, and points into the plan. `droppedUnusedFolder` is the
+            //    one plan-level warning: its action is gone, so an index would
+            //    name the wrong one.
+            for warning in result.warnings where warning.kind != .droppedUnusedFolder {
                 let index = try #require(warning.actionIndex)
                 #expect(index < result.plan.actions.count)
             }
@@ -331,13 +340,40 @@ struct PlanRepairTests {
         }
     }
 
-    @Test("a plan the repair rewrote never loses an action")
+    @Test("the only action the repair drops is a folder nothing files into")
     func nothingIsSilentlyDropped() throws {
         for original in Self.randomPlans(count: 300, seed: 7) {
             let result = PlanRepair.repair(original, in: Self.context)
-            #expect(result.plan.actions.count >= original.actions.count,
-                    "dropping is the organizer's job, not the repair's")
+            let dropped = result.warnings.filter { $0.kind == .droppedUnusedFolder }.count
+            // Dropping is otherwise the organizer's job, not the repair's, and
+            // rule 6 accounts for every action that left (P2-11).
+            #expect(result.plan.actions.count >= original.actions.count - dropped,
+                    "\(original.actions) lost more than \(dropped) actions")
+            #expect(Self.withoutUnusedFolders(result.plan.actions) == result.plan.actions,
+                    "an unused folder survived: \(result.plan.actions)")
             #expect(result.plan.summary == original.summary, "the repair never rewrites the summary")
+        }
+    }
+
+    /// The rule-6 predicate, written out independently of the implementation:
+    /// a `createFolder` survives only when some *other* action files into that
+    /// folder or below it, and only the first of a repeat does.
+    static func withoutUnusedFolders(_ actions: [PlanAction]) -> [PlanAction] {
+        var used = Set<String>()
+        for action in actions where action.kind != .createFolder {
+            for folder in action.targetFolderPaths {
+                var path = PathRules.normalize(folder)
+                while !path.isEmpty {
+                    used.insert(path)
+                    path = PathRules.parent(of: path) ?? ""
+                }
+            }
+        }
+        var seen = Set<String>()
+        return actions.filter { action in
+            guard case let .createFolder(create) = action else { return true }
+            let path = PathRules.normalize(create.path)
+            return !path.isEmpty && used.contains(path) && seen.insert(path).inserted
         }
     }
 }
@@ -464,7 +500,6 @@ struct PlanRepairFolderDepthTests {
     func clampsEveryFolderBearingAction() throws {
         let deep = "One/Two/Three/Four"
         let cases: [(PlanAction, String)] = [
-            (.createFolder(CreateFolderAction(path: deep)), "createFolder"),
             (.createNote(CreateNoteAction(title: "New", folderPath: deep, content: "x\n")), "createNote"),
             (.moveNote(MoveNoteAction(note: .id(SampleLibrary.untitledID), toFolderPath: deep)), "moveNote"),
             (.moveSegment(MoveSegmentAction(
@@ -481,6 +516,23 @@ struct PlanRepairFolderDepthTests {
                     "\(label) left a deep folder: \(folders)")
             #expect(Self.validate(result.plan).isValid, "\(label): \(Self.validate(result.plan).summary)")
         }
+
+        // `createFolder` is clamped too — but only when something files into
+        // it. On its own it is junk, and rule 6 drops it before rule 5 can
+        // bother clamping it (P2-11).
+        let paired = PlanRepairTests.plan([
+            .createFolder(CreateFolderAction(path: deep)),
+            .createNote(CreateNoteAction(title: "New", folderPath: deep, content: "x\n")),
+        ])
+        let result = PlanRepair.repair(paired, in: PlanRepairTests.context)
+        #expect(!result.warnings.contains { $0.kind == .droppedUnusedFolder }, "the folder is filed into")
+        #expect(result.plan.actions.first == .createFolder(CreateFolderAction(path: "Three/Four")))
+        #expect(Self.validate(result.plan).isValid, "\(Self.validate(result.plan).summary)")
+
+        let alone = PlanRepairTests.plan([.createFolder(CreateFolderAction(path: deep))])
+        let dropped = PlanRepair.repair(alone, in: PlanRepairTests.context)
+        #expect(dropped.warnings.map(\.kind) == [.droppedUnusedFolder])
+        #expect(dropped.plan.actions.isEmpty, "an empty plan is a real answer (FR-4.6)")
     }
 
     @Test("a folder that is already shallow enough is left byte-identical")
@@ -561,6 +613,145 @@ struct PlanRepairFolderDepthTests {
             let twice = PlanRepair.repair(once.plan, in: PlanRepairTests.context)
             #expect(!twice.didRepair, "\(folder) still had something to repair")
             #expect(twice.plan == once.plan)
+        }
+    }
+}
+
+// MARK: - Rule 6: the folder nothing files into (P2-11)
+
+/// The live junk plan of 2026-08-24, and the guard that would have stopped it
+/// (ADR-074).
+///
+/// A root-level note of OIDC commands was edited and `llama3.1:8b` answered
+/// with four actions: `createFolder OIDC`, an append of the label
+/// `OIDC Commands` to that same note, `createFolder OIDC` **again**, and an
+/// append of `OIDC Configuration`. Every guard passed — a duplicate action and
+/// an existing folder are both warnings — so it applied: the note gained two
+/// bare labels under two `---` rules, and the sidebar gained an `OIDC` folder
+/// nothing was ever filed into.
+@Suite("Plan repair — unused folders (P2-11)")
+struct PlanRepairUnusedFolderTests {
+
+    static func plan(_ actions: [PlanAction]) -> OrganizationPlan {
+        PlanRepairTests.plan(actions)
+    }
+
+    @Test("the live junk plan loses both createFolders, and the validator rejects both labels")
+    func liveJunkPlan() throws {
+        let original = Self.plan([
+            .createFolder(CreateFolderAction(path: "OIDC")),
+            .appendToNote(AppendToNoteAction(target: .id(SampleLibrary.scratchID), content: "OIDC Commands")),
+            .createFolder(CreateFolderAction(path: "OIDC")),
+            .appendToNote(AppendToNoteAction(target: .id(SampleLibrary.scratchID), content: "OIDC Configuration")),
+        ])
+        // The premise, and the whole reason this shipped: nothing in the plan
+        // as it stands is an *error*.
+        #expect(PlanRepairTests.validate(original).isValid)
+
+        let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+        #expect(result.warnings.map(\.kind) == [.droppedUnusedFolder, .droppedUnusedFolder])
+        #expect(result.plan.actions.allSatisfy { $0.kind != .createFolder })
+        #expect(result.plan.actions.count == 2, "the appends are the validator's business, not the repair's")
+
+        // …and the validator, once it is given the session, rejects both.
+        let validation = PlanValidator(
+            context: PlanRepairTests.context, sessionText: SampleLibrary.scratchBody
+        ).validate(result.plan)
+        #expect(validation.errors.map(\.kind) == [.contentNotFromSession, .contentNotFromSession])
+        #expect(validation.errors.compactMap(\.actionIndex) == [0, 1])
+    }
+
+    @Test("a folder something files into survives, and so does its parent")
+    func usedFoldersSurvive() throws {
+        let original = Self.plan([
+            .createFolder(CreateFolderAction(path: "Projects")),
+            .createFolder(CreateFolderAction(path: "Projects/Cinegram")),
+            .createNote(CreateNoteAction(
+                title: "Storyboard", folderPath: "Projects/Cinegram", content: "one\ntwo\n"
+            )),
+        ])
+        let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+        #expect(!result.didRepair, "\(result.warnings.map(\.detail))")
+        #expect(result.plan == original)
+    }
+
+    @Test("every filing action counts as filing into a folder")
+    func everyFilingKindCounts() throws {
+        let cases: [(PlanAction, String)] = [
+            (.createNote(CreateNoteAction(title: "New", folderPath: "Snippets", content: "a\nb\n")), "createNote"),
+            (.moveNote(MoveNoteAction(note: .id(SampleLibrary.untitledID), toFolderPath: "Snippets")), "moveNote"),
+            (.moveSegment(MoveSegmentAction(
+                source: .id(SampleLibrary.scratchID),
+                segment: SampleLibrary.segment,
+                destination: .newNote(title: "New", folderPath: "Snippets", tags: [])
+            )), "moveSegment"),
+        ]
+        for (action, label) in cases {
+            let result = PlanRepair.repair(
+                Self.plan([.createFolder(CreateFolderAction(path: "Snippets")), action]),
+                in: PlanRepairTests.context
+            )
+            #expect(!result.warnings.contains { $0.kind == .droppedUnusedFolder }, "\(label) files into it")
+        }
+    }
+
+    @Test("a plan that only creates a folder becomes the empty plan")
+    func onlyAFolderIsNothingToDo() throws {
+        let result = PlanRepair.repair(
+            Self.plan([.createFolder(CreateFolderAction(path: "Snippets"))]),
+            in: PlanRepairTests.context
+        )
+        // FR-4.6: the organizer's own empty-plan path then says "nothing to
+        // do", which is a real answer — never a card promising a folder.
+        #expect(result.plan.isEmpty)
+    }
+
+    @Test("dropping a folder is additive, and never touches the preconditions")
+    func droppingIsAdditive() throws {
+        let original = Self.plan([
+            .createFolder(CreateFolderAction(path: "Snippets")),
+            .tagNote(TagNoteAction(note: .id(SampleLibrary.curlID), tags: ["http"])),
+        ])
+        let result = PlanRepair.droppingUnusedFolders(original)
+        #expect(result.plan.neverDeletesUserText)
+        #expect(result.plan.preconditions == original.preconditions)
+        #expect(result.plan.summary == original.summary)
+        #expect(result.plan.actions == [original.actions[1]])
+    }
+
+    @Test("the library root is never created")
+    func rootIsNeverCreated() throws {
+        for path in ["", "/", "  "] {
+            let result = PlanRepair.droppingUnusedFolders(Self.plan([
+                .createFolder(CreateFolderAction(path: path)),
+                .createNote(CreateNoteAction(title: "New", folderPath: "", content: "a\nb\n")),
+            ]))
+            #expect(result.plan.actions.count == 1, "\"\(path)\" survived")
+        }
+    }
+
+    @Test("dropping runs for Claude too — it is not a judgement about taste")
+    func dropIsNotProviderGated() throws {
+        // `PlanRepair.repair` is gated on `repairsPlanCollisions`;
+        // `droppingUnusedFolders` deliberately is not, and `Organizer.repair`
+        // calls it for every provider (ADR-074).
+        let original = Self.plan([
+            .createFolder(CreateFolderAction(path: "Snippets")),
+            .appendToNote(AppendToNoteAction(target: .id(SampleLibrary.curlID), content: "one\ntwo\n")),
+        ])
+        for kind in [AIProviderKind.claude, .ollama] {
+            let repaired = Organizer.repair(
+                plan: original,
+                unknownActions: [],
+                context: PlanRepairTests.context,
+                repairingCollisions: kind.repairsPlanCollisions
+            )
+            guard case let .keep(plan, validation, _) = repaired else {
+                Issue.record("\(kind.rawValue) discarded a good plan")
+                continue
+            }
+            #expect(plan.actions.count == 1, "\(kind.rawValue) kept the unused folder")
+            #expect(validation.hasWarning(.droppedUnusedFolder), "\(kind.rawValue) did not say so")
         }
     }
 }
