@@ -2562,3 +2562,75 @@ a fixture says which wire it is in, so one fixture directory can hold both.
   `FILAWAY_AI_FIXTURES` directory, and check `git diff` before committing. If
   P2 later wants both at once, the key gains the provider — which changes every
   filename, so it is a deliberate migration, not a drive-by.
+
+---
+
+## ADR-068 — "Connected" for a provider with no credential
+
+**Context.** P2-02 puts the local provider in front of the user (FR-6.5): a
+provider chooser in Settings → AI, and `AIConnectionManager` behind it. That
+manager was built around a credential — `hasStoredKey`, "the key is only stored
+after it validates", `GET /v1/models`, a Keychain. Ollama has none of that.
+`OllamaProvider.validateKey()` exists only because the protocol has the method;
+what it actually does is `GET /api/tags`, and a daemon that is running answers it
+with whatever has been pulled — possibly nothing.
+
+So "the provider answered, therefore we are connected" is wrong in a way the user
+pays for later: filing would be attempted, the request would come back
+`model not found`, and the session would queue against an outage that is not one.
+The failure has a one-line remedy (`ollama pull llama3.1:8b`) and the only good
+moment to say so is when the user presses **Test connection**.
+
+**Decision.** For `.ollama`, *connected* means **the daemon answered `GET
+/api/tags` and the configured model tag is in the list**.
+
+- `AIConnectionManager` gains a provider dimension: `setProvider(_:ollama:)`
+  (synchronous, returns `true` when the selection actually moved),
+  `connectLocal()`, `providerKind`, `ollamaConfiguration`, and a
+  `ProviderContext` (`keySource`, `kind`, `ollama`) as the factory's parameter.
+  `refresh()` dispatches on the selection.
+- Three local outcomes, each with its own remedy: unreachable → `.offline`
+  ("is the daemon running? (ollama serve)"); reachable, tag absent →
+  `.error(AIConnectionCopy.modelNotPulled)` → "run: ollama pull <tag>";
+  reachable with the tag → `.connected` and the tag list feeds the model picker.
+- The base URL is validated **before** the provider is built.
+  `OllamaProvider.init` turns the loopback rule into a `precondition`, and
+  Settings holds a half-typed URL every time the user touches that field — so
+  `connectLocal()` asks `OllamaConfiguration.validate()` first and records
+  `.error(AIConnectionCopy.invalidBaseURL)` rather than trapping the app.
+- Tag matching is `name` ≡ `name:latest`, case-insensitively
+  (`OllamaConfiguration.isPulled`): Ollama names a tagless pull `:latest`, and a
+  user who types `llama3.1` means that image.
+- `isConfigured` is the keyless counterpart of `hasStoredKey`: a key for Claude,
+  a model that has been *seen* for Ollama. Like `hasStoredKey` it survives an
+  outage — a daemon that is down is still configured — and unlike `.connected`
+  it needs no round trip.
+- **The Keychain is untouched by the local path.** `connect(apiKey:)` always
+  validates against Claude (it is the key sheet's action) and leaves the local
+  status alone; `disconnect()` deletes the key but only resets the status under
+  Claude; switching back to Claude re-validates the key that was there all
+  along. Trying the local model costs the user nothing and loses nothing.
+- Usage is reported per selected provider through `AIUsageLedger`'s
+  `AIProviderKind` overloads, and local work is priced at `$0` in the FR-6.6
+  line — counted, because "how much went local" is the point of FR-6.5.
+
+**Consequences.**
+- `AIConnectionManager.ProviderFactory` now takes a `ProviderContext` instead of
+  an `APIKeySource`. One-line change at every injection site, and tests can now
+  assert *which* backend was built — `keychainUntouched` does exactly that.
+- `AIHealth` gains `record(status:)`. The error taxonomy cannot express "the
+  daemon is up but that model is not there": `.modelNotFound` maps to "not
+  available to this key", which is the wrong sentence and the wrong remedy.
+- All provider-dependent copy moved to `AIConnectionCopy` in Core, as pure
+  functions of `(kind, status, model)`. On this machine a string that lives in a
+  SwiftUI view is a string nothing can test (plan §8); the three status lines,
+  the privacy statement and the usage line are now unit-tested, and the smoke
+  phase asserts the exact same strings through `SettingsModel`.
+- The `settings` phase leaves Ollama selected so `settings2` can prove the
+  selection, the base URL and the tag survived a relaunch. It runs on its own
+  defaults suite, so no other phase inherits the choice — which matters, because
+  the effective model is part of the replay fixture key.
+- Still unverifiable here (no daemon in CI): that a real `/api/tags` payload
+  decodes to the tags this assumes, and the latency of a cold model load behind
+  **Test connection**. `FILAWAY_TEST_OLLAMA=1` covers the first on a machine
+  with `ollama serve` running.
