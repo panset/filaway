@@ -132,6 +132,10 @@ public enum OllamaWire {
         and never an invented top folder to hold it.
         - Copy every "id" exactly as it is written above. Never invent one, and \
         never use an id that is not listed.
+        - Every "content" must be lines carried out of the session text above. \
+        Never a bare label, heading, title or category name on its own — \
+        "OIDC Commands" is not content, the lines under it are. And never emit \
+        the same action twice.
         - "actions": [] is a correct and welcome answer when the session is \
         already where it belongs.
         - Keep the plan short. Prefer "moveNote", "retitleNote" and "tagNote", \

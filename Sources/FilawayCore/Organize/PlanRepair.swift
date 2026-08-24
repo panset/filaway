@@ -26,6 +26,7 @@ import Foundation
 /// | `moveSegment` whose `segment` is not in the source verbatim | `appendToNote` (or `createNote`) of that text at the destination — **the source keeps every byte** |
 /// | a folder path deeper than ``PathRules/maxFolderDepth`` | clamped to its **last** `maxFolderDepth` components (P2-09's live `folderTooDeep`) |
 /// | a filing target's folder does not exist and no `createFolder` makes it | the missing `createFolder` is inserted first — the model's intent, minus its forgetfulness (P2-08's live `unknownFolder`) |
+/// | a `createFolder` nothing files into, or the same one twice | dropped — the empty folder P2-11's live junk plan left in the sidebar |
 ///
 /// Every result is strictly *additive*. The third rule in particular trades a
 /// move for a copy: an unverifiable merge would have removed text from the
@@ -78,10 +79,17 @@ public enum PlanRepair {
         var warnings: [PlanIssue] = []
         actions.reserveCapacity(plan.actions.count)
 
-        // Rule 5 (P2-09) runs first, as a pre-pass: a clamped folder can then
+        // Rule 6 (P2-11) runs first of all, because it is the only rule that
+        // *removes* an action: every index the rules below report is then an
+        // index into the list they are actually working on. Nothing it drops
+        // can matter to them — a folder no action files into is not a folder
+        // any action can collide with, clamp into or forget to create.
+        let remaining = dropUnusedFolders(plan.actions, warnings: &warnings)
+
+        // Rule 5 (P2-09) is next, as a pre-pass: a clamped folder can then
         // collide with a note that is already there (rule 1 repairs that), and
         // it is the *clamped* folder rule 4 has to remember to create.
-        let source = clampFolderDepth(plan.actions, in: context, warnings: &warnings)
+        let source = clampFolderDepth(remaining, in: context, warnings: &warnings)
 
         for (index, action) in source.enumerated() {
             switch action {
@@ -177,6 +185,104 @@ public enum PlanRepair {
         // rejects the result for `missingPrecondition` instead.
         repaired.preconditions = context.preconditions(for: repaired)
         return Result(plan: repaired, warnings: warnings)
+    }
+
+    // MARK: - Rule 6: a folder nothing files into (P2-11)
+
+    /// Rule 6 on its own, for the callers that run it **for every provider**.
+    ///
+    /// It is the one rule that is not a judgement about a model's taste, which
+    /// is what ``AIProviderKind/repairsPlanCollisions`` gates: a `createFolder`
+    /// nothing files into leaves an empty folder in the sidebar whoever wrote
+    /// it, and dropping a creation cannot make any plan worse. ADR-070's
+    /// reasoning — that quietly rewriting Sonnet's plan would hide a prompt
+    /// regression — does not reach it, because nothing here is rewritten.
+    public static func droppingUnusedFolders(_ plan: OrganizationPlan) -> Result {
+        var warnings: [PlanIssue] = []
+        let actions = dropUnusedFolders(plan.actions, warnings: &warnings)
+        guard !warnings.isEmpty else { return Result(plan: plan) }
+        var out = plan
+        out.actions = actions
+        // `createFolder` references no note, so the compare-and-swap
+        // preconditions are exactly what they were.
+        return Result(plan: out, warnings: warnings)
+    }
+
+    /// Drops every `createFolder` whose path no *other* action in the plan
+    /// files into — and every exact duplicate of one that survives.
+    ///
+    /// **The live failure.** A root-level note of OIDC commands was edited, and
+    /// the plan came back as `createFolder OIDC`, an append, `createFolder
+    /// OIDC` again, another append. Every guard passed — a duplicate action and
+    /// an existing folder are both mere *warnings* — so it applied, and the
+    /// sidebar gained an `OIDC` folder that nothing was ever filed into. FR-4.1
+    /// is about filing a session; a folder with nothing in it files nothing,
+    /// and the user can make one in the sidebar in two seconds.
+    ///
+    /// "Files into" means a `createNote.folderPath`, a `moveNote.toFolderPath`
+    /// or a `moveSegment` destination's `folderPath` — or a *descendant* of
+    /// one, so `createFolder Projects` survives next to `createNote` in
+    /// `Projects/Cinegram`.
+    ///
+    /// Dropping a creation is strictly additive, exactly as inserting one is
+    /// (rule 4), so ``OrganizationPlan/neverDeletesUserText`` is untouched. If
+    /// nothing is left, the plan is empty — and an empty plan is a real answer
+    /// (FR-4.6), so the user gets "nothing to do" rather than a card that
+    /// promises a folder.
+    ///
+    /// It runs **before** every other rule, so that no rule below ever reports
+    /// an `actionIndex` into a list an later drop has shortened. The cost is
+    /// one case it does not catch: when rule 1 turns the plan's only
+    /// `createNote` into an `appendToNote`, the `createFolder` beside it is
+    /// left behind — but that folder holds the colliding note, so it exists,
+    /// and creating a folder that exists is a `folderExists` warning and a
+    /// no-op, never an empty folder in the sidebar.
+    private static func dropUnusedFolders(
+        _ actions: [PlanAction],
+        warnings: inout [PlanIssue]
+    ) -> [PlanAction] {
+        var used = Set<String>()
+        for action in actions {
+            let folder: String?
+            switch action {
+            case let .createNote(create): folder = create.folderPath
+            case let .moveNote(move): folder = move.toFolderPath
+            case let .moveSegment(move):
+                if case let .newNote(_, folderPath, _) = move.destination { folder = folderPath } else { folder = nil }
+            case .createFolder, .appendToNote, .retitleNote, .tagNote:
+                folder = nil
+            }
+            var path = PathRules.normalize(folder ?? "")
+            while !path.isEmpty {
+                used.insert(path)
+                path = PathRules.parent(of: path) ?? ""
+            }
+        }
+
+        var kept: [PlanAction] = []
+        var seen = Set<String>()
+        kept.reserveCapacity(actions.count)
+        for action in actions {
+            guard case let .createFolder(create) = action else {
+                kept.append(action)
+                continue
+            }
+            let path = PathRules.normalize(create.path)
+            if !path.isEmpty, used.contains(path), seen.insert(path).inserted {
+                kept.append(action)
+                continue
+            }
+            // No `actionIndex`: the action it describes is not in the repaired
+            // plan at all, and an index that points at a *different* action
+            // would be worse than none.
+            warnings.append(PlanIssue(
+                kind: .droppedUnusedFolder,
+                detail: seen.contains(path)
+                    ? "the plan creates \(path) twice; the repeat was dropped."
+                    : "nothing in the plan files into \(path), so creating it was dropped."
+            ))
+        }
+        return kept
     }
 
     // MARK: - Rule 5: a folder deeper than the library allows (P2-09)

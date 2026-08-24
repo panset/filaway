@@ -246,13 +246,15 @@ shapes no golden had: a library with no folders at all, and a session that is a
 list of prose lines rather than a code block with an obvious home.
 
 `organize-ollama-suite` is the answer to that (ADR-073). One process, one
-Application Support, **a fresh library per scenario**, three live generations:
+Application Support, **a fresh library per scenario**, four live generations
+(the fourth added by P2-11, § 4c):
 
 | scenario | library | session | mode |
 |---|---|---|---|
 | `feedback-list` | ~8 notes at the root, **no folders** | a numbered list of short app-feedback lines | ask |
 | `command-note` | the same folderless library | one OIDC/`curl` invocation plus a line of prose | auto |
 | `existing-folders` | two folders, each with notes | a shell recipe whose home is one of them | auto |
+| `edited-command-note` | the same folderless library | a root-level command note of OIDC/`curl` lines | auto |
 
 Two consecutive full runs on a warm daemon, `llama3.1:8b`:
 
@@ -264,8 +266,8 @@ Two consecutive full runs on a warm daemon, `llama3.1:8b`:
 
 `SMOKE result failures=0` both times, and the four replayed/live phases beside
 it (`organize`, `organize-auto`, `organize-offline`, `organize-ollama`) stayed
-at zero as well. End to end the phase is **~55 s** of model time plus three
-library rebuilds; the watchdog is 700 s and the per-scenario budget 190 s.
+at zero as well. End to end the phase is **~66 s** of model time plus four
+library rebuilds; the watchdog is 900 s and the per-scenario budget 190 s.
 
 What each scenario proves, beyond "a plan came back":
 
@@ -328,6 +330,91 @@ prompt tokens (1,855 → 1,970 on the smallest scenario) and nothing regressed.
 | + `PlanRepair` rules 1–3 (§ 1.3) | 8/9 | passes |
 | + rules 4–5 and the depth line (P2-08/09) | **9/9** | **passes** |
 
+### 4c. The junk plan, and the two guards (P2-11, ADR-074)
+
+The fourth dogfooding failure was the first where nothing was rejected. A
+root-level note called `oicd commands` gained OIDC command lines, and the plan
+that came back — and **applied** — was:
+
+```
+0 createFolder  path=OIDC
+1 appendToNote  target=<that same note>  content="OIDC Commands"       (13 chars)
+2 createFolder  path=OIDC                                              ← the same action again
+3 appendToNote  target=<that same note>  content="OIDC Configuration"  (18 chars)
+```
+
+`duplicateAction` and `folderExists` are warnings, so the validator waved it
+through: the note gained two junk blocks under two `---` rules and the sidebar
+gained an empty `OIDC` folder. Two guards, both deterministic and additive:
+
+| guard | where | severity |
+|---|---|---|
+| a `createFolder` no other action files into (and every exact repeat) is dropped | `PlanRepair` rule 6, run **first**, for **every** provider | `droppedUnusedFolder` warning |
+| content that is one line, ≤ 60 characters, ≤ 4 words, and absent from the session text | `PlanValidator.contentNotFromSession` | **error**, at that action's index |
+
+On the live plan the first drops actions 0 and 2, the second rejects 1 and 3,
+nothing is left, and the user is told the plan was rejected rather than shown a
+card — `OrganizerTests/junkPlanAppliesNothing` runs exactly that end to end.
+
+**The tuning constraint.** The word limit is the interesting number. Length
+alone (≤ 60) rejects `"the deploy script retries three times"` — 37 characters,
+six words — which is the shortest *material* line in the committed goldens
+(`invalid-action-dropped`), and rejecting it would have cost a usable plan. Four
+words sits above the live labels (two words each) and below that. Re-recording
+the nine organize fixtures with the matching wire rule:
+
+**usable: 9/9, unchanged** (§ 4b was also 9/9), 2/2 smoke corpus. No previously
+usable golden became rejected.
+
+| scenario | usable | outcome | actions | warnings | s | in | out |
+|---|---|---|---|---|---|---|---|
+| new-note | yes | proposed | moveSegment | — | 11.5 | 2024 | 124 |
+| merge-code-block | yes | proposed | createNote | repairedMerge | 10.1 | 2169 | 135 |
+| retitle-untitled | yes | proposed | createNote | repairedMerge | 10.7 | 2107 | 145 |
+| new-folder | yes | proposed | createNote | repairedMerge, unreadableAction | 12.0 | 2095 | 170 |
+| nothing-to-do | yes | proposed | appendToNote | repairedCollision, repairedMerge | 8.2 | 2007 | 111 |
+| convergence | yes | proposed | createFolder, moveSegment | repairedMissingFolder | 9.6 | 2105 | 119 |
+| excluded-folder | yes | proposed | createNote | repairedMerge | 10.6 | 2169 | 135 |
+| invalid-action-dropped | yes | proposed | moveSegment | — | 8.1 | 2003 | 113 |
+| summary-no-longer-matches | yes | proposed | createNote | repairedMerge | 9.2 | 2075 | 123 |
+| smoke corpus (ask) | yes | proposed | createNote | repairedMerge | 10.7 | 2169 | 135 |
+| smoke corpus (auto) | yes | applied | — | — | 11.1 | 2169 | 135 |
+
+The content rule cost ~54 prompt tokens (2,115 → 2,169 on the smoke corpus).
+
+**The suite grew a scenario and three invariants.** `edited-command-note` is
+the junk shape — a root-level OIDC/`curl` command note in the folderless
+library, auto mode — and every scenario, not just that one, now asserts after
+the apply that no folder the plan created is empty, that no action was applied
+twice, and that every written block carries a **20-character run** of the
+session verbatim. Line-by-line equality was tried first and is too strict for a
+live model: `command-note` failed it on the first run because the model
+re-wrapped a `curl` continuation, and the block was still carried material.
+
+Two consecutive full runs, warm daemon, `llama3.1:8b`, `SMOKE result
+failures=0` both times across all five phases:
+
+| scenario | outcome | action kinds | no-junk | run A s | run B s |
+|---|---|---|---|---|---|
+| `feedback-list` | proposed → accepted → applied | `appendToNote` | 3/3 ok | 12.5 | 12.6 |
+| `command-note` | applied (auto) | `createFolder`, `createNote`, `retitleNote`, `tagNote` | 3/3 ok | 21.9 | 22.0 |
+| `existing-folders` | applied (auto) | `createNote` | 3/3 ok | 14.5 | 13.7 |
+| `edited-command-note` | applied (auto) | `createFolder`, `createNote` | 3/3 ok | 17.4 | 17.4 |
+
+Neither guard fired in those runs — no `droppedUnusedFolder`, no
+`contentNotFromSession` — which is the intended split: the wire rule does the
+work and the guards are the net underneath it, pinned offline by
+`PlanRepairUnusedFolderTests` and `PlanContentFromSessionTests` rather than by
+a live model's mood. The phase's outer watchdog is now 900 s for four
+scenarios.
+
+**A fragility the run found in `organize-ollama`.** Its "bytes moved"
+fingerprint read the *seed notes' bodies*, and a live model legally answers
+with a `createNote` at a new path, a `retitleNote`, a `moveNote` or a `tagNote`
+— front matter, not body. One run failed `live-accept-moved-bytes` with the
+Activity row right there proving the apply had happened. It now walks the notes
+root instead.
+
 ---
 
 ## 5. The smoke phases
@@ -343,7 +430,7 @@ FILAWAY_SMOKE_OLLAMA=1 Tools/smoke.sh
 | `organize-auto` | replay (Claude fixture) | **failures=0** |
 | `organize-offline` | mock network failure | **failures=0** |
 | `organize-ollama` | **live `llama3.1:8b`** | **failures=0** |
-| `organize-ollama-suite` | **live `llama3.1:8b`**, three libraries | **failures=0** (§ 4a) |
+| `organize-ollama-suite` | **live `llama3.1:8b`**, four libraries | **failures=0** (§ 4a, § 4c) |
 
 `SMOKE result failures=0`. The three replayed phases are unchanged by any of
 this — the repair is off for Claude, and the wire addendum is Ollama-only — and

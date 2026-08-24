@@ -20,6 +20,7 @@ import FilawayCore
 /// | `feedback-list` | ~8 notes at the root, **no folders** | a bulleted list of short app-feedback lines | ask |
 /// | `command-note` | the same folderless library | one OIDC/`curl` invocation with a line of prose | auto |
 /// | `existing-folders` | two folders, each with notes | a shell recipe whose home is one of them | auto |
+/// | `edited-command-note` | the same folderless library | a root-level command note of OIDC/`curl` lines | auto |
 ///
 /// `feedback-list` is the `folderTooDeep` shape verbatim: a model shown a
 /// library with no folders invents a filing cabinet
@@ -37,7 +38,9 @@ import FilawayCore
 ///   then accepted (ask), or an explicit `nothingToDo`;
 /// * a plan the validator **rejects is a phase failure**, and the transcript
 ///   prints the issue *kinds* so the next repair rule has a name;
-/// * bytes moved or arrived on disk;
+/// * bytes moved or arrived on disk, and what landed is **not junk** — no
+///   folder the plan created is left empty, no action was applied twice, and
+///   every block written carries a line of the session (P2-11, ADR-074);
 /// * the Activity log has the event and it names the model that produced it;
 /// * **Settings → Activity** shows the same event through `ActivityModel`, the
 ///   object `ActivitySettingsView` reads — plus an `organizeFailed` row, which
@@ -102,6 +105,13 @@ enum OrganizeSuiteSmokeCheck {
                 sessionPath: "Scratch.md",
                 sessionBody: shellRecipeSession
             ),
+            Scenario(
+                name: "edited-command-note",
+                mode: .autoFile,
+                notes: folderlessLibrary,
+                sessionPath: "oidc commands.md",
+                sessionBody: oidcSession
+            ),
         ]
     }
 
@@ -148,6 +158,29 @@ enum OrganizeSuiteSmokeCheck {
     ```
 
     remember: the token expires in an hour
+    """
+
+    /// P2-11's live failure verbatim in shape: a root-level command note in a
+    /// folderless library, whose session is a handful of OIDC/`curl` lines.
+    /// The plan that came back created an `OIDC` folder nothing was filed into
+    /// and appended two bare labels to this very note (ADR-074).
+    static let oidcSession = """
+    # oidc commands
+
+    Get a token from staging:
+
+    ```sh
+    curl -sS -X POST https://auth.example.test/oidc/token \\
+      -d grant_type=client_credentials -d client_id=$CLIENT_ID
+    ```
+
+    Read the discovery document:
+
+    ```sh
+    curl -sS https://auth.example.test/.well-known/openid-configuration | jq .
+    ```
+
+    the access token is good for an hour, the refresh token for a day
     """
 
     static let shellRecipeSession = """
@@ -302,6 +335,9 @@ enum OrganizeSuiteSmokeCheck {
                 check("\(label)/auto-applied-bytes", moved)
                 check("\(label)/auto-card-offers-undo", card.eventID != nil)
             }
+
+            // P2-11: what applied has to be free of junk, in every scenario.
+            checkNoJunk(label: label, plan: card.plan, scenario: scenario, root: root)
         }
 
         // 4 — Activity (FR-4.3, FR-6.6).
@@ -323,6 +359,98 @@ enum OrganizeSuiteSmokeCheck {
         // 5 — the same event through Settings → Activity's own model.
         await checkSettingsActivity(label: label, organize: organize, expecting: events.first?.id)
         return seconds
+    }
+
+    // MARK: - No junk (P2-11, ADR-074)
+
+    /// Three invariants every applied scenario has to satisfy, not just the one
+    /// the live junk plan came from.
+    ///
+    /// A plan can be *usable* and still be junk: the 2026-08-24 failure created
+    /// an `OIDC` folder nothing was ever filed into and appended two bare
+    /// labels to the session's own note, and every check this phase had said
+    /// yes. So:
+    ///
+    /// 1. **No empty folder.** Every folder the plan created holds something
+    ///    when the apply is done.
+    /// 2. **No action twice.** The live plan carried the same `createFolder`
+    ///    at index 0 and index 2.
+    /// 3. **Content is carried.** Every block an `appendToNote` or
+    ///    `createNote` writes has at least one line that is in the session
+    ///    text — the model may choose *what* to file, never *what to write*.
+    ///
+    /// Everything printed is a count or a kind (NFR-4); no line of the model's
+    /// content or the user's text is ever echoed.
+    private static func checkNoJunk(
+        label: String,
+        plan: OrganizationPlan?,
+        scenario: Scenario,
+        root: URL
+    ) {
+        guard let plan else {
+            check("\(label)/no-junk", false, "no plan on the card")
+            return
+        }
+
+        var emptyFolders = 0
+        for action in plan.actions {
+            guard case let .createFolder(create) = action else { continue }
+            let url = root.appendingPathComponent(create.path, isDirectory: true)
+            let contents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+            if contents.filter({ !$0.hasPrefix(".") }).isEmpty { emptyFolders += 1 }
+        }
+        check("\(label)/no-empty-folder-was-created", emptyFolders == 0, "\(emptyFolders) empty")
+
+        let duplicates = plan.actions.count - Set(plan.actions).count
+        check("\(label)/no-action-twice", duplicates == 0, "\(duplicates) repeats")
+
+        let session = normalized(scenario.sessionBody)
+        var uncarried = 0
+        var checked = 0
+        for action in plan.actions {
+            let content: String
+            switch action {
+            case let .appendToNote(append): content = append.content
+            case let .createNote(create): content = create.content
+            default: continue
+            }
+            checked += 1
+            if !carries(normalized(content), from: session) { uncarried += 1 }
+        }
+        check("\(label)/content-is-carried-from-the-session", uncarried == 0,
+              "\(uncarried) of \(checked) blocks carried nothing")
+    }
+
+    /// How much of the session a written block has to reproduce verbatim.
+    ///
+    /// Line-by-line equality is too strict to be a gate on a live model: it
+    /// re-wraps a `curl` continuation, drops a backslash, joins two lines, and
+    /// the block is still material it carried. A run of this many characters
+    /// surviving whitespace-normalisation is not something a model *composes*
+    /// by accident, and the two labels of the live failure — 13 and 18
+    /// characters, sharing nothing with the session but the word `oidc` inside
+    /// a URL — come nowhere near it.
+    private static let carriedRun = 20
+
+    private static func carries(_ content: String, from session: String) -> Bool {
+        guard !content.isEmpty else { return false }
+        guard content.count >= carriedRun else { return session.contains(content) }
+        var index = content.startIndex
+        while let end = content.index(index, offsetBy: carriedRun, limitedBy: content.endIndex) {
+            if session.contains(content[index ..< end]) { return true }
+            index = content.index(after: index)
+        }
+        return false
+    }
+
+    /// Lower-cased, whitespace-collapsed, Markdown furniture off the front —
+    /// the same shape `PlanValidator` compares in.
+    private static func normalized(_ text: String) -> String {
+        var scalars = Substring(text)
+        while let first = scalars.first, "#>*+-".contains(first) || first.isWhitespace {
+            scalars = scalars.dropFirst()
+        }
+        return scalars.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     // MARK: - Settings → Activity

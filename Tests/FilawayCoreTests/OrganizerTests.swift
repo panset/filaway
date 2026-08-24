@@ -538,8 +538,8 @@ struct OrganizerTests {
         let plan = PlanFixtures.toolInput(
             summary: "Curl snippet appended to curl.",
             actions: [
-                PlanFixtures.appendToNote(Self.curlID, content: "curl …"),
-                PlanFixtures.appendToNote(NoteID(), content: "orphaned"),
+                PlanFixtures.appendToNote(Self.curlID, content: "remember: token expires hourly"),
+                PlanFixtures.appendToNote(NoteID(), content: "remember: token expires hourly"),
             ]
         )
         let harness = await Self.harness(provider: ScriptedProvider(plan: plan))
@@ -558,7 +558,7 @@ struct OrganizerTests {
         let plan = PlanFixtures.toolInput(
             summary: "Curl snippet appended to curl and a new Compose folder created.",
             actions: [
-                PlanFixtures.appendToNote(Self.curlID, content: "curl …"),
+                PlanFixtures.appendToNote(Self.curlID, content: "remember: token expires hourly"),
                 PlanFixtures.createFolder("Commands/Docker/Compose"),
             ]
         )
@@ -575,12 +575,59 @@ struct OrganizerTests {
         #expect(await harness.baseline(Self.scratchID) == nil)
     }
 
+    /// P2-11's live junk plan, end to end (ADR-074). In auto mode, which is
+    /// how it reached disk: `createFolder OIDC`, a label appended to the
+    /// session's own note, the same `createFolder` again, another label.
+    /// Before the guards it applied; now nothing does.
+    @Test("the live junk plan applies nothing at all")
+    func junkPlanAppliesNothing() async {
+        let plan = PlanFixtures.toolInput(
+            summary: "Filed the OIDC commands.",
+            actions: [
+                PlanFixtures.createFolder("OIDC"),
+                PlanFixtures.appendToNote(Self.scratchID, content: "OIDC Commands"),
+                PlanFixtures.createFolder("OIDC"),
+                PlanFixtures.appendToNote(Self.scratchID, content: "OIDC Configuration"),
+            ]
+        )
+        let harness = await Self.harness(mode: .auto, provider: ScriptedProvider(plan: plan))
+
+        await harness.organizer.sessionEnded(harness.session([Self.scratchID]))
+        await harness.organizer.drain()
+
+        #expect(harness.applier.applied.isEmpty, "no byte of that may reach disk")
+        #expect(harness.recorder.kinds == ["failed"], "\(harness.recorder.kinds)")
+        guard case let .invalidPlan(validation)? = harness.recorder.failures.first else {
+            Issue.record("expected an invalid-plan failure")
+            return
+        }
+        #expect(validation.hasWarning(.droppedUnusedFolder), "both folders were dropped")
+        #expect(validation.hasError(.contentNotFromSession), "both labels were rejected")
+    }
+
+    @Test("a plan whose only action is an unused folder is nothing to do, not a card")
+    func onlyAnUnusedFolderIsNothingToDo() async {
+        let plan = PlanFixtures.toolInput(
+            summary: "Made a place for it.",
+            actions: [PlanFixtures.createFolder("OIDC")]
+        )
+        let harness = await Self.harness(provider: ScriptedProvider(plan: plan))
+
+        await harness.organizer.sessionEnded(harness.session([Self.scratchID]))
+        await harness.organizer.drain()
+
+        // FR-4.6: the empty plan is a real answer, and the baseline advances
+        // so the same text is not sent again next session.
+        #expect(harness.recorder.kinds == ["skipped(nothingToDo)"], "\(harness.recorder.kinds)")
+        #expect(harness.applier.applied.isEmpty)
+    }
+
     @Test("a hallucinated action name is a warning, not a lost plan")
     func unknownActionIsAWarning() async {
         let plan = PlanFixtures.toolInput(
             summary: "Curl snippet appended to curl.",
             actions: [
-                PlanFixtures.appendToNote(Self.curlID, content: "curl …"),
+                PlanFixtures.appendToNote(Self.curlID, content: "remember: token expires hourly"),
                 .object(["action": "deleteNote", "note": .object(["id": .string(Self.scratchID.uuidString)])]),
             ]
         )

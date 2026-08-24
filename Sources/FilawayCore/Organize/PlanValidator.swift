@@ -76,6 +76,15 @@ public enum PlanIssueKind: String, Sendable, Hashable, Codable, CaseIterable {
     /// ``PathRules/maxFolderDepth`` to its last two levels — the live
     /// `folderTooDeep` failure (P2-09, ADR-073). Always a warning.
     case repairedFolderDepth
+    /// ``PlanRepair`` dropped a `createFolder` no other action files into —
+    /// the empty folder the live junk plan left in the sidebar (P2-11,
+    /// ADR-074). Always a warning; creating nothing is additive.
+    case droppedUnusedFolder
+    /// An `appendToNote` or `createNote` whose content is one short line that
+    /// is nowhere in the session text: a bare label the model invented rather
+    /// than material it carried (P2-11, ADR-074). Always an **error** — the
+    /// live failure wrote two of these into a note under a `---` rule.
+    case contentNotFromSession
 }
 
 /// One finding.
@@ -133,10 +142,21 @@ public struct PlanValidator: Sendable {
     public var context: OrganizeContext
     /// Guard against a runaway model; a session plan is normally 1–5 actions.
     public var maxActions: Int
+    /// Everything the user wrote in this session, when the caller has it.
+    ///
+    /// Only the organizer does: ``OrganizeContext/bodies`` is the *session's*
+    /// notes there (``OrganizeContextBuilder``), and the applier's is the notes
+    /// the plan happens to reference — a different set, and one that cannot
+    /// answer "did this line come out of the session?". So P2-11's
+    /// ``PlanIssueKind/contentNotFromSession`` guard is an **option**, and
+    /// `nil` — the applier, and every caller that only wants the structural
+    /// checks — turns it off rather than guessing.
+    public var sessionText: String?
 
-    public init(context: OrganizeContext, maxActions: Int = 50) {
+    public init(context: OrganizeContext, maxActions: Int = 50, sessionText: String? = nil) {
         self.context = context
         self.maxActions = maxActions
+        self.sessionText = sessionText
     }
 
     public func validate(_ plan: OrganizationPlan, unknownActions: [UnknownPlanAction] = []) -> PlanValidation {
@@ -173,6 +193,11 @@ public struct PlanValidator: Sendable {
                 path = PathRules.parent(of: path) ?? ""
             }
         }
+
+        // The session text every `content` field has to be drawn from (P2-11),
+        // normalised once. `nil` when the caller has no session — the guard
+        // then does not run at all.
+        let sessionText = sessionText.map(Self.matchText(of:)).flatMap { $0.isEmpty ? nil : $0 }
 
         var seenActions: [PlanAction: Int] = [:]
         var moveTargets: [NoteID: (index: Int, folder: String)] = [:]
@@ -243,6 +268,10 @@ public struct PlanValidator: Sendable {
                     warnings.append(PlanIssue(
                         kind: .emptyContent, actionIndex: index, detail: "\(create.title) would be empty."
                     ))
+                } else {
+                    validateContentIsFromTheSession(
+                        create.content, index: index, sessionText: sessionText, errors: &errors
+                    )
                 }
                 validateTags(create.tags, index: index, errors: &errors)
 
@@ -251,6 +280,10 @@ public struct PlanValidator: Sendable {
                     errors.append(PlanIssue(
                         kind: .emptyContent, actionIndex: index, detail: "nothing to append to \(append.target.label)."
                     ))
+                } else {
+                    validateContentIsFromTheSession(
+                        append.content, index: index, sessionText: sessionText, errors: &errors
+                    )
                 }
 
             case let .createFolder(create):
@@ -477,6 +510,109 @@ public struct PlanValidator: Sendable {
                 kind: .noOp, actionIndex: index, detail: "the segment would move onto itself."
             ))
         }
+    }
+
+    // MARK: - Content has to come from the session (P2-11, ADR-074)
+
+    /// A single line is a *label* — a heading, a title, a category name — when
+    /// it is no longer than this **and** carries no more than
+    /// ``labelWordLimit`` words. Both, not either.
+    ///
+    /// The numbers are hedges, not laws, and they are set from measurements at
+    /// both ends. The two labels the live failure wrote were 13 and 18
+    /// characters and two words each. The shortest *material* line in the
+    /// committed goldens is 37 characters and six words ("the deploy script
+    /// retries three times", `invalid-action-dropped`). Anything longer or
+    /// wordier than a label is waved through: a long line is material even when
+    /// the model paraphrased it, and this guard may only reject what is
+    /// obviously junk.
+    static let labelLengthLimit = 60
+    static let labelWordLimit = 4
+
+    /// Rejects an `appendToNote` / `createNote` whose content is one short line
+    /// the session never contained.
+    ///
+    /// The live failure (2026-08-24, `llama3.1:8b`, a root-level note of OIDC
+    /// commands) appended `OIDC Commands` and then `OIDC Configuration` to the
+    /// very note the session was written in — two bare labels under two `---`
+    /// rules, no material anywhere. Every existing guard passed: the note
+    /// exists, the content is not empty, the reference resolves.
+    ///
+    /// **Why an error rather than a warning.** A warning would have applied it.
+    /// An error at *this action's index* is what lets
+    /// ``Organizer/repair(plan:unknownActions:context:repairingCollisions:)``
+    /// drop exactly the junk and keep whatever else the plan got right.
+    ///
+    /// **What it deliberately does not touch.** Multi-line content — which is
+    /// what a `createNote` composed from several session lines looks like — and
+    /// any single line over ``labelLengthLimit``. A model that quotes the
+    /// session, however loosely, keeps its action.
+    private func validateContentIsFromTheSession(
+        _ content: String,
+        index: Int,
+        sessionText: String?,
+        errors: inout [PlanIssue]
+    ) {
+        guard let sessionText, Self.isLabelOnly(content, sessionText: sessionText) else { return }
+        let count = content.trimmingCharacters(in: .whitespacesAndNewlines).count
+        errors.append(PlanIssue(
+            kind: .contentNotFromSession,
+            actionIndex: index,
+            // NFR-4: the length and the shape, never the line itself.
+            detail: "the content is a single \(count)-character line that is not in the session text; "
+                + "it is a label, not material."
+        ))
+    }
+
+    /// `true` when `content` is one short line and `sessionText` — already
+    /// through ``matchText(of:)`` — does not contain it.
+    ///
+    /// Matching is case-insensitive and whitespace-normalised, and the needle
+    /// loses its Markdown furniture first (`#`, `-`, `1.`, `>`, a trailing
+    /// `:`), so `## curl` still counts as carried when the session said `curl`.
+    /// Every one of those makes the guard *more* permissive on purpose.
+    static func isLabelOnly(_ content: String, sessionText: String) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else { return false }
+        guard trimmed.count <= labelLengthLimit else { return false }
+        let needle = matchText(of: stripMarkdownFurniture(trimmed))
+        guard !needle.isEmpty else { return false }
+        guard needle.split(separator: " ").count <= labelWordLimit else { return false }
+        return !sessionText.contains(needle)
+    }
+
+    /// The comparable form of a body: lower-cased, every whitespace run one
+    /// space.
+    static func matchText(of text: String) -> String {
+        text.lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+    }
+
+    /// Drops a line's leading list/heading/quote markers and its trailing `:`
+    /// or `#`s.
+    static func stripMarkdownFurniture(_ line: String) -> String {
+        var scalars = Substring(line)
+        while let first = scalars.first {
+            if first == "#" || first == ">" || first == "*" || first == "+" || first == "-" || first.isWhitespace {
+                scalars = scalars.dropFirst()
+                continue
+            }
+            // An ordered-list marker: digits then `.` or `)`.
+            let digits = scalars.prefix(while: \.isNumber)
+            if !digits.isEmpty {
+                let rest = scalars.dropFirst(digits.count)
+                if let marker = rest.first, marker == "." || marker == ")" {
+                    scalars = rest.dropFirst()
+                    continue
+                }
+            }
+            break
+        }
+        while let last = scalars.last, last == ":" || last == "#" || last.isWhitespace {
+            scalars = scalars.dropLast()
+        }
+        return String(scalars)
     }
 
     private func validateTitle(_ title: String, index: Int, errors: inout [PlanIssue]) {

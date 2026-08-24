@@ -48,6 +48,23 @@ public struct OrganizeContext: Sendable, Equatable {
         )
     }
 
+    /// Every session body, in a stable order — what P2-11's
+    /// ``PlanIssueKind/contentNotFromSession`` guard matches a plan's `content`
+    /// against (ADR-074).
+    ///
+    /// Meaningful only for a context the *organizer* built, where ``bodies`` is
+    /// the session's own notes; ``PlanApplier`` fills ``bodies`` with the notes
+    /// a plan references instead, which is a different set, and it does not ask
+    /// for this. `nil` when no body was loaded — the same "cannot be judged
+    /// here" the `segmentUnverified` warning stands for.
+    public var sessionBodies: String? {
+        guard !bodies.isEmpty else { return nil }
+        let joined = bodies.sorted { $0.key.uuidString < $1.key.uuidString }
+            .map(\.value)
+            .joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
+    }
+
     /// The exclusion rule for this context.
     public var exclusionFilter: ExclusionFilter { ExclusionFilter(excludedFolders: excludedFolders) }
 

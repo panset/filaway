@@ -2976,3 +2976,116 @@ Three properties make it a regression signal rather than a taste test:
 - What is *not* fixed: the model still reaches for a folder that does not exist
   more often than for one that does. The repair makes that harmless; making it
   rare is prompt work, and the suite is now where it would be measured.
+
+---
+
+## ADR-074 — A plan may be valid and still be junk (amends ADR-070/072/073)
+
+**Context.** The fourth dogfooding failure (P2-11, 2026-08-24), and the first
+one where nothing was *rejected*: the user added OIDC command lines to a
+root-level note called `oicd commands`, and `llama3.1:8b` answered with
+
+```
+0 createFolder  path=OIDC
+1 appendToNote  target=<that same note>  content="OIDC Commands"       (13 chars)
+2 createFolder  path=OIDC                                              ← the same action again
+3 appendToNote  target=<that same note>  content="OIDC Configuration"  (18 chars)
+```
+
+Every guard passed. `duplicateAction` and `folderExists` are **warnings**, not
+errors; the references resolve; the content is not empty; nothing collides;
+nothing is too deep. So the card said *Session organized*, the note gained two
+junk blocks (`---` / `OIDC Commands` / `---` / `OIDC Configuration` — bare
+labels, no material), and the sidebar gained an `OIDC` folder nothing was ever
+filed into. Undo works; that is not the point. The three previous failures were
+about plans Filaway *refused*; this one is about a plan it accepted.
+
+Two things were missing, and neither is a taste judgement.
+
+**Decision 1 — a `createFolder` nothing files into is dropped.**
+`PlanRepair` rule 6: a `createFolder` whose path is neither a filing target of
+some other action (`createNote.folderPath`, `moveNote.toFolderPath`, a
+`moveSegment` destination's `folderPath`) nor an ancestor of one is dropped,
+and so is every exact repeat of one that survives. A `droppedUnusedFolder`
+**warning** says so on the card and in the Activity row.
+
+Three details that are decisions in their own right:
+
+- **It runs first of all the rules**, not last. It is the only rule that
+  *removes* an action, so running it first means no other rule ever reports an
+  `actionIndex` into a list a later drop has shortened. The cost is one case it
+  misses — rule 1 turning the plan's only `createNote` into an `appendToNote`
+  leaves the `createFolder` beside it — and that folder holds the colliding
+  note, so it exists, and creating a folder that exists is a no-op.
+- **It is not gated on `AIProviderKind.repairsPlanCollisions`**, unlike rules
+  1–5. ADR-070's reasoning — quietly rewriting a frontier model's plan would
+  hide a prompt regression behind a repair — does not reach it, because nothing
+  is rewritten: an empty folder in the sidebar is junk whoever wrote it.
+  `Organizer.repair` therefore calls `PlanRepair.droppingUnusedFolders` for
+  every provider and the gated `PlanRepair.repair` only for the local ones.
+- **A summary that still promises the folder discards the plan**, exactly as a
+  dropped *action* does (`summaryStillMatches`). FR-4.2 wants the card to state
+  what happens; a card that says "created an OIDC folder" over a plan that does
+  not is the same lie whether the action was dropped for being invalid or for
+  being useless.
+
+*The user-authored case.* A plan whose only action is a `createFolder` now
+becomes the empty plan, and the user is told "nothing needed filing" (FR-4.6)
+rather than shown a card. That is deliberate. FR-4.1's closed action set exists
+to **file a writing session**; a folder with nothing in it files nothing, and
+the sidebar's own New Folder… makes one in two seconds with the user choosing
+the name. Nothing is lost that the user cannot do faster by hand.
+
+**Decision 2 — content has to be carried out of the session.**
+`PlanIssueKind.contentNotFromSession`, an **error**: an `appendToNote` or
+`createNote` whose content, trimmed, is a single line of at most 60 characters
+and at most 4 words, and which the session text does not contain, is a label —
+a heading, a title, a category name — and not material. An error at that
+action's index, so `Organizer.repair`'s existing reduction drops exactly the
+junk and keeps whatever else the plan got right.
+
+The whole difficulty is the false positive, so every dimension of the rule is
+set to let material through:
+
+- **Multi-line content is never touched.** That is what a `createNote` composed
+  from several session lines looks like.
+- **Both limits must hold.** The two live labels were 13 and 18 characters and
+  two words each; the shortest *material* line in the committed goldens is 37
+  characters and six words ("the deploy script retries three times",
+  `invalid-action-dropped`), which the word limit sits below. Length alone
+  would have rejected it.
+- **Matching is case-insensitive, whitespace-normalised, and strips the
+  needle's Markdown furniture** (`#`, `-`, `1.`, `>`, a trailing `:`), so
+  `## curl` counts as carried when the session said `curl`.
+- **It is an option on `PlanValidator`, not a default.** Only the organizer has
+  the session: `OrganizeContext.bodies` is the session's own notes there
+  (`OrganizeContextBuilder`), while `PlanApplier` fills it with the notes a plan
+  *references* — a different set, which cannot answer the question, so the
+  applier's re-validation does not ask it. The user's own edited plan
+  (`Organizer.approve`) does not ask either: the guard is aimed at a model.
+
+`OllamaWire.smallModelRules` gained the matching line — content must be lines
+carried from the session, never a bare label, heading or title, and never the
+same action twice — so the model is told before it is judged.
+
+**Consequences.**
+- The nine committed Ollama organize fixtures and the smoke-corpus one were
+  re-recorded (the rules are part of the wire body). **9/9 usable, unchanged**;
+  no golden plan became rejected.
+- `organize-ollama-suite` grew a fourth scenario, `edited-command-note` — the
+  junk shape — and three **suite-wide** post-apply invariants: no folder the
+  plan created is left empty, no action applied twice, and every written block
+  carries a 20-character run of the session verbatim. A usable outcome was
+  never the same thing as a good one, and the suite only checked the first.
+  Line-by-line equality was tried first and is too strict for a live model: it
+  re-wraps a `curl` continuation and the block is still carried.
+- `organize-ollama`'s "bytes moved" fingerprint now walks the notes root
+  instead of reading the seed notes' bodies. A live model legally answers with
+  a `createNote` at a new path, a `retitleNote`, a `moveNote` or a `tagNote`
+  (front matter, not body), and the old fingerprint saw none of those — one run
+  failed on exactly that, with the Activity row proving the apply had happened.
+- `PlanIssueKind` gains two cases. Nothing switches exhaustively over it and it
+  is `Codable` by raw value, so old Activity rows still decode.
+- What is *not* fixed: a label of five words or more, or one the session
+  happens to contain, still applies. The guard is deliberately the floor under
+  obvious junk rather than a judgement about whether a block was worth writing.
