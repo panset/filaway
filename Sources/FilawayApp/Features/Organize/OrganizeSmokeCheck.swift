@@ -333,9 +333,9 @@ enum OrganizeSmokeCheck {
         }
         check("live-plan-has-an-action", true, "\(plan.actions.count) actions")
 
-        let before = await tree(store)
+        let before = tree()
         organize.accept(card)
-        let applied = await poll(seconds: 60) { await tree(store) != before }
+        let applied = await poll(seconds: 60) { tree() != before }
         check("live-accept-moved-bytes", applied,
               applied ? "" : "nothing on disk changed — \(organize.lastFailureReason ?? "no reason given")")
 
@@ -354,10 +354,23 @@ enum OrganizeSmokeCheck {
 
     /// A content-free fingerprint of the corpus, so "something moved" needs no
     /// guess about *what* the model chose to do.
-    private static func tree(_ store: NoteStore) async -> [String: Int] {
+    ///
+    /// It walks the notes root rather than reading the seeds' bodies, because
+    /// the seed list cannot see half of what a plan may legally do: a note
+    /// created at a new path, a retitle, a move, or a `tagNote` — front matter,
+    /// which is not the body at all. A live model picks a different one of
+    /// those every run, and a fingerprint that misses the one it picked fails
+    /// the phase for no reason (P2-11).
+    private static func tree() -> [String: Int] {
         var sizes: [String: Int] = [:]
-        for seed in seeds {
-            sizes[seed.path] = ((try? await store.read(seed.path).body) ?? "").utf8.count
+        let root = AppSettings.notesRoot
+        let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+        )
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension == "md" else { continue }
+            let path = url.path.replacingOccurrences(of: root.path + "/", with: "")
+            sizes[path] = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
         }
         return sizes
     }

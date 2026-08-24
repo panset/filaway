@@ -42,11 +42,15 @@
 #              against an injected validator (no daemon), Continue unlocks, and
 #              Finish writes ai.provider / ai.ollama.baseURL / ai.ollama.model
 #   onboarding-ollama2  relaunch: the provider preference persisted
-#   organize-ollama-suite  GATED, P2-09. Three live scenarios on the library
-#              shapes real dogfooding failed on: a folderless library with a
-#              bulleted feedback session (ask), the same library with a command
-#              note (auto), and a library whose right answer is a folder that
-#              already exists (auto). A rejected plan is a phase failure.
+#   organize-ollama-suite  GATED, P2-09/P2-11. Four live scenarios on the
+#              library shapes real dogfooding failed on: a folderless library
+#              with a bulleted feedback session (ask), the same library with a
+#              command note (auto), a library whose right answer is a folder
+#              that already exists (auto), and a root-level OIDC command note
+#              (auto — the junk plan of P2-11). A rejected plan is a phase
+#              failure, and so is junk that applies: an empty folder the plan
+#              created, an action applied twice, or a written block carrying no
+#              line of the session.
 #   organize-ollama  GATED. The organize session against a *live* local model.
 #              Runs only with FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
 #              localhost:11434; otherwise it prints SKIPPED and costs nothing.
@@ -438,9 +442,9 @@ run_ollama_phase() {
     return
   fi
   run_phase organize-ollama 240
-  # Three live generations plus three library rebuilds. The per-scenario budget
+  # Four live generations plus four library rebuilds. The per-scenario budget
   # inside the phase is 190 s; this is the outer stop.
-  run_phase organize-ollama-suite 700
+  run_phase organize-ollama-suite 900
 }
 run_ollama_phase
 
