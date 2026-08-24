@@ -249,6 +249,14 @@ trap cleanup EXIT INT TERM
 # run_phase <name> <timeout-seconds>
 run_phase() {
   local phase="$1" limit="$2" status
+  # FILAWAY_SMOKE_ONLY="organize-ollama settings" runs just those phases — for
+  # iterating on one phase without paying for the suite. Unset = every phase.
+  if [ -n "${FILAWAY_SMOKE_ONLY:-}" ]; then
+    case " $FILAWAY_SMOKE_ONLY " in
+      *" $phase "*) ;;
+      *) return ;;
+    esac
+  fi
   local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root="" shots=""
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
