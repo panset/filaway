@@ -25,6 +25,22 @@ public enum AITransport {
         return configuration
     }
 
+    /// Parses a `retry-after` header: delta-seconds, or an HTTP date.
+    public static func retryAfter(_ header: String?, now: Date = Date()) -> TimeInterval? {
+        guard let header = header?.trimmingCharacters(in: .whitespaces), !header.isEmpty else { return nil }
+        if let seconds = TimeInterval(header) { return Swift.max(0, seconds) }
+        if let date = httpDateFormatter.date(from: header) { return Swift.max(0, date.timeIntervalSince(now)) }
+        return nil
+    }
+
+    private static let httpDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
+
     /// Runs `operation`, retrying it per ``RetryPolicy`` — 429/5xx/network/
     /// timeout only, honouring `retry-after`, never a 4xx.
     ///

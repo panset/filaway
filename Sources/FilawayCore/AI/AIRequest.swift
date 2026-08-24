@@ -150,4 +150,20 @@ public struct AIRequest: Sendable, Hashable, Codable {
     public var promptByteCount: Int {
         (system?.utf8.count ?? 0) + messages.reduce(0) { $0 + $1.text.utf8.count }
     }
+
+    /// The tool name ``toolChoice`` forces, when it forces one.
+    ///
+    /// Providers that have no `tool_choice` at all (Ollama) need this to know
+    /// which schema to constrain the output to, and what to name the tool-use
+    /// block they synthesise.
+    public var forcedToolName: String? {
+        guard case let .tool(name) = toolChoice else { return nil }
+        return name
+    }
+
+    /// The forced tool itself, when the request also carries its definition.
+    public var forcedTool: AITool? {
+        guard let name = forcedToolName else { return nil }
+        return tools.first { $0.name == name }
+    }
 }
