@@ -19,8 +19,15 @@ struct FilawayApp: App {
         }
 
         // Settings → General / AI / Activity, ⌘, (M2-11, FR-8.1).
+        //
+        // `SettingsSceneRoot`, not `SettingsRootView(model: .shared)`: forcing
+        // `SettingsModel.shared` here would build it *inside* the App's body —
+        // a SwiftUI update — and its `init` resolves the notes root, which runs
+        // the FR-7.1 gate's modal run loop and wedges the scene graph before a
+        // window ever exists (ADR-061). A wrapper defers the `shared` touch to
+        // the first time the Settings window is actually drawn.
         Settings {
-            SettingsRootView(model: SettingsModel.shared)
+            SettingsSceneRoot()
         }
 
         // FR-4.3 / FR-4.4 — the organization history, its diffs and Undo.
@@ -32,6 +39,12 @@ struct FilawayApp: App {
         .keyboardShortcut("a", modifiers: [.option, .command])
         .defaultSize(width: 880, height: 560)
     }
+}
+
+/// Defers `SettingsModel.shared` out of the App body — see the `Settings`
+/// scene above (ADR-061).
+private struct SettingsSceneRoot: View {
+    var body: some View { SettingsRootView(model: SettingsModel.shared) }
 }
 
 enum ActivityWindowID {
@@ -89,13 +102,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var isTerminating = false
 
+    /// **The FR-7.1 gate has to run before SwiftUI touches its scene graph.**
+    ///
+    /// `AppSettings.notesRoot` triggers `OnboardingPresenter.runIfNeeded()` for
+    /// whoever asks first (ADR-049), and the first asker is `AppModel.shared` —
+    /// whose `let` is forced from inside `StateObject.Box.update`, i.e. *inside*
+    /// an AttributeGraph update pass. Running a nested `NSApp.runModal` session
+    /// there wedges the graph: the `WindowGroup` never finishes installing, so
+    /// no window is ever created, `ShellView.task` never runs and `bootstrap()`
+    /// never happens. The symptom is a first launch that finishes onboarding
+    /// into an empty screen (`NSApp.windows` literally empty) — ADR-061.
+    ///
+    /// `applicationWillFinishLaunching(_:)` is the right *moment* but the wrong
+    /// *hook*: implementing that delegate method on an
+    /// `@NSApplicationDelegateAdaptor` delegate replaces SwiftUI's own and the
+    /// scene is never created at all. Observing the matching notification gets
+    /// the same timing — before `_handleAEOpenEvent`, so before any scene body
+    /// is evaluated — and leaves SwiftUI's delegate method in place.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // The FR-7.1 launch gate, before anything opens a library.
-        // `runIfNeeded()` returns at once after the first run; on the first run
-        // it does not return until the flow is finished. `AppSettings.notesRoot`
-        // calls it too, so whichever happens first wins and the root this launch
-        // opens is always the one the user just chose. See ADR-049.
-        OnboardingPresenter.runIfNeeded()
+        // The FR-7.1 launch gate — **scheduled**, not run inline.
+        //
+        // SwiftUI calls this from inside AppKit's `_handleAEOpenEvent:`, the
+        // same Apple Event dispatch that builds the `WindowGroup`'s window. A
+        // nested `NSApp.runModal` session in that call either wedges the scene
+        // (no window is ever created) or crashes it outright, depending on how
+        // far along the scene is — both were measured. `scheduleIfNeeded()`
+        // puts the flow on the next run-loop turn instead, and
+        // `AppModel.bootstrap()` waits for it before it opens anything.
+        // ADR-049, ADR-061.
+        OnboardingPresenter.scheduleIfNeeded()
 
         // M4-02: the one listener for `.filawayOpenAISettings` — the status
         // pill, the ⌘K notice and the sidebar prompt all post it.

@@ -52,6 +52,13 @@ final class OnboardingWindowController {
             backing: .buffered,
             defer: false
         )
+        // `close()` on a programmatically created `NSWindow` releases it, and
+        // this controller holds it with a strong `let`. Once the main scene
+        // exists, the over-release lands in AppKit's window-close animation
+        // during the next CA transaction flush and takes the process with it
+        // (EXC_BAD_ACCESS in `-[_NSWindowTransformAnimation dealloc]`). ARC owns
+        // this window, not AppKit.
+        window.isReleasedWhenClosed = false
         window.title = "Welcome to Filaway"
         window.isMovableByWindowBackground = true
         window.setAccessibilityLabel("Filaway setup")

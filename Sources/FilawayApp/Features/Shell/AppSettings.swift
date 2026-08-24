@@ -57,12 +57,12 @@ enum AppSettings {
     /// the root while the app is running.
     static var notesRoot: URL {
         if let cached = resolvedNotesRoot { return cached }
-        // Whoever asks first is, by definition, the first thing that needs the
-        // answer onboarding gives — so asking runs the gate (ADR-049). A no-op
-        // after the first run, and off the main thread there is nothing to run.
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { OnboardingPresenter.runIfNeeded() }
-        }
+        // **Reading this does not run the launch gate.** It used to (ADR-049's
+        // "whoever asks first"), and the asker turned out to be a SwiftUI
+        // `StateObject` initialiser — so the gate's modal ran inside an
+        // AttributeGraph update and the app came up with no window at all.
+        // `AppModel.bootstrap()` waits for the gate instead, and nothing else
+        // may resolve the root before it (ADR-061).
         let resolved = resolveNotesRoot()
         resolvedNotesRoot = resolved
         return resolved

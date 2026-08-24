@@ -83,7 +83,38 @@ final class AppModel: ObservableObject {
 
     // MARK: - Storage stack
 
-    private(set) var library: Library
+    /// The library, resolved on **first use** rather than in `init`.
+    ///
+    /// Reading it can run the FR-7.1 launch gate (`AppSettings.notesRoot` →
+    /// `OnboardingPresenter.runIfNeeded()`, ADR-049), and that gate spins a
+    /// nested modal run loop. `AppModel.shared` is forced from inside SwiftUI's
+    /// `StateObject` update — i.e. inside an AttributeGraph pass — so resolving
+    /// the root there ran the modal inside the graph and the `WindowGroup`
+    /// never finished installing: no window, no `ShellView.task`, no
+    /// `bootstrap()`. Deferring the resolution to ``bootstrap()`` moves the
+    /// gate onto a clean run-loop turn. See ADR-061.
+    ///
+    /// Nothing on the first-paint path may read this — see
+    /// ``resolvedLibraryRoot`` for the display-only accessor.
+    private(set) var library: Library {
+        get {
+            if let storedLibrary { return storedLibrary }
+            let library = Library(root: rootOverride ?? AppSettings.notesRoot,
+                                  supportRoot: supportRootOverride)
+            storedLibrary = library
+            return library
+        }
+        set { storedLibrary = newValue }
+    }
+
+    /// The library root **without** resolving it: `nil` until the gate has been
+    /// answered and ``bootstrap()`` has opened the library. Views on the first
+    /// paint use this; everything else uses ``library``.
+    var resolvedLibraryRoot: URL? { storedLibrary?.root }
+
+    private var storedLibrary: Library?
+    private let rootOverride: URL?
+    private let supportRootOverride: URL?
     private(set) var store: NoteStore?
     private(set) var metadata: MetadataStore?
     private(set) var watcher: LibraryWatcher?
@@ -104,14 +135,15 @@ final class AppModel: ObservableObject {
     /// the scene exists.
     static let shared = AppModel()
 
+    /// `root` and `supportRoot` are **not** resolved here: see ``library``.
     init(
-        root: URL = AppSettings.notesRoot,
-        supportRoot: URL? = AppSettings.supportRoot,
+        root: URL? = nil,
+        supportRoot: URL? = nil,
         debounce: TimeInterval = AutosaveScheduler.defaultDebounce
     ) {
-        self.library = Library(root: root, supportRoot: supportRoot)
+        self.rootOverride = root
+        self.supportRootOverride = supportRoot ?? AppSettings.supportRoot
         self.debounce = debounce
-        self.expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
         search.onOpen = { [weak self] hit in self?.openSearchHit(hit) }
         search.onReturnFocusToEditor = { [weak self] in self?.focusEditor() }
         // M3-06: a semantic result opens the note scrolled to its chunk, in the
@@ -133,7 +165,14 @@ final class AppModel: ObservableObject {
     /// Opens the library. Safe to call twice; the second call is a no-op.
     func bootstrap() async {
         guard store == nil else { return }
+        // FR-7.1: on a first launch the folder the flow chooses is the one this
+        // launch opens, so nothing may resolve the notes root until the gate
+        // has been answered (ADR-049, ADR-061).
+        await OnboardingPresenter.waitUntilAnswered()
         let library = self.library
+        // Per-library window state, which could not be read before the root was
+        // known (FR-1.5).
+        expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
         do {
             let store = NoteStore(library: library)
             try await store.prepare()

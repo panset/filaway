@@ -35,6 +35,36 @@ enum OnboardingPresenter {
     /// Guards the modal against being started from inside itself.
     private static var isRunning = false
 
+    /// Schedules ``runIfNeeded()`` on a plain run-loop turn.
+    ///
+    /// **Not `DispatchQueue.main.async`.** The flow blocks in `NSApp.runModal`,
+    /// and a nested run loop only drains the main dispatch queue when it was
+    /// *not* started from inside a main-queue block — which is what a Swift
+    /// `@MainActor` job is. Started from a run-loop callback, the modal session
+    /// keeps main-queue work (and therefore the smoke driver, and every
+    /// `Task { @MainActor }` the flow depends on) running. `.common` modes so
+    /// the block still fires if some other panel is up. See ADR-061.
+    static func scheduleIfNeeded() {
+        guard OnboardingModel.isNeeded, shouldGateThisLaunch else { return }
+        RunLoop.main.perform(inModes: [.common]) {
+            MainActor.assumeIsolated { runIfNeeded() }
+        }
+    }
+
+    /// Suspends until the gate has been answered — or returns at once when this
+    /// launch has no gate.
+    ///
+    /// ``AppModel/bootstrap()`` awaits this before it resolves the notes root:
+    /// the root the flow chooses has to be the one this launch opens (ADR-049),
+    /// and awaiting frees the main thread so ``scheduleIfNeeded()``'s run-loop
+    /// block can actually get in.
+    static func waitUntilAnswered() async {
+        guard OnboardingModel.isNeeded, shouldGateThisLaunch else { return }
+        while !didRunThisLaunch || isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     /// Runs the flow if it is needed. Returns when the user has finished it.
     static func runIfNeeded() {
         guard !isRunning, OnboardingModel.isNeeded, shouldGateThisLaunch else { return }

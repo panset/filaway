@@ -149,7 +149,12 @@ struct ShellView: View {
             Text(model.noteCount == 0 ? "Start writing" : "No note selected")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-            Text("⌘N makes a new note. Everything is saved as Markdown in \(model.library.root.path).")
+            // `resolvedLibraryRoot`, not `library`: this view is on the first
+            // paint, and resolving the root there would run the launch gate
+            // from inside a SwiftUI update (ADR-061).
+            Text(model.resolvedLibraryRoot.map {
+                "⌘N makes a new note. Everything is saved as Markdown in \($0.path)."
+            } ?? "⌘N makes a new note. Everything is saved as Markdown.")
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
