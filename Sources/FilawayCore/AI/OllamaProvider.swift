@@ -42,7 +42,7 @@ public struct OllamaProvider: AIProvider {
     public init(
         configuration: OllamaConfiguration = OllamaConfiguration(),
         sessionConfiguration: URLSessionConfiguration = AITransport.defaultSessionConfiguration(),
-        retryPolicy: RetryPolicy = RetryPolicy(),
+        retryPolicy: RetryPolicy = .local,
         clock: any AIClock = SystemClock()
     ) {
         precondition(

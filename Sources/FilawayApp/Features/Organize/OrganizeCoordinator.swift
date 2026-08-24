@@ -618,6 +618,10 @@ final class OrganizeCoordinator: ObservableObject {
                 status = AIHealth.status(for: error)
             }
             await refreshQueueCount()
+            // The session is not applied and not queued — saying nothing here
+            // is how "no organizations yet" stays a mystery. One banner line,
+            // content-free (the label is an error kind, never note text).
+            onBanner?("Couldn't organize this session (\(failure.label)).", "exclamationmark.triangle")
 
         case let .skipped(_, reason):
             lastFailureReason = "skipped: \(reason)"
