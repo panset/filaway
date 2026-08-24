@@ -116,6 +116,21 @@ final class PasteIntelligenceController {
                 && text.character(at: range.upperBound) != 0x0A
         )
 
+        // **Close the paste's undo group before registering the wrap.**
+        //
+        // `NSUndoManager.groupsByEvent` closes the open group when AppKit
+        // finishes processing an *event*. A person clicking Wrap supplies one;
+        // ⌘⇧K supplies one; a scripted or scripted-adjacent caller (the smoke
+        // check, a menu action taken programmatically) supplies none, and the
+        // paste and the wrap then land in the same group — so one ⌘Z throws the
+        // pasted text away as well, which is exactly what FR-2.4 promises will
+        // not happen. Breaking the group here makes "the wrap is one undo step"
+        // true regardless of what did or did not pump the event queue.
+        if let undo = textView.undoManager, undo.groupingLevel > 0 {
+            undo.endUndoGrouping()
+            undo.beginUndoGrouping()
+        }
+
         guard textView.shouldChangeText(in: range, replacementString: replacement) else {
             dismiss()
             return false
