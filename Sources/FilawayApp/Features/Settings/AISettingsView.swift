@@ -4,10 +4,15 @@ import SwiftUI
 
 /// Settings → AI, Figure 4 (FR-6.2, FR-6.3, FR-6.5, FR-6.6, FR-4.2, FR-4.5).
 ///
-/// Top to bottom: the connection card, the disabled local-model slot, the four
-/// form rows the mockup names, the Advanced model override, the monthly usage
-/// line, and the privacy statement — which is always visible, never behind a
-/// disclosure.
+/// Top to bottom: the provider chooser, the connection card for whichever
+/// provider is selected (and, under Ollama, its Base URL / model / Test
+/// connection rows), the four form rows the mockup names, the Advanced model
+/// override, the monthly usage line, and the privacy statement — which is
+/// always visible, never behind a disclosure.
+///
+/// **The provider is the pane's one branch.** Everything below it is either
+/// shared or reworded by `AIConnectionCopy`; the Advanced override is the only
+/// Claude-only row, because choosing a model *is* the Ollama section (FR-6.2).
 struct AISettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var isShowingKeySheet = false
@@ -15,9 +20,24 @@ struct AISettingsView: View {
     var body: some View {
         Form {
             Section {
+                ForEach(AIProviderKind.allCases, id: \.self) { kind in
+                    ProviderOptionRow(
+                        kind: kind,
+                        isSelected: model.aiProvider == kind,
+                        status: model.aiProvider == kind ? model.connectionStatusLine : nil
+                    ) {
+                        Task { await model.selectProvider(kind) }
+                    }
+                }
+            } header: {
+                Text("Provider")
+            }
+
+            Section {
                 ConnectionCard(model: model) { isShowingKeySheet = true }
-                // Figure 3's second option card, shared with onboarding.
-                LocalModelOptionRow()
+                if model.aiProvider == .ollama {
+                    OllamaConnectionRows(model: model)
+                }
             }
 
             Section {
@@ -55,7 +75,7 @@ struct AISettingsView: View {
 
                 SettingsRow(
                     title: "Exclude folders from AI",
-                    detail: "Nothing in an excluded folder is ever sent to Claude."
+                    detail: model.exclusionDetail
                 ) {
                     ExcludedFoldersPicker(model: model)
                 }
@@ -72,7 +92,7 @@ struct AISettingsView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityLabel("Usage. \(usage)")
                 }
-                PrivacyStatementView(notesPath: model.notesRootDisplayPath)
+                PrivacyStatementView(statement: model.privacyStatement)
             }
         }
         .formStyle(.grouped)
@@ -84,7 +104,9 @@ struct AISettingsView: View {
 
 // MARK: - Connection card
 
-/// "☁︎ Claude · connected · <model> · Change" (Figure 4).
+/// "☁︎ Claude · connected · <model> · Change" (Figure 4), and its local
+/// counterpart: the same card with **Test connection** where Change… is,
+/// because there is no key to change (FR-6.5).
 private struct ConnectionCard: View {
     @ObservedObject var model: SettingsModel
     let change: () -> Void
@@ -103,20 +125,28 @@ private struct ConnectionCard: View {
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
 
-            if model.isRefreshing {
+            if model.isRefreshing || model.isTestingLocal {
                 ProgressView().controlSize(.small)
             }
-            Button(model.hasStoredKey ? "Change…" : "Connect…", action: change)
-                .accessibilityLabel(model.hasStoredKey ? "Change API key" : "Connect an API key")
+            if model.aiProvider == .ollama {
+                Button("Test connection") { Task { await model.testLocalConnection() } }
+                    .accessibilityLabel("Test the connection to the local Ollama daemon")
+                    .disabled(model.isTestingLocal)
+            } else {
+                Button(model.hasStoredKey ? "Change…" : "Connect…", action: change)
+                    .accessibilityLabel(model.hasStoredKey ? "Change API key" : "Connect an API key")
+            }
         }
         .padding(14)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Claude connection. \(model.connectionTitle). \(subtitle)")
+        .accessibilityLabel("\(AIConnectionCopy.providerLabel(model.aiProvider)) connection. "
+            + "\(model.connectionTitle). \(subtitle)")
     }
 
     /// SF Symbols stand in for Figure 4's placeholder ☁︎ glyph.
@@ -139,15 +169,68 @@ private struct ConnectionCard: View {
         }
     }
 
-    private var subtitle: String {
-        switch model.status {
-        case .connected: return model.connectionModelName
-        case .notConfigured: return "Capture and keyword search work without a key."
-        case .invalidKey: return "The stored key was rejected. Enter a new one."
-        case .offline: return "The API is unreachable — filing will resume when it is back."
-        case .rateLimited: return "Rate limited; organization is queued."
-        case let .error(message): return message
+    private var subtitle: String { model.connectionStatusLine }
+}
+
+// MARK: - The local daemon (FR-6.5, P2-02)
+
+/// Base URL, model, and the two hints that turn a failed check into something
+/// the user can act on. Only drawn when Ollama is the selected provider.
+private struct OllamaConnectionRows: View {
+    @ObservedObject var model: SettingsModel
+    @FocusState private var baseURLFocused: Bool
+
+    var body: some View {
+        SettingsRow(
+            title: "Base URL",
+            detail: model.ollamaBaseURLProblem
+                ?? "Where the daemon listens. Plain http is allowed for this Mac only."
+        ) {
+            TextField("http://localhost:11434", text: $model.ollamaBaseURLText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .accessibilityLabel("Ollama base URL")
+                .focused($baseURLFocused)
+                .onSubmit { Task { await model.commitOllamaBaseURL() } }
+                .onChange(of: baseURLFocused) { _, focused in
+                    // Committing on blur as well as on ⏎: a user who types an
+                    // address and clicks Test connection expects the test to
+                    // use what they just typed.
+                    if !focused { Task { await model.commitOllamaBaseURL() } }
+                }
+                .labelsHidden()
         }
+
+        SettingsRow(title: "Model", detail: modelDetail) {
+            HStack(spacing: 8) {
+                Picker("Ollama model", selection: model.ollamaModel) {
+                    ForEach(model.availableOllamaModelIDs(), id: \.self) { id in
+                        Text(id).tag(id)
+                    }
+                }
+                .accessibilityLabel("Ollama model")
+                .pickerStyle(.menu)
+                .frame(width: 180)
+                .labelsHidden()
+
+                Button {
+                    Task { await model.testLocalConnection() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .accessibilityLabel("Refresh the list of pulled models")
+                .disabled(model.isTestingLocal)
+            }
+        }
+    }
+
+    /// The pull command when the tag is not on the daemon, the reassurance when
+    /// it is.
+    private var modelDetail: String {
+        if case let .error(message) = model.status, message == AIConnectionCopy.modelNotPulled {
+            return AIConnectionCopy.pullHint(model: AIModel(model.ollamaModel.wrappedValue))
+        }
+        return "Pulled models are listed here. Refresh after an `ollama pull`."
     }
 }
 
@@ -222,10 +305,31 @@ private struct ExcludedFoldersPicker: View {
 }
 
 /// FR-6.2's "advanced override": off by default, so the house defaults ship.
+///
+/// **Claude-only.** Under Ollama the model *is* the Model row above — there are
+/// no house defaults to override, and two pickers disagreeing about which model
+/// runs would be a bug with a UI. The section says so rather than disappearing
+/// without explanation.
 private struct AdvancedModelSection: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
+        if model.aiProvider == .ollama {
+            SettingsRow(
+                title: "Advanced: choose models",
+                detail: "The local provider uses the model chosen above for both organizing and search."
+            ) {
+                Text(model.connectionModelName)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Local model in use: \(model.connectionModelName)")
+            }
+        } else {
+            claudeRows
+        }
+    }
+
+    @ViewBuilder private var claudeRows: some View {
         SettingsRow(
             title: "Advanced: choose models",
             detail: "Off means the defaults: \(AIModel.defaultOrganize.id) for organizing, "

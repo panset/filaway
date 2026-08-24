@@ -23,7 +23,7 @@ struct GeneralSettingsView: View {
             indexSection
 
             Section {
-                PrivacyStatementView(notesPath: model.notesRootDisplayPath)
+                PrivacyStatementView(statement: model.privacyStatement)
             }
         }
         .formStyle(.grouped)

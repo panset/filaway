@@ -24,6 +24,12 @@ import SwiftUI
 /// | no key yet | `Connect AI` |
 struct AIStatusPill: View {
     let status: AIStatus
+    /// Which backend the status is about (FR-6.5, P2-02). "AI offline" is true
+    /// but useless when the AI is a daemon on this Mac that is simply not
+    /// running, so the local provider gets its own wording and its own remedy.
+    ///
+    /// Defaults to Claude for the call sites that have no settings to hand.
+    var provider: AIProviderKind = .claude
     /// Sessions the organizer is holding until the provider comes back
     /// (FR-6.4). Shown even while the connection itself is healthy — a queue
     /// that is draining is still something the user may want to know about.
@@ -73,10 +79,17 @@ struct AIStatusPill: View {
         case .connected: return "AI"
         case .notConfigured: return "Connect AI"
         case .invalidKey: return "Key rejected"
-        case .offline: return "AI offline"
+        case .offline: return provider == .ollama ? "Ollama offline" : "AI offline"
         case .rateLimited: return "Rate limited"
+        case .error where provider == .ollama && isModelNotPulled: return "Model not pulled"
         case .error: return "AI unavailable"
         }
+    }
+
+    /// The one local error with a one-command remedy (ADR-068).
+    private var isModelNotPulled: Bool {
+        if case let .error(message) = status { return message == AIConnectionCopy.modelNotPulled }
+        return false
     }
 
     /// VoiceOver gets the long form: "AI" is not a sentence.
@@ -87,7 +100,7 @@ struct AIStatusPill: View {
     private var symbol: String {
         if queuedCount > 0, status == .connected { return "clock.arrow.circlepath" }
         switch status {
-        case .connected: return "cloud.fill"
+        case .connected: return provider == .ollama ? "desktopcomputer" : "cloud.fill"
         case .notConfigured: return "cloud"
         case .invalidKey: return "exclamationmark.triangle.fill"
         case .offline: return "wifi.slash"
@@ -114,11 +127,18 @@ struct AIStatusPill: View {
         case .connected:
             return "Filaway files your sessions in the background."
         case .notConfigured:
-            return "Add an API key in Settings → AI to turn organizing on. Writing and search work without it."
+            return "Add an API key in Settings → AI, or pick the local model (Ollama) — no key, nothing "
+                + "leaves this Mac. Writing and search work without either."
         case .invalidKey:
             return "The API key was rejected. Sessions are kept and filed once a working key is set."
+        case .offline where provider == .ollama:
+            return "The local Ollama daemon is not responding. Start it with `ollama serve` — sessions "
+                + "are queued and retried, nothing is lost."
         case .offline:
             return "The API is unreachable. Sessions are queued and retried — nothing is lost."
+        case .error where provider == .ollama && isModelNotPulled:
+            return "The daemon is running but the chosen model has not been pulled. "
+                + "Settings → AI says which `ollama pull` to run."
         case let .rateLimited(until):
             return "Rate limited until \(until.formatted(date: .omitted, time: .shortened)). Queued sessions resume then."
         case let .error(message):

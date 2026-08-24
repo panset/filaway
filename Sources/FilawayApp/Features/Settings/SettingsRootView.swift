@@ -100,13 +100,13 @@ struct SettingsRow<Content: View>: View {
 ///
 /// It is *not* behind a disclosure and *not* only in onboarding: the spec wants
 /// it visible whenever the user is looking at the AI settings.
+///
+/// The sentence itself comes from `AIConnectionCopy.privacyStatement` — under
+/// the local provider it promises something stronger (nothing is uploaded at
+/// all), and a privacy claim that a view improvises is a privacy claim nothing
+/// tests.
 struct PrivacyStatementView: View {
-    let notesPath: String
-
-    private var statement: String {
-        "Notes are stored on disk at \(notesPath). Nothing is uploaded except text "
-            + "sent to Claude during organization and search. Excluded folders are never sent."
-    }
+    let statement: String
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {

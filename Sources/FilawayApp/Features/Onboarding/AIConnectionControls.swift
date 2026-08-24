@@ -10,36 +10,71 @@ import SwiftUI
 /// is the wording and the state machine, and `OnboardingWindowController` draws
 /// the same two cards with `NSView`s.
 
-/// FR-6.5 / Figure 3's second option: present, disabled, badged "Soon".
+/// FR-6.5 / Figure 3's two options, as one selectable card each.
 ///
-/// Shared by onboarding (Figure 3) and Settings → AI (Figure 4) so the two can
-/// never drift.
-struct LocalModelOptionRow: View {
+/// Until P2-02 the local one was a disabled row badged "Soon". It is now a real
+/// choice: `AIProviderKind.ollama` needs no key, no network and no account, and
+/// picking it is the whole of FR-6.5. Both cards are drawn by the same view so
+/// onboarding (Figure 3) and Settings → AI (Figure 4) cannot drift, and every
+/// string comes from `AIConnectionCopy` so it is the same string Core tests.
+struct ProviderOptionRow: View {
+    let kind: AIProviderKind
+    let isSelected: Bool
+    /// A short line under the pitch — the live connection status in Settings,
+    /// nothing in onboarding.
+    var status: String?
+    let select: () -> Void
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "desktopcomputer")
-                .font(.title2)
-                .frame(width: 28)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Local model (Ollama)")
-                    .font(.headline)
-                Text("Fully private · coming in v2")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        Button(action: select) {
+            HStack(spacing: 12) {
+                Image(systemName: kind == .claude ? "cloud.fill" : "desktopcomputer")
+                    .font(.title2)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    .frame(width: 28)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(AIConnectionCopy.chooserTitle(kind))
+                        .font(.headline)
+                    Text(AIConnectionCopy.chooserDetail(kind))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let status {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    .accessibilityHidden(true)
             }
-            Spacer()
-            Text("Soon")
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.quaternary, in: Capsule())
+            .contentShape(Rectangle())
+            .padding(14)
+            .background(
+                isSelected ? AnyShapeStyle(.quaternary.opacity(0.6)) : AnyShapeStyle(.quaternary.opacity(0.2)),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
+            )
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-        .foregroundStyle(.secondary)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Local model, Ollama. Fully private, coming in version 2. Not available yet.")
+        .buttonStyle(.plain)
+        // NFR-6: one control, one name, one value — VoiceOver announces the
+        // pitch and whether this is the provider in use.
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityLabel(
+            "\(AIConnectionCopy.chooserTitle(kind)). \(AIConnectionCopy.chooserDetail(kind))"
+        )
+        .accessibilityValue(isSelected ? "Selected" + (status.map { ". \($0)" } ?? "") : "Not selected")
+        .accessibilityHint("Uses this provider for organizing and search")
     }
 }
 
