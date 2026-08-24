@@ -165,6 +165,10 @@ public actor AIUsageLedger {
     }
 
     /// Totals over a half-open interval.
+    ///
+    /// - Parameter provider: one ``AIProvider/identifier``, or `nil` for every
+    ///   provider at once. The default is Claude because it is the only one that
+    ///   bills; replayed, mocked and local traffic is excluded from it.
     public func totals(from start: Date, to end: Date, provider: String? = "claude") throws -> AIUsageTotals {
         try dbQueue.read { db in
             var sql = """
@@ -238,6 +242,32 @@ public actor AIUsageLedger {
             try db.execute(sql: "DELETE FROM ai_usage WHERE timestamp < ?", arguments: [date.timeIntervalSince1970])
             return db.changesCount
         }
+    }
+
+    // MARK: - By provider kind (P2-01)
+
+    /// Totals for one backend. `nil` in the `String?` overloads means *every*
+    /// provider, replayed and mocked traffic included; this overload is the
+    /// typed way to ask for exactly one (`.ollama` costs nothing, but knowing
+    /// how much work went local is the point of FR-6.5).
+    public func totals(from start: Date, to end: Date, provider: AIProviderKind) throws -> AIUsageTotals {
+        try totals(from: start, to: end, provider: provider.rawValue)
+    }
+
+    public func monthlyTotals(
+        containing date: Date = Date(),
+        calendar: Calendar = .current,
+        provider: AIProviderKind
+    ) throws -> AIUsageTotals {
+        try monthlyTotals(containing: date, calendar: calendar, provider: provider.rawValue)
+    }
+
+    public func monthlyTotalsByPurpose(
+        containing date: Date = Date(),
+        calendar: Calendar = .current,
+        provider: AIProviderKind
+    ) throws -> [AIPurpose: AIUsageTotals] {
+        try monthlyTotalsByPurpose(containing: date, calendar: calendar, provider: provider.rawValue)
     }
 
     // MARK: - Helpers

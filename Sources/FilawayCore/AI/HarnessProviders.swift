@@ -30,10 +30,13 @@ public struct ReplayProvider: AIProvider {
 
     /// Replays the recorded key-validation fixture when one exists, else the
     /// static model list — so Settings and onboarding work offline.
+    ///
+    /// The fixture decodes through *its own* provider's model-list codec
+    /// (ADR-067): an Anthropic `data` array and an Ollama `models` array are
+    /// different shapes, and a v1 fixture is Claude by definition.
     public func validateKey() async throws -> [AIModelInfo] {
         if let recording = try store.load(purpose: .validate, key: ReplayProvider.validateKeyFixtureKey),
-           let value = try? JSONValue.parse(recording.responseBody.canonicalData()),
-           let models = try? ClaudeWire.models(from: value) {
+           let models = try? recording.models() {
             return models
         }
         return models
@@ -63,7 +66,9 @@ public struct RecordingProvider: AIProvider {
 
     public func complete(_ request: AIRequest) async throws -> AIResponse {
         let response = try await upstream.complete(request)
-        let recording = AIRecording(request: request, response: response, recordedAt: clock.now())
+        let recording = AIRecording(
+            request: request, response: response, provider: upstream.identifier, recordedAt: clock.now()
+        )
         try store.save(recording)
         return response
     }
@@ -76,29 +81,17 @@ public struct RecordingProvider: AIProvider {
             messages: [],
             timeout: AIPurpose.validate.defaultTimeout
         )
-        let body = JSONValue.object([
-            "data": .array(models.map { model in
-                var object: [String: JSONValue] = [
-                    "type": "model",
-                    "id": .string(model.id),
-                    "display_name": .string(model.displayName),
-                ]
-                if let created = model.createdAt { object["created_at"] = .string(ISO8601.string(from: created)) }
-                if let tokens = model.maxInputTokens { object["max_input_tokens"] = .integer(tokens) }
-                if let tokens = model.maxOutputTokens { object["max_tokens"] = .integer(tokens) }
-                return .object(object)
-            }),
-            "has_more": .bool(false),
-        ])
+        let wire = ProviderWire.named(upstream.identifier)
         try store.save(AIRecording(
             purpose: .validate,
             key: ReplayProvider.validateKeyFixtureKey,
             model: "",
+            provider: upstream.identifier,
             recordedAt: clock.now(),
-            note: "GET /v1/models",
+            note: "key validation — the provider's model list",
             request: request,
-            requestBody: .object(["method": "GET", "path": "/v1/models?limit=100"]),
-            responseBody: body
+            requestBody: wire.validateRequestBody,
+            responseBody: wire.modelsValue(for: models)
         ))
         return models
     }
@@ -193,29 +186,45 @@ public enum AIProviderFactory {
     /// - Parameters:
     ///   - mode: usually ``AIMode/current(environment:)``.
     ///   - store: fixture directory; required for `replay` and `record`.
-    ///   - keySource: credential for `record` and `live`.
+    ///   - keySource: credential for `record` and `live`; unused by `.ollama`.
+    ///   - kind: which backend `live`/`record` talk to (FR-6.5). `replay` is
+    ///     provider-agnostic — a fixture says which wire format it is in.
+    ///   - ollama: where the local daemon is, when `kind` is `.ollama`.
     public static func make(
         mode: AIMode,
         store: AIRecordingStore?,
         keySource: APIKeySource,
+        kind: AIProviderKind = .claude,
+        ollama: OllamaConfiguration = OllamaConfiguration(),
         configuration: URLSessionConfiguration = ClaudeProvider.defaultConfiguration(),
         retryPolicy: RetryPolicy = RetryPolicy(),
         clock: any AIClock = SystemClock()
     ) throws -> any AIProvider {
+        func upstream() -> any AIProvider {
+            switch kind {
+            case .claude:
+                return ClaudeProvider(
+                    keySource: keySource, configuration: configuration, retryPolicy: retryPolicy, clock: clock
+                )
+            case .ollama:
+                return OllamaProvider(
+                    configuration: ollama,
+                    sessionConfiguration: configuration,
+                    retryPolicy: retryPolicy,
+                    clock: clock
+                )
+            }
+        }
+
         switch mode {
         case .replay:
             guard let store else { throw AIError.malformedResponse("replay mode needs a fixture directory") }
             return ReplayProvider(store: store)
         case .live:
-            return ClaudeProvider(
-                keySource: keySource, configuration: configuration, retryPolicy: retryPolicy, clock: clock
-            )
+            return upstream()
         case .record:
             guard let store else { throw AIError.malformedResponse("record mode needs a fixture directory") }
-            let upstream = ClaudeProvider(
-                keySource: keySource, configuration: configuration, retryPolicy: retryPolicy, clock: clock
-            )
-            return RecordingProvider(upstream: upstream, store: store, clock: clock)
+            return RecordingProvider(upstream: upstream(), store: store, clock: clock)
         }
     }
 }
