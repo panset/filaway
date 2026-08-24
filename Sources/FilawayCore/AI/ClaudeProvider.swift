@@ -54,15 +54,10 @@ public struct ClaudeProvider: AIProvider {
 
     /// Ephemeral session with no disk cache and no cookies — a prompt or a
     /// response must never be written to disk by the URL loading system.
+    ///
+    /// Shared with ``OllamaProvider`` through ``AITransport``.
     public static func defaultConfiguration() -> URLSessionConfiguration {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-        configuration.waitsForConnectivity = false
-        return configuration
+        AITransport.defaultSessionConfiguration()
     }
 
     // MARK: - AIProvider
@@ -120,31 +115,10 @@ public struct ClaudeProvider: AIProvider {
     ) async throws -> (JSONValue, String?) {
         guard let key = try keySource.key() else { throw AIError.notConfigured }
 
-        var attempt = 1
-        while true {
-            try Task.checkCancellation()
-            do {
-                return try await perform(
-                    path: path, method: method, body: body, timeout: timeout, key: key, model: model
-                )
-            } catch let error as AIError {
-                guard retryPolicy.shouldRetry(error, attempt: attempt) else { throw error }
-                let delay = retryPolicy.delay(
-                    afterAttempt: attempt,
-                    retryAfter: error.retryAfter,
-                    randomFraction: clock.randomFraction()
-                )
-                log.info(
-                    """
-                    claude retry attempt=\(attempt, privacy: .public) \
-                    in=\(delay, privacy: .public)s reason=\(String(describing: error), privacy: .public)
-                    """
-                )
-                try await clock.sleep(for: delay)
-                attempt += 1
-            } catch is CancellationError {
-                throw AIError.cancelled
-            }
+        return try await AITransport.retrying(
+            policy: retryPolicy, clock: clock, log: log, label: identifier
+        ) {
+            try await perform(path: path, method: method, body: body, timeout: timeout, key: key, model: model)
         }
     }
 
