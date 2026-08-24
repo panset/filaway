@@ -280,8 +280,10 @@ enum SettingsSmokeCheck {
         check("semantic-persisted", !settings.semanticSearchEnabled)
         check("exclusions-persisted", settings.excludedFolders == excluded.sorted(),
               settings.excludedFolders.joined(separator: ", "))
-        check("model-override-persisted", settings.effectiveOrganizeModel == .opus5,
-              settings.effectiveOrganizeModel.id)
+        // The phase left Ollama selected, so the *effective* model is the local
+        // tag; what must survive the relaunch is the stored Claude-side choice.
+        check("model-override-persisted", settings.advancedModelOverride && settings.organizeModel == .opus5,
+              "override=\(settings.advancedModelOverride) model=\(settings.organizeModel.id)")
         check("key-did-not-persist", !(await SettingsModel.shared.connection.hasStoredKey),
               "the smoke run uses an in-memory secret store")
 

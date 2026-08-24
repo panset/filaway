@@ -37,7 +37,10 @@ enum ProviderWiringSmokeCheck {
         model: AppModel,
         check: @MainActor (String, Bool, String) -> Void
     ) async {
-        let settings = AppSettings.core
+        // The instance the coordinator observes — a write through any *other*
+        // CoreSettings over the same defaults would be seen on the next read but
+        // never fire the observer, and the probes would sit on the old backend.
+        let settings = SettingsModel.shared.settings
 
         // `FILAWAY_AI_PROVIDER` wins over the preference by design (ADR-069),
         // so a phase that set it would be asserting the wrong half.
