@@ -2448,3 +2448,117 @@ re-run green). This also improves on the pre-M4-07 behaviour, which showed the
 *prose context* chunk as the card; now the card is the command itself
 (Figure 2b). Regression: `OfflineAnswerRegressionTests` reproduces the smoke
 corpus at the unit level and asserts the snippet contains the command.
+
+---
+
+## ADR-066 — Ollama speaks `format`, not tool calling
+
+**Context.** P2 adds a local provider (FR-6.5, NFR-5) so Filaway works with no
+API key and no network. Everything above ``AIProvider`` — `Organizer`,
+`PlanDecoder`, `AnswerExtractor`, `PlanSchema`, `AnswerSelection` — reads
+`response.toolUse(named:)`, and both prompts (`organize.v1`, `answer.v1`) force
+exactly one tool. Ollama 0.32.15 accepts `tools` and emits `message.tool_calls`,
+but it has **no `tool_choice`**: a tool is a suggestion, and an 8B model
+routinely answers in prose instead — which would mean an empty plan, silently.
+
+It does have `"format": <JSON schema>`, a hard grammar constraint on the
+decoder. Probed on this machine against `llama3.1:8b`: Filaway's exact schema
+idioms all hold — the `anyOf` action union, `const`/`enum`, `additionalProperties:
+false`, `["integer","null"]` — and valid JSON comes back in `message.content`.
+Warm latency for an answer-style call is ~1.5 s; the live probe measures 2.97 s
+including a model load, 106/36 tokens.
+
+**Decision.** `OllamaWire.body(for:)` maps a forced tool onto `format`:
+
+- `toolChoice == .tool(name)` → the tool's `inputSchema` becomes `format`, and
+  the tool's *description* is appended to the system message **at wire time
+  only**. `AIRequest`, the prompt files and `fixtureKey` are untouched, so the
+  same request hashes to the same fixture whichever provider serves it.
+- `OllamaWire.response(from:for:)` parses `message.content` back into a single
+  `.toolUse(id: "ollama-1", name: <the forced tool>, input: <parsed JSON>)` block
+  with `stopReason == .toolUse`. Nothing above the provider changes.
+- `done_reason == "length"` is `.maxTokens` and is **never** parsed as a tool
+  call — half a JSON object must not become half a plan. Unparsable content with
+  a schema forced is `.malformedResponse`, never an empty plan.
+- `.auto`/`.any`/`.none` (unused today) send Ollama's own
+  `{"type":"function","function":{…}}` tools and no `format`.
+- Never sent: `thinking`, `output_config`, `tool_choice`.
+- `stream: false`, `temperature: 0`, `num_predict: maxTokens`, `keep_alive:
+  "30m"` (a cold load costs seconds; the next session is minutes away).
+
+Two policies come with it. **`http` is loopback-only** (`localhost`,
+`127.0.0.1`, `::1`); any other host must be `https`, or the whole privacy
+argument for running locally would be quietly false. It is a `precondition` in
+`OllamaProvider.init`, with `OllamaConfiguration.isValidBaseURL` /`validate()`
+as the non-crashing form Settings and the tests ask. And **its own timeouts**
+(`AIProviderKind.timeout(for:)`): organize 180 s — an 8B model on a laptop is
+not Sonnet, and the card appears when it appears — search 8 s, because the
+answer card is on ⌘K's path with the local heuristic behind it, validate 15 s.
+
+**Consequences.**
+- No key path at all: `OllamaProvider` never consults an `APIKeySource`, so
+  `.notConfigured` is unreachable from it. A daemon that is not running is
+  `.network` through `URLError`, which is what the status pill wants to say.
+- The organizer, the answer extractor, both prompts and both schemas are
+  untouched by P2-01. A model that ignores the schema is impossible by
+  construction; a model that produces *bad content inside* a valid schema is
+  still `PlanValidator`'s problem, exactly as with Claude.
+- `format` is not tool calling, so multi-tool or parallel-tool requests are not
+  expressible on Ollama. Filaway never makes one.
+- `answer.v1` and `organize.v1` were tuned for Claude. Whether an 8B model plans
+  *well* is P2's later tasks; P2-01 only establishes that the contract holds.
+
+---
+
+## ADR-067 — Recordings carry their provider; the harness is not ClaudeWire
+
+**Context.** The record/replay harness stores **wire** bodies, so a fixture runs
+the same decoder a live call does. That decoder was hard-wired to `ClaudeWire`:
+`AIRecording.init(request:response:)`, `AIRecording.response()`,
+`ReplayProvider.validateKey()` and `RecordingProvider.validateKey()` all assumed
+Anthropic's shapes — including `GET /v1/models`' `data` array, which is nothing
+like Ollama's `/api/tags` `models` array. A second provider had nowhere to put
+its fixtures.
+
+**Decision.** `AIRecording` gains `provider: String` — the
+`AIProvider.identifier` that produced the bodies — and dispatches through an
+internal `ProviderWire` (`claude` | `ollama`; anything else, `mock` included,
+falls back to Claude). `response()`, `models()`, the recording initialiser,
+and both harness providers' `validateKey()` go through it.
+
+Compatibility is the point:
+
+- `provider` **decodes with a default of `"claude"`**, via a hand-written
+  `init(from:)`, so every fixture committed before P2-01 still loads and still
+  replays through `ClaudeWire` — all 19 of them, unchanged on disk.
+- The *written* version is bumped to 2. `AIRecording.currentVersion == 2`, and
+  the integrity test accepts `1...currentVersion` rather than equality.
+- `AIRecording.response()` hands the stored request to the decoder, because the
+  Ollama decoder needs to know which tool the `format` schema stood in for.
+
+`AIProviderFactory.make` gains `kind:` and `ollama:`; `.live` and `.record`
+build an `OllamaProvider` for `.ollama`, and `.replay` stays provider-agnostic —
+a fixture says which wire it is in, so one fixture directory can hold both.
+
+**Consequences.**
+- `AIUsageLedger`'s `provider:` already accepted `nil` for "everything"; it now
+  also takes an `AIProviderKind` overload. Local calls are recorded under
+  `"ollama"` and are excluded from the billed default, like replayed traffic.
+- `AIError.notConfigured` and `.missingRecording` name `FILAWAY_AI_PROVIDER=
+  ollama` as the keyless path, so neither message claims Claude is the only way.
+- `StubURLProtocol` (test support) now keys handlers *and* recorded requests by
+  host. Suites run in parallel and `URLProtocol` state is global, so two
+  provider suites sharing one handler interleaved and flaked; the unkeyed
+  handler still serves everything else, which is why no existing test changed.
+- Recording against a local model is free, so re-recording the goldens no longer
+  needs a key — but an Ollama fixture is *not* a substitute for a Claude one:
+  the wire bodies differ, and the answers do.
+- **The fixture key is deliberately provider-independent** (it hashes what was
+  asked, not who was asked), so recording the *same* request against the other
+  provider **overwrites** `<purpose>/<key>.json`. That is the honest default —
+  one fixture per question, replayed through whichever wire produced it — but it
+  means `FILAWAY_AI_MODE=record FILAWAY_AI_PROVIDER=ollama` over the committed
+  set would replace the Claude goldens. Record into a separate
+  `FILAWAY_AI_FIXTURES` directory, and check `git diff` before committing. If
+  P2 later wants both at once, the key gains the provider — which changes every
+  filename, so it is a deliberate migration, not a drive-by.
