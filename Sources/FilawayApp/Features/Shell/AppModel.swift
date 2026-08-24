@@ -85,17 +85,18 @@ final class AppModel: ObservableObject {
 
     /// The library, resolved on **first use** rather than in `init`.
     ///
-    /// Reading it can run the FR-7.1 launch gate (`AppSettings.notesRoot` →
-    /// `OnboardingPresenter.runIfNeeded()`, ADR-049), and that gate spins a
-    /// nested modal run loop. `AppModel.shared` is forced from inside SwiftUI's
-    /// `StateObject` update — i.e. inside an AttributeGraph pass — so resolving
-    /// the root there ran the modal inside the graph and the `WindowGroup`
-    /// never finished installing: no window, no `ShellView.task`, no
-    /// `bootstrap()`. Deferring the resolution to ``bootstrap()`` moves the
-    /// gate onto a clean run-loop turn. See ADR-061.
+    /// On a first launch the notes root is not knowable until the FR-7.1 gate
+    /// has been answered, and `AppModel.shared` is built long before that —
+    /// forced from inside SwiftUI's `StateObject` update, which is an
+    /// AttributeGraph pass. Binding a `Library` there meant binding it to
+    /// `~/Notes`, and (while reading the root still ran the gate) spinning that
+    /// gate's modal run loop inside the graph, which left the `WindowGroup`
+    /// half-installed: no window, no `ShellView.task`, no `bootstrap()`.
     ///
-    /// Nothing on the first-paint path may read this — see
-    /// ``resolvedLibraryRoot`` for the display-only accessor.
+    /// ``bootstrap()`` waits for the gate and then reads this, which is the one
+    /// place the root is resolved. **Nothing on the first-paint path may touch
+    /// it** — see ``resolvedLibraryRoot`` for the display-only accessor.
+    /// ADR-049, ADR-061.
     private(set) var library: Library {
         get {
             if let storedLibrary { return storedLibrary }
