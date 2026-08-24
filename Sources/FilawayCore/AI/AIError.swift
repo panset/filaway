@@ -16,7 +16,9 @@ import Foundation
 ///
 /// Only ``isRetryable`` cases are retried, and never a 4xx.
 public enum AIError: Error, Sendable, Equatable, CustomStringConvertible {
-    /// No API key in the Keychain or the environment (FR-6.1 not done yet).
+    /// No credential for a provider that needs one — the Keychain and the
+    /// environment are both empty. Unreachable for a local provider, which is
+    /// the keyless path (FR-6.5).
     case notConfigured
     case invalidKey(message: String? = nil)
     case rateLimited(retryAfter: TimeInterval? = nil, message: String? = nil)
@@ -55,7 +57,7 @@ public enum AIError: Error, Sendable, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .notConfigured:
-            return "No Claude API key configured."
+            return "No AI provider configured: add a Claude API key, or run a local model (FILAWAY_AI_PROVIDER=ollama)."
         case let .invalidKey(message):
             return message.map { "The API key was rejected: \($0)" } ?? "The API key was rejected."
         case let .rateLimited(retryAfter, _):
@@ -78,7 +80,8 @@ public enum AIError: Error, Sendable, Equatable, CustomStringConvertible {
         case let .missingRecording(purpose, key, path):
             return """
             No AI recording for \(purpose.rawValue)/\(key).json.
-            Record it with FILAWAY_AI_MODE=record (needs ANTHROPIC_API_KEY), or hand-author \(path).
+            Record it with FILAWAY_AI_MODE=record (needs ANTHROPIC_API_KEY, or \
+            FILAWAY_AI_PROVIDER=ollama and a local daemon), or hand-author \(path).
             """
         }
     }

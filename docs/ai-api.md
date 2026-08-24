@@ -1,7 +1,8 @@
 # FilawayCore AI layer — provider, harness, plans
 
 What M2-01, M2-02 and M2-04 landed: the Claude provider, the record/replay test
-harness, and the organization-plan model with its validator. The pipeline that
+harness, and the organization-plan model with its validator — plus **P2-01's
+local Ollama provider** behind the same protocol (§ "Ollama"). The pipeline that
 *uses* them — sessions, the organizer, the prompt and the context builder
 (M2-03/05/06) — is in `docs/organize.md`. Everything is in
 `FilawayCore` (Swift 6, no AppKit/SwiftUI). Requirement IDs refer to
@@ -18,7 +19,10 @@ the fixtures are committed.
 | Type | Kind | Owns |
 |---|---|---|
 | `AIProvider` | protocol | One request in, one response out (NFR-5, FR-6.5). |
+| `AIProviderKind` | enum | `claude` \| `ollama` — display name, key rule, timeouts. |
 | `ClaudeProvider` | struct | The raw Messages API over `URLSession`. |
+| `OllamaProvider` | struct | A local daemon over `POST /api/chat` (P2-01). |
+| `AITransport` | enum | The session policy and retry loop both providers share. |
 | `ReplayProvider` / `RecordingProvider` / `MockProvider` | structs | The test harness. |
 | `KeychainStore` behind `SecretStore` | struct | The API key (FR-6.1, NFR-4). |
 | `AIUsageLedger` | actor | Monthly tokens and requests (FR-6.6). |
@@ -177,25 +181,138 @@ let split = try await ledger.monthlyTotalsByPurpose()     // organize vs search
 
 Its own database file, not a `MetadataStore` migration — see ADR-013. Replayed
 and mocked calls are recorded with a non-`claude` `provider` and excluded from
-billed totals, so a test run cannot inflate the counter.
+billed totals, so a test run cannot inflate the counter. `provider:` takes one
+identifier, an `AIProviderKind`, or `nil` for every provider at once — local
+calls are free, but "how much went local" is the FR-6.5 number worth having.
+
+---
+
+## Ollama (P2-01, FR-6.5, NFR-5)
+
+A second provider behind the same protocol: a local daemon, no key, no network,
+no bill. Chat only — embeddings stay on Filaway's own embedder.
+
+```swift
+let provider = OllamaProvider()                            // http://localhost:11434
+let models = try await provider.validateKey()              // GET /api/tags
+let response = try await provider.complete(request)        // POST /api/chat
+```
+
+```swift
+AIProviderKind.ollama.requiresAPIKey                       // false
+AIProviderKind.ollama.timeout(for: .organize)              // 180 (search 8, validate 15)
+AIProviderKind.fromEnvironment()                           // FILAWAY_AI_PROVIDER
+OllamaConfiguration(baseURL: …, model: .defaultOllama)     // "llama3.1:8b"
+```
+
+### Wire format
+
+`OllamaWire.body(for:)` produces exactly:
+
+```json
+{
+  "model": "llama3.1:8b",
+  "stream": false,
+  "messages": [{"role": "system", "content": "<system>\n\n<the forced tool's instructions>"},
+               {"role": "user", "content": "…"}],
+  "format": { …the forced tool's inputSchema, verbatim… },
+  "options": {"temperature": 0, "num_predict": 4096},
+  "keep_alive": "30m"
+}
+```
+
+**A forced tool becomes the `format` schema, because Ollama has no
+`tool_choice`** (ADR-066). The tool's *description* is appended to the system
+text at wire time only — `AIRequest`, the prompt files and `fixtureKey` are
+untouched, so the same request hashes to the same fixture whichever provider
+serves it. The system message is omitted entirely when there is neither system
+text nor a forced tool. `thinking`, `output_config` and `tool_choice` are never
+sent, and are asserted absent by `OllamaRequestEncodingTests`.
+
+`.auto`/`.any`/`.none` — which Filaway never uses — send Ollama's own
+`{"type":"function","function":{"name","description","parameters"}}` tools
+instead, and no `format`.
+
+Coming back:
+
+| Response | Decoded as |
+|---|---|
+| `format` was set, `message.content` parses | one `.toolUse(id: "ollama-1", name: <forced tool>, input: <parsed>)`, `.toolUse` |
+| `done_reason == "length"` | `.maxTokens`, content kept as text, **never** parsed as a tool call |
+| `format` was set, content is not a JSON object | `AIError.malformedResponse` — never a silently empty plan |
+| no tool forced | text block(s), `.endTurn` |
+| `message.tool_calls` | `.toolUse` blocks, in order |
+| `{"error": "…"}` | `AIError` through the usual `from(status:…)` / `badRequest` helpers |
+
+`usage` comes from `prompt_eval_count`/`eval_count` (both cache counters are 0);
+`model` is the daemon's; `id` is synthesised from `created_at`, so a recorded
+exchange round-trips byte for byte. Everything above the provider —
+`Organizer`, `PlanDecoder`, `AnswerExtractor`, `PlanSchema` — is untouched:
+they read `response.toolUse(named:)` and get exactly that.
+
+### The loopback rule
+
+`http` is allowed **only** to `localhost`, `127.0.0.1` or `::1`; any other host
+must be `https`. Otherwise the "your notes never leave the machine" argument for
+running locally would be quietly false. `OllamaProvider.init` makes it a
+`precondition`; ask without crashing with:
+
+```swift
+OllamaConfiguration.isValidBaseURL(url)      // static predicate
+configuration.validate()                     // the same, for this configuration
+```
+
+### Timeouts
+
+`AIProviderKind.timeout(for:)` — Claude keeps `AIPurpose`'s numbers (60 / 8 /
+15 s); Ollama gets **organize 180 s**, search 8 s, validate 15 s. An 8B model on
+a laptop is not Sonnet, and a cold model load alone costs seconds; organize is
+never on a user-visible path, while the answer card is on ⌘K's (NFR-1) with the
+local heuristic behind it.
+
+### Recording fixtures against a local model
+
+```bash
+FILAWAY_AI_MODE=record FILAWAY_AI_PROVIDER=ollama \
+FILAWAY_AI_FIXTURES=/tmp/ollama-fixtures swift test --filter "…"
+```
+
+Free, and it needs no key — but **the fixture key does not include the
+provider**, so recording the same request against Ollama would overwrite the
+committed Claude fixture. Record into a separate directory and read the diff
+(ADR-067).
+
+The one test that talks to the real daemon is behind an environment gate, like
+the Keychain one:
+
+```bash
+FILAWAY_TEST_OLLAMA=1 swift test --filter Ollama    # needs `ollama serve` + llama3.1:8b
+```
 
 ---
 
 ## The record/replay harness (M2-02)
 
 ```
-FILAWAY_AI_MODE = replay   (default — tests and CI, no network, no key)
-                | record   (real API + write fixtures; needs ANTHROPIC_API_KEY)
-                | live     (real API, record nothing)
+FILAWAY_AI_MODE     = replay   (default — tests and CI, no network, no key)
+                    | record   (real provider + write fixtures)
+                    | live     (real provider, record nothing)
+FILAWAY_AI_PROVIDER = claude   (default — needs ANTHROPIC_API_KEY)
+                    | ollama   (local daemon, no key)
 ```
 
 ```swift
 let provider = try AIProviderFactory.make(
     mode: AIMode.current(),
     store: AIRecordingStore(directory: fixturesURL),
-    keySource: .storeThenEnvironment(KeychainStore())
+    keySource: .storeThenEnvironment(KeychainStore()),
+    kind: AIProviderKind.fromEnvironment() ?? .claude,
+    ollama: OllamaConfiguration()
 )
 ```
+
+`replay` is provider-agnostic: a fixture records which wire format it is in, so
+one directory can hold both.
 
 ### Fixture format
 
@@ -206,10 +323,11 @@ timeouts are excluded — they are execution knobs, not part of what was asked.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "purpose": "organize",
   "key": "87da92a3c20ef72a",
   "model": "claude-sonnet-5",
+  "provider": "claude",
   "recordedAt": "2026-08-22T21:00:00Z",
   "note": "hand-authored (M2-02) — organize: a valid plan",
   "request":     { …the decoded AIRequest, for reading and diffing… },
@@ -219,8 +337,12 @@ timeouts are excluded — they are execution knobs, not part of what was asked.
 ```
 
 Storing **wire** bodies is the point: a hand-authored fixture goes through the
-same `ClaudeWire.response(from:)` a live call does, and the committed request
-body is what the FR-4.5 exclusion test greps.
+same decoder a live call does, and the committed request body is what the FR-4.5
+exclusion test greps.
+
+`provider` says *which* decoder (ADR-067). It is absent from every fixture
+written before P2-01; absent means `"claude"`, so all of them still load and
+still replay through `ClaudeWire`. New recordings are written as version 2.
 
 A miss in replay throws `AIError.missingRecording`, whose message names the file
 and the command that would record it. It never falls through to the network.
@@ -265,7 +387,9 @@ git diff Tests/Fixtures/ai-recordings      # review what changed before committi
 ```
 
 Recording costs money and is a manual job — CI never sets `FILAWAY_AI_MODE`.
-To rewrite the hand-authored set (no key needed):
+Recording against a local model instead costs nothing; see § "Ollama" above for
+the flags and the overwrite warning. To rewrite the hand-authored set (no key
+needed):
 
 ```bash
 FILAWAY_WRITE_AI_FIXTURES=1 swift test --filter "regenerate"

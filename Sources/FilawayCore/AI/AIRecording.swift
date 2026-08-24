@@ -4,7 +4,8 @@ import Foundation
 ///
 /// `FILAWAY_AI_MODE` selects it. **`replay` is the default**, so a plain
 /// `swift test` — and every CI run — never touches the network and never needs
-/// a key; `record` and `live` are opt-in and need `ANTHROPIC_API_KEY`.
+/// a key; `record` and `live` are opt-in and need `ANTHROPIC_API_KEY`, or a
+/// running local daemon under `FILAWAY_AI_PROVIDER=ollama`.
 public enum AIMode: String, Sendable, CaseIterable {
     /// Serve responses from `Tests/Fixtures/ai-recordings`. Missing fixture =
     /// a test failure naming the file to record.
@@ -38,13 +39,20 @@ public enum AIMode: String, Sendable, CaseIterable {
 /// body (so a hand-authored fixture exercises the same decoder a live response
 /// would).
 public struct AIRecording: Sendable, Hashable, Codable {
-    public static let currentVersion = 1
+    /// Bumped to 2 by P2-01: a v2 fixture carries ``provider``. v1 files still
+    /// load — they are all Claude, and decode as such (ADR-067).
+    public static let currentVersion = 2
+    /// What ``provider`` means when a fixture does not say.
+    public static let defaultProvider = AIProviderKind.claude.rawValue
 
     public var version: Int
     public var purpose: AIPurpose
     /// ``AIRequest/fixtureKey`` — also the filename stem.
     public var key: String
     public var model: String
+    /// Which wire format the bodies below are in: ``AIProvider/identifier`` of
+    /// whatever actually produced them. Absent in v1 fixtures, which are Claude.
+    public var provider: String
     public var recordedAt: Date?
     /// Free-text note for hand-authored fixtures ("organize: invalid plan").
     public var note: String?
@@ -52,11 +60,15 @@ public struct AIRecording: Sendable, Hashable, Codable {
     public var requestBody: JSONValue
     public var responseBody: JSONValue
 
+    /// The codec the stored bodies were written with.
+    var wire: ProviderWire { ProviderWire.named(provider) }
+
     public init(
         version: Int = AIRecording.currentVersion,
         purpose: AIPurpose,
         key: String,
         model: String,
+        provider: String = AIRecording.defaultProvider,
         recordedAt: Date? = nil,
         note: String? = nil,
         request: AIRequest,
@@ -67,6 +79,7 @@ public struct AIRecording: Sendable, Hashable, Codable {
         self.purpose = purpose
         self.key = key
         self.model = model
+        self.provider = provider
         self.recordedAt = recordedAt
         self.note = note
         self.request = request
@@ -74,23 +87,59 @@ public struct AIRecording: Sendable, Hashable, Codable {
         self.responseBody = responseBody
     }
 
-    /// Builds a recording from a live exchange.
-    public init(request: AIRequest, response: AIResponse, recordedAt: Date = Date(), note: String? = nil) {
+    /// Builds a recording from a live exchange, in `provider`'s wire format.
+    public init(
+        request: AIRequest,
+        response: AIResponse,
+        provider: String = AIRecording.defaultProvider,
+        recordedAt: Date = Date(),
+        note: String? = nil
+    ) {
+        let wire = ProviderWire.named(provider)
         self.init(
             purpose: request.purpose,
             key: request.fixtureKey,
             model: request.model.id,
+            provider: provider,
             recordedAt: recordedAt,
             note: note,
             request: request,
-            requestBody: ClaudeWire.body(for: request),
-            responseBody: ClaudeWire.value(for: response)
+            requestBody: wire.requestBody(for: request),
+            responseBody: wire.responseValue(for: response)
         )
     }
 
-    /// Decodes the stored wire response — the same path a live call takes.
+    /// Decodes the stored wire response — the same path a live call takes,
+    /// through the same provider's decoder.
     public func response() throws -> AIResponse {
-        try ClaudeWire.response(from: responseBody)
+        try wire.response(from: responseBody, for: request)
+    }
+
+    /// Decodes the stored key-validation body.
+    public func models() throws -> [AIModelInfo] {
+        try wire.models(from: responseBody)
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case version, purpose, key, model, provider, recordedAt, note, request, requestBody, responseBody
+    }
+
+    /// Hand-written so a v1 fixture — no `provider`, and one day perhaps no
+    /// `version` — still loads. Everything committed before P2-01 is Claude.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        purpose = try container.decode(AIPurpose.self, forKey: .purpose)
+        key = try container.decode(String.self, forKey: .key)
+        model = try container.decode(String.self, forKey: .model)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider) ?? AIRecording.defaultProvider
+        recordedAt = try container.decodeIfPresent(Date.self, forKey: .recordedAt)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        request = try container.decode(AIRequest.self, forKey: .request)
+        requestBody = try container.decode(JSONValue.self, forKey: .requestBody)
+        responseBody = try container.decode(JSONValue.self, forKey: .responseBody)
     }
 }
 

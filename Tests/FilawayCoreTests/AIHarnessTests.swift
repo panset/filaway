@@ -65,7 +65,10 @@ struct AIRecordingFixtureTests {
         let all = try store.all()
         #expect(all.count >= 5, "expected the hand-authored M2-02 set")
         for recording in all {
-            #expect(recording.version == AIRecording.currentVersion)
+            // v1 (no `provider`) still loads and is Claude by definition — the
+            // whole point of ADR-067's default.
+            #expect((1 ... AIRecording.currentVersion).contains(recording.version))
+            #expect(recording.provider == "claude")
             #expect(recording.key == store.url(purpose: recording.purpose, key: recording.key)
                 .deletingPathExtension().lastPathComponent)
             if recording.purpose != .validate {

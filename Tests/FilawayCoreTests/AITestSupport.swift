@@ -47,29 +47,41 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
+    /// Handlers and their recorded traffic, **keyed by host**.
+    ///
+    /// Suites run in parallel with one another, and `URLProtocol` state is
+    /// necessarily global, so two provider suites sharing one handler would
+    /// interleave and flake. A handler installed for a host serves and records
+    /// only that host; the unkeyed handler serves everything else. That is what
+    /// lets the Claude suite (`api.anthropic.com`) and the Ollama suite
+    /// (`localhost`) run at the same time without seeing each other's requests.
     private final class State: @unchecked Sendable {
         private let lock = NSLock()
-        private var handler: (@Sendable (Recorded) -> Outcome)?
-        private var recorded: [Recorded] = []
+        private var handlers: [String: @Sendable (Recorded) -> Outcome] = [:]
+        private var recorded: [String: [Recorded]] = [:]
 
-        func install(_ handler: @escaping @Sendable (Recorded) -> Outcome) {
+        private static func key(_ host: String?) -> String { host?.lowercased() ?? "" }
+
+        func install(host: String?, _ handler: @escaping @Sendable (Recorded) -> Outcome) {
             lock.lock()
             defer { lock.unlock() }
-            self.handler = handler
-            recorded = []
+            handlers[Self.key(host)] = handler
+            recorded[Self.key(host)] = []
         }
 
-        func reset() {
+        func reset(host: String?) {
             lock.lock()
             defer { lock.unlock() }
-            handler = nil
-            recorded = []
+            handlers[Self.key(host)] = nil
+            recorded[Self.key(host)] = []
         }
 
         func handle(_ request: Recorded) -> Outcome {
             lock.lock()
-            let handler = handler
-            recorded.append(request)
+            let host = Self.key(request.url?.host)
+            let key = handlers[host] != nil ? host : ""
+            let handler = handlers[key]
+            recorded[key, default: []].append(request)
             lock.unlock()
             guard let handler else {
                 return .reply(Reply(status: 500, body: Data(#"{"error":{"message":"no stub installed"}}"#.utf8)))
@@ -77,36 +89,40 @@ final class StubURLProtocol: URLProtocol {
             return handler(request)
         }
 
-        var requests: [Recorded] {
+        func requests(host: String?) -> [Recorded] {
             lock.lock()
             defer { lock.unlock() }
-            return recorded
+            return recorded[Self.key(host)] ?? []
         }
     }
 
     private static let state = State()
 
     /// Installs a handler and clears the recorded requests.
-    static func install(_ handler: @escaping @Sendable (Recorded) -> Outcome) {
-        state.install(handler)
+    ///
+    /// - Parameter host: when given, the handler serves and records only that
+    ///   host, leaving any other suite's stub alone.
+    static func install(host: String? = nil, _ handler: @escaping @Sendable (Recorded) -> Outcome) {
+        state.install(host: host, handler)
     }
 
     /// Answers every request with the same outcome.
-    static func always(_ outcome: Outcome) {
-        install { _ in outcome }
+    static func always(host: String? = nil, _ outcome: Outcome) {
+        install(host: host) { _ in outcome }
     }
 
     /// Answers with each outcome in turn, repeating the last one.
-    static func sequence(_ outcomes: [Outcome]) {
+    static func sequence(host: String? = nil, _ outcomes: [Outcome]) {
         let box = Counter()
-        install { _ in
+        install(host: host) { _ in
             let index = box.next()
             return outcomes[min(index, outcomes.count - 1)]
         }
     }
 
-    static func reset() { state.reset() }
-    static var requests: [Recorded] { state.requests }
+    static func reset(host: String? = nil) { state.reset(host: host) }
+    static func requests(host: String?) -> [Recorded] { state.requests(host: host) }
+    static var requests: [Recorded] { state.requests(host: nil) }
 
     /// A session configuration wired to this protocol.
     static func configuration() -> URLSessionConfiguration {
