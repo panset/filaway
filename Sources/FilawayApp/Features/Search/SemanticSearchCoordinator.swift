@@ -71,6 +71,9 @@ final class SemanticSearchCoordinator: ObservableObject {
     private var settingsToken: CoreSettings.Observation?
     private var aiStatusTask: Task<Void, Never>?
     private var providerOverride: (any AIProvider)?
+    /// FR-6.6's counter, kept so a live provider rebuild does not silently stop
+    /// billing search requests to it.
+    private var ledger: AIUsageLedger?
     private var deferredFinder: DeferredCandidateFinder?
 
     /// Told when FR-8.1's semantic switch moves, so ⌘K can leave Ask mode
@@ -101,6 +104,7 @@ final class SemanticSearchCoordinator: ObservableObject {
         guard indexTask == nil else { return }
         self.metadata = metadata
         let ledger = try? AIUsageLedger(library: library)
+        self.ledger = ledger
         let settings = self.settings
         let exclusions = self.exclusions
 
@@ -168,13 +172,24 @@ final class SemanticSearchCoordinator: ObservableObject {
         }
     }
 
+    /// ADR-069's resolution order for the answer step: `FILAWAY_AI_PROVIDER` →
+    /// the `ai.provider` preference → Claude. Same order, same reasons, as
+    /// `CoreOrganizeSettings.providerKind` — the two must never disagree, or
+    /// ⌘K and the organizer would be talking to different backends.
+    static func resolvedKind(_ settings: CoreSettings) -> AIProviderKind {
+        AIProviderKind.fromEnvironment() ?? settings.aiProvider
+    }
+
     /// The provider the answer step uses — the same one the organizer gets.
     private static func makeExtractor(
         settings: CoreSettings,
         ledger: AIUsageLedger?,
         override: (any AIProvider)?
     ) -> AnswerExtractor? {
-        let configuration = AnswerExtractor.Configuration(model: settings.effectiveSearchModel)
+        let kind = resolvedKind(settings)
+        let configuration = AnswerExtractor.Configuration(
+            model: settings.effectiveSearchModel, providerKind: kind
+        )
         if let override {
             return AnswerExtractor(provider: override, ledger: ledger, configuration: configuration)
         }
@@ -182,7 +197,10 @@ final class SemanticSearchCoordinator: ObservableObject {
         // `FILAWAY_AI_FIXTURES`, `FILAWAY_AI_FAIL` for the offline phases
         // (ADR-041). `makeProvider` throws when replay has nothing to replay,
         // which is the "connect your AI" state rather than an outage.
-        guard let provider = try? OrganizeCoordinator.makeProvider() else { return nil }
+        guard let provider = try? OrganizeCoordinator.makeProvider(
+            kind: kind, ollama: settings.ollamaConfiguration
+        ) else { return nil }
+        OrganizeCoordinator.warmUpIfNeeded(kind: kind, ollama: settings.ollamaConfiguration)
         return AnswerExtractor(provider: provider, ledger: ledger, configuration: configuration)
     }
 
@@ -211,6 +229,7 @@ final class SemanticSearchCoordinator: ObservableObject {
         extractor = nil
         service = nil
         deferredFinder = nil
+        ledger = nil
         isReady = false
         indexStatus = .idle
         // Re-resolving re-points the exclusion box at the new library's list —
@@ -224,7 +243,9 @@ final class SemanticSearchCoordinator: ObservableObject {
         providerOverride = provider
         let replacement = AnswerExtractor(
             provider: provider,
-            configuration: AnswerExtractor.Configuration(model: settings.effectiveSearchModel)
+            configuration: AnswerExtractor.Configuration(
+                model: settings.effectiveSearchModel, providerKind: Self.resolvedKind(settings)
+            )
         )
         extractor = replacement
         guard let hybrid else { return }
@@ -244,6 +265,60 @@ final class SemanticSearchCoordinator: ObservableObject {
 
     /// Smoke: force the gate open without a Keychain round trip.
     func setProviderReady(_ ready: Bool) { providerReady.set(ready) }
+
+    /// What the live ``AnswerExtractor`` will ask with (FR-6.5).
+    ///
+    /// Read off the actor rather than off Settings, so the smoke check is
+    /// asserting the wiring and not the preference it just wrote.
+    func providerKindProbe() async -> (kind: AIProviderKind, model: AIModel, identifier: String) {
+        guard let extractor else {
+            return (Self.resolvedKind(settings), settings.effectiveSearchModel, "none")
+        }
+        return (
+            kind: await extractor.providerKind,
+            model: await extractor.model,
+            identifier: extractor.providerIdentifier
+        )
+    }
+
+    /// FR-8.1's live rebuild of the answer step.
+    ///
+    /// A provider override (the `semantic` smoke phase scripts one) always
+    /// wins: the phase is proving the panel, not the backend.
+    private func rebuildExtractor() {
+        guard let hybrid else { return }
+        let settings = self.settings
+        let kind = Self.resolvedKind(settings)
+        let replacement: AnswerExtractor?
+        if let providerOverride {
+            replacement = AnswerExtractor(
+                provider: providerOverride,
+                ledger: ledger,
+                configuration: AnswerExtractor.Configuration(
+                    model: settings.effectiveSearchModel, providerKind: kind
+                )
+            )
+        } else {
+            replacement = Self.makeExtractor(settings: settings, ledger: ledger, override: nil)
+        }
+        guard let replacement else { return }
+        extractor = replacement
+        let exclusions = self.exclusions
+        let providerReady = self.providerReady
+        service = SemanticSearchService(
+            hybrid: hybrid,
+            extractor: replacement,
+            options: HybridSearch.Options(exclusions: exclusions.current),
+            gate: .init(
+                isEnabled: { settings.semanticSearchEnabled },
+                isProviderReady: { providerReady.value }
+            )
+        )
+        // Ollama has no key to be missing, so the FR-6.1 gate does not apply to
+        // it: a dead daemon is an outage the request itself reports.
+        if kind == .ollama { providerReady.set(true) }
+        Log.ai.info("answer extractor rebuilt for \(kind.rawValue, privacy: .public)")
+    }
 
     // MARK: - Feeding the index (FR-5.4)
 
@@ -369,7 +444,8 @@ final class SemanticSearchCoordinator: ObservableObject {
         guard settingsToken == nil else { return }
         settingsToken = settings.observe { [weak self] key in
             switch key {
-            case .excludedFolders, .searchModel, .advancedModelOverride, .semanticSearchEnabled:
+            case .excludedFolders, .searchModel, .advancedModelOverride, .semanticSearchEnabled,
+             .aiProvider, .ollamaBaseURL, .ollamaModel:
                 Task { @MainActor in self?.settingsChanged(key) }
             default:
                 break
@@ -410,6 +486,11 @@ final class SemanticSearchCoordinator: ObservableObject {
         case .searchModel, .advancedModelOverride:
             let model = settings.effectiveSearchModel
             Task { [weak self] in await self?.extractor?.setModel(model) }
+        // FR-6.5 / FR-8.1: the backend moved. The provider object is `let`
+        // inside `AnswerExtractor`, so this rebuilds the extractor and the
+        // service around it rather than mutating one (ADR-069).
+        case .aiProvider, .ollamaBaseURL, .ollamaModel:
+            rebuildExtractor()
         default:
             break
         }
@@ -422,6 +503,13 @@ final class SemanticSearchCoordinator: ObservableObject {
         let mode = ProcessInfo.processInfo.environment[AIMode.environmentVariable]
             .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
         guard mode.isLive else {
+            providerReady.set(extractor != nil)
+            return
+        }
+        // FR-6.5: the local provider has no credential, so gating it on the
+        // key manager would leave the answer card permanently "not configured".
+        // A daemon that is down surfaces as `.network` from the request itself.
+        guard Self.resolvedKind(settings) != .ollama else {
             providerReady.set(extractor != nil)
             return
         }

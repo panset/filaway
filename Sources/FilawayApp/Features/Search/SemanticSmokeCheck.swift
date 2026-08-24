@@ -113,7 +113,7 @@ enum SemanticSmokeCheck {
             print("SMOKE phase=semantic result failures=\(failures)")
             return failures
         }
-        check("card-came-from-claude", search.answerSource == .claude, "\(search.answerSource)")
+        check("card-came-from-the-model", search.answerSource == .model, "\(search.answerSource)")
         check("card-snippet-is-the-command", card.snippetText == Self.curlCommand,
               card.snippetText.debugDescription)
         check("card-is-a-code-block", card.isCode, card.language ?? "nil")

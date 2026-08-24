@@ -17,6 +17,8 @@ import FilawayCore
 /// | `idleIntervalMinutes` | `CoreSettings.idleInterval` | FR-3.1, clamped to 1–15 |
 /// | `excludedFolders` | `CoreSettings.excludedFolders` | FR-4.5, per library |
 /// | `model` | `CoreSettings.effectiveOrganizeModel` | FR-6.2's house default / override |
+/// | `providerKind` | `FILAWAY_AI_PROVIDER` → `CoreSettings.aiProvider` | FR-6.5's backend (ADR-069) |
+/// | `ollamaConfiguration` | `CoreSettings.ollamaBaseURL` / `.ollamaModel` | where the local daemon is |
 protocol OrganizeSettingsSource: Sendable {
     var organizationMode: OrganizeMode { get }
     /// Minutes. `SessionConfiguration` clamps it to FR-3.1's 1–15.
@@ -25,10 +27,17 @@ protocol OrganizeSettingsSource: Sendable {
     /// What the organizer should actually send (FR-6.2 — the *effective* model,
     /// never the picker's stored value).
     var model: AIModel { get }
+    /// Which backend the request goes to (FR-6.5, ADR-069). The environment
+    /// wins over the preference so a smoke phase or a bench run can pin it.
+    var providerKind: AIProviderKind { get }
+    /// Where the local daemon is, when ``providerKind`` is `.ollama`.
+    var ollamaConfiguration: OllamaConfiguration { get }
 }
 
 extension OrganizeSettingsSource {
     var model: AIModel { .defaultOrganize }
+    var providerKind: AIProviderKind { AIProviderKind.fromEnvironment() ?? .claude }
+    var ollamaConfiguration: OllamaConfiguration { OllamaConfiguration() }
 
     var sessionConfiguration: SessionConfiguration {
         SessionConfiguration(idleInterval: idleIntervalMinutes * 60)
@@ -37,7 +46,12 @@ extension OrganizeSettingsSource {
     /// Everything the organizer takes, with the defaults for the values
     /// Settings does not expose.
     var organizerSettings: OrganizerSettings {
-        OrganizerSettings(mode: organizationMode, model: model, excludedFolders: excludedFolders)
+        OrganizerSettings(
+            mode: organizationMode,
+            model: model,
+            providerKind: providerKind,
+            excludedFolders: excludedFolders
+        )
     }
 }
 
@@ -67,6 +81,15 @@ struct CoreOrganizeSettings: OrganizeSettingsSource {
     var idleIntervalMinutes: Double { Double(settings.idleInterval) }
     var excludedFolders: [String] { settings.excludedFolders }
     var model: AIModel { settings.effectiveOrganizeModel }
+
+    /// ADR-069's resolution order: `FILAWAY_AI_PROVIDER` → the preference →
+    /// Claude. The environment is first so a bench run, a smoke phase or a
+    /// developer can pin a backend without writing the user's preferences.
+    var providerKind: AIProviderKind {
+        AIProviderKind.fromEnvironment() ?? settings.aiProvider
+    }
+
+    var ollamaConfiguration: OllamaConfiguration { settings.ollamaConfiguration }
 }
 
 /// Fixed values, for the smoke driver and previews.
@@ -75,4 +98,6 @@ struct FixedOrganizeSettings: OrganizeSettingsSource {
     var idleIntervalMinutes: Double = 3
     var excludedFolders: [String] = []
     var model: AIModel = .defaultOrganize
+    var providerKind: AIProviderKind = .claude
+    var ollamaConfiguration = OllamaConfiguration()
 }
