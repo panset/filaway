@@ -145,9 +145,15 @@ with no window there is no table.
 
 | Phase | Warnings | Notes root |
 |---|---|---|
-| `settings`, `settings2`, `onboarding`, `onboarding2`, `onboardingskip` | **0** | empty |
+| `settings`, `settings2` | **0** | empty |
 | `editor`, `search`, `organize*`, `kill`, `killcheck`, `1`, `2`, `paste`, `a11y`, `settings-wiring` | **1** | seeded |
+| `onboarding`, `onboarding2`, `onboardingskip` | **1** | the blank note FR-7.1 opens |
 | `semantic` | **4** | seeded, and the phase repopulates the sidebar repeatedly |
+
+The three onboarding phases read **0** when this table was first written, for a
+bad reason: the launch gate wedged the scene, so there was no window, no
+sidebar and no `List` to be reentrant about (ADR-061). Fixing that took the
+total from 13 to 16 — three more populated sidebars, not three new defects.
 
 So it is not "on every launch": it is **once per population of the sidebar
 `List`**. A library with no notes never produces it, and the phase that

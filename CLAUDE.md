@@ -507,19 +507,35 @@ ad-hoc-signed bundle.
 ## Onboarding, paste intelligence, deferred stubs (M4-01 / M4-03 / M4-10)
 
 **The first-run flow is a modal AppKit window, run before the library opens.**
-`OnboardingPresenter.runIfNeeded()` is called from two places — the top of
-`applicationDidFinishLaunching` *and* the first read of `AppSettings.notesRoot`
-— because SwiftUI decides for itself when it builds the scene, and whichever
-call comes first wins. That ordering matters: `AppModel` binds its `Library` in
-`init`, so the folder question has to be answered before anything reads the
-root. Two traps are recorded in **ADR-037** and both cost real time:
+`AppDelegate` calls `OnboardingPresenter.scheduleIfNeeded()` and
+`AppModel.bootstrap()` awaits `waitUntilAnswered()` before it resolves anything.
+Reading `AppSettings.notesRoot` deliberately does **not** run the gate any more.
+Four traps here, all of them measured, and each one costs a launch that comes up
+with no window at all (**ADR-037**, **ADR-049**, **ADR-061**):
 
+- **Never run the modal from inside a SwiftUI update.** That is what "whoever
+  reads the root first runs the gate" turned into: `AppModel.shared` is forced
+  from `StateObject.Box.update`, and a nested `NSApp.runModal` there wedges the
+  AttributeGraph — `NSApp.windows` comes out empty and `ShellView.task` never
+  runs. `applicationDidFinishLaunching` is no better: SwiftUI is called there
+  from inside `_handleAEOpenEvent:`, and the modal crashes the scene instead.
+- **Nothing may resolve the notes root before the gate.** `AppModel.library` is
+  resolved on first use, `SettingsModel.shared` is built in `bootstrap()` rather
+  than from the App body, and the welcome pane names the folder only once one
+  exists. A new eager reader reintroduces the bug silently — the `onboarding`
+  and `onboardingskip` phases are what catch it.
 - **Never implement `applicationWillFinishLaunching` on the
   `@NSApplicationDelegateAdaptor` delegate.** It replaces SwiftUI's own
   implementation, the scene is never built, and no window ever appears.
 - **Never host SwiftUI (`NSHostingController`) in a window shown before the
   scene exists.** It trips an AttributeGraph precondition and aborts the
-  process. `OnboardingWindowController` is therefore plain AppKit.
+  process. `OnboardingWindowController` is therefore plain AppKit — and it sets
+  `isReleasedWhenClosed = false`, because ARC owns that window and AppKit
+  releasing it again crashes the next CA transaction flush.
+
+`scheduleIfNeeded()` uses `RunLoop.main.perform`, not `DispatchQueue.main.async`:
+a nested run loop drains the main dispatch queue only when it was not started
+from inside a main-queue block, and a `@MainActor` job is one.
 
 The notes root now resolves `FILAWAY_NOTES_ROOT` → the bookmark in
 `AppSettings.notesRootBookmark` → `~/Notes`, cached per launch and invalidated
