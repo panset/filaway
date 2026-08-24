@@ -1,5 +1,5 @@
 .build/
-build/
+/build/
 *.xcodeproj
 *.xcworkspace
 .swiftpm/
@@ -10,3 +10,6 @@ DerivedData/
 /Tools/venv/
 __pycache__/
 .env
+.claude/worktrees/
+Tools/release.env
+build/releases/

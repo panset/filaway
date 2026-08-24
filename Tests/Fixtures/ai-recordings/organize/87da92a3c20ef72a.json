@@ -1,0 +1,911 @@
+{
+  "key" : "87da92a3c20ef72a",
+  "model" : "claude-sonnet-5",
+  "note" : "hand-authored (M2-02) — organize: a valid plan",
+  "purpose" : "organize",
+  "request" : {
+    "effort" : "medium",
+    "maxTokens" : 4096,
+    "messages" : [
+      {
+        "role" : "user",
+        "text" : "Folders: Commands\nNotes:\n- id=11111111-1111-4111-8111-111111111111 path=Scratch.md\n- id=22222222-2222-4222-8222-222222222222 path=Commands/curl.md\n- id=44444444-4444-4444-8444-444444444444 path=Untitled note.md\n\nSession notes:\n--- Scratch.md ---\nRandom thoughts from today.\n\n```sh\ncurl -sS -H \"Accept: application/json\" https://example.test/documents\n```\n\nRemember to write this up properly.\n--- Commands/curl.md ---\n# curl\n\nHandy invocations.\n\n\nFile this session."
+      }
+    ],
+    "model" : "claude-sonnet-5",
+    "purpose" : "organize",
+    "system" : "You file notes. Call the organization_plan tool exactly once. Never delete or rewrite existing text. Folders are at most two levels deep. Copy any moved segment byte-for-byte.",
+    "thinking" : {
+      "adaptive" : {
+
+      }
+    },
+    "timeout" : 60,
+    "toolChoice" : {
+      "tool" : {
+        "name" : "organization_plan"
+      }
+    },
+    "tools" : [
+      {
+        "description" : "Report the organization plan for this writing session. Use zero or more actions from the closed set; an empty list means nothing needs filing. Never propose deleting or replacing existing text — the only ways to change a note are appending to it, moving a segment out of it, renaming it, moving it, or adding tags.",
+        "inputSchema" : {
+          "additionalProperties" : false,
+          "properties" : {
+            "actions" : {
+              "description" : "Zero or more actions. An empty list means nothing needs filing.",
+              "items" : {
+                "anyOf" : [
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Create a new note from session content.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "createNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "content" : {
+                        "description" : "Markdown body of the new note.",
+                        "type" : "string"
+                      },
+                      "folderPath" : {
+                        "description" : "Folder for the note; \"\" for the library root. At most two levels deep.",
+                        "type" : "string"
+                      },
+                      "tags" : {
+                        "description" : "Freeform tags.",
+                        "items" : {
+                          "type" : "string"
+                        },
+                        "type" : "array"
+                      },
+                      "title" : {
+                        "description" : "Title of the new note. Becomes the filename, so no \"/\" or \":\".",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "title",
+                      "folderPath",
+                      "content"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Append content to an existing note. Additive only.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "appendToNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "content" : {
+                        "description" : "Markdown to append. Existing content is never touched.",
+                        "type" : "string"
+                      },
+                      "divider" : {
+                        "description" : "Write a horizontal rule before the block. Defaults to true.",
+                        "type" : "boolean"
+                      },
+                      "heading" : {
+                        "description" : "Optional heading placed above the appended block, without leading \"#\".",
+                        "type" : "string"
+                      },
+                      "target" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "target",
+                      "content"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Create a Library folder. Prefer an existing folder over a new one.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "createFolder"
+                        ],
+                        "type" : "string"
+                      },
+                      "path" : {
+                        "description" : "New folder path, at most two levels, e.g. \"Commands\" or \"Commands/Docker\".",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "path"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Move a note to another folder.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "moveNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "toFolderPath" : {
+                        "description" : "Destination folder; \"\" for the library root. At most two levels.",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "toFolderPath"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Retitle a note — normally one the user left untitled.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "retitleNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "newTitle" : {
+                        "description" : "New title, which is also the new filename. No \"/\" or \":\".",
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "newTitle"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Add freeform tags to a note's metadata.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "tagNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "tags" : {
+                        "description" : "Tags to add. Existing tags are kept.",
+                        "items" : {
+                          "type" : "string"
+                        },
+                        "type" : "array"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "tags"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Merge: move a segment out of one note and into another in a single undoable step. The segment text travels with the action so nothing can be lost.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "moveSegment"
+                        ],
+                        "type" : "string"
+                      },
+                      "destination" : {
+                        "anyOf" : [
+                          {
+                            "additionalProperties" : false,
+                            "properties" : {
+                              "kind" : {
+                                "enum" : [
+                                  "existingNote"
+                                ],
+                                "type" : "string"
+                              },
+                              "note" : {
+                                "additionalProperties" : false,
+                                "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                                "properties" : {
+                                  "id" : {
+                                    "description" : "The note's id, exactly as given in the library context. Preferred.",
+                                    "type" : "string"
+                                  },
+                                  "path" : {
+                                    "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                                    "type" : "string"
+                                  }
+                                },
+                                "required" : [
+
+                                ],
+                                "type" : "object"
+                              }
+                            },
+                            "required" : [
+                              "kind",
+                              "note"
+                            ],
+                            "type" : "object"
+                          },
+                          {
+                            "additionalProperties" : false,
+                            "properties" : {
+                              "folderPath" : {
+                                "description" : "Folder for the new note; \"\" for the library root. At most two levels.",
+                                "type" : "string"
+                              },
+                              "kind" : {
+                                "enum" : [
+                                  "newNote"
+                                ],
+                                "type" : "string"
+                              },
+                              "tags" : {
+                                "description" : "Freeform tags for the new note.",
+                                "items" : {
+                                  "type" : "string"
+                                },
+                                "type" : "array"
+                              },
+                              "title" : {
+                                "description" : "Title of the note to create. Becomes the filename, so no \"/\" or \":\".",
+                                "type" : "string"
+                              }
+                            },
+                            "required" : [
+                              "kind",
+                              "title",
+                              "folderPath"
+                            ],
+                            "type" : "object"
+                          }
+                        ],
+                        "description" : "Where the segment goes: an existing note, or a new one."
+                      },
+                      "divider" : {
+                        "description" : "Write a horizontal rule before the block. Defaults to true.",
+                        "type" : "boolean"
+                      },
+                      "heading" : {
+                        "description" : "Optional heading placed above the moved block, without leading \"#\".",
+                        "type" : "string"
+                      },
+                      "segment" : {
+                        "description" : "The exact text to move, copied byte-for-byte from the source note. If it does not match the note verbatim the whole plan is rejected.",
+                        "type" : "string"
+                      },
+                      "segmentHash" : {
+                        "description" : "Optional SHA-256 (lowercase hex) of \"segment\".",
+                        "type" : "string"
+                      },
+                      "source" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "sourceRange" : {
+                        "additionalProperties" : false,
+                        "description" : "Optional, advisory. The segment text is what actually locates the move.",
+                        "properties" : {
+                          "length" : {
+                            "description" : "Length of the segment in characters.",
+                            "type" : "integer"
+                          },
+                          "start" : {
+                            "description" : "Character offset of the segment in the source note.",
+                            "type" : "integer"
+                          }
+                        },
+                        "required" : [
+                          "start",
+                          "length"
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "source",
+                      "segment",
+                      "destination"
+                    ],
+                    "type" : "object"
+                  }
+                ],
+                "description" : "One action from the closed set."
+              },
+              "type" : "array"
+            },
+            "summary" : {
+              "description" : "One plain-language sentence for the user, e.g. \"Merge the curl snippet into Commands/curl\". No Markdown.",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "summary",
+            "actions"
+          ],
+          "type" : "object"
+        },
+        "name" : "organization_plan",
+        "strict" : true
+      }
+    ]
+  },
+  "requestBody" : {
+    "max_tokens" : 4096,
+    "messages" : [
+      {
+        "content" : [
+          {
+            "text" : "Folders: Commands\nNotes:\n- id=11111111-1111-4111-8111-111111111111 path=Scratch.md\n- id=22222222-2222-4222-8222-222222222222 path=Commands/curl.md\n- id=44444444-4444-4444-8444-444444444444 path=Untitled note.md\n\nSession notes:\n--- Scratch.md ---\nRandom thoughts from today.\n\n```sh\ncurl -sS -H \"Accept: application/json\" https://example.test/documents\n```\n\nRemember to write this up properly.\n--- Commands/curl.md ---\n# curl\n\nHandy invocations.\n\n\nFile this session.",
+            "type" : "text"
+          }
+        ],
+        "role" : "user"
+      }
+    ],
+    "model" : "claude-sonnet-5",
+    "output_config" : {
+      "effort" : "medium"
+    },
+    "system" : "You file notes. Call the organization_plan tool exactly once. Never delete or rewrite existing text. Folders are at most two levels deep. Copy any moved segment byte-for-byte.",
+    "thinking" : {
+      "type" : "adaptive"
+    },
+    "tool_choice" : {
+      "name" : "organization_plan",
+      "type" : "tool"
+    },
+    "tools" : [
+      {
+        "description" : "Report the organization plan for this writing session. Use zero or more actions from the closed set; an empty list means nothing needs filing. Never propose deleting or replacing existing text — the only ways to change a note are appending to it, moving a segment out of it, renaming it, moving it, or adding tags.",
+        "input_schema" : {
+          "additionalProperties" : false,
+          "properties" : {
+            "actions" : {
+              "description" : "Zero or more actions. An empty list means nothing needs filing.",
+              "items" : {
+                "anyOf" : [
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Create a new note from session content.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "createNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "content" : {
+                        "description" : "Markdown body of the new note.",
+                        "type" : "string"
+                      },
+                      "folderPath" : {
+                        "description" : "Folder for the note; \"\" for the library root. At most two levels deep.",
+                        "type" : "string"
+                      },
+                      "tags" : {
+                        "description" : "Freeform tags.",
+                        "items" : {
+                          "type" : "string"
+                        },
+                        "type" : "array"
+                      },
+                      "title" : {
+                        "description" : "Title of the new note. Becomes the filename, so no \"/\" or \":\".",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "title",
+                      "folderPath",
+                      "content"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Append content to an existing note. Additive only.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "appendToNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "content" : {
+                        "description" : "Markdown to append. Existing content is never touched.",
+                        "type" : "string"
+                      },
+                      "divider" : {
+                        "description" : "Write a horizontal rule before the block. Defaults to true.",
+                        "type" : "boolean"
+                      },
+                      "heading" : {
+                        "description" : "Optional heading placed above the appended block, without leading \"#\".",
+                        "type" : "string"
+                      },
+                      "target" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "target",
+                      "content"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Create a Library folder. Prefer an existing folder over a new one.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "createFolder"
+                        ],
+                        "type" : "string"
+                      },
+                      "path" : {
+                        "description" : "New folder path, at most two levels, e.g. \"Commands\" or \"Commands/Docker\".",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "path"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Move a note to another folder.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "moveNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "toFolderPath" : {
+                        "description" : "Destination folder; \"\" for the library root. At most two levels.",
+                        "type" : "string"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "toFolderPath"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Retitle a note — normally one the user left untitled.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "retitleNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "newTitle" : {
+                        "description" : "New title, which is also the new filename. No \"/\" or \":\".",
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "newTitle"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Add freeform tags to a note's metadata.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "tagNote"
+                        ],
+                        "type" : "string"
+                      },
+                      "note" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "tags" : {
+                        "description" : "Tags to add. Existing tags are kept.",
+                        "items" : {
+                          "type" : "string"
+                        },
+                        "type" : "array"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "note",
+                      "tags"
+                    ],
+                    "type" : "object"
+                  },
+                  {
+                    "additionalProperties" : false,
+                    "description" : "Merge: move a segment out of one note and into another in a single undoable step. The segment text travels with the action so nothing can be lost.",
+                    "properties" : {
+                      "action" : {
+                        "enum" : [
+                          "moveSegment"
+                        ],
+                        "type" : "string"
+                      },
+                      "destination" : {
+                        "anyOf" : [
+                          {
+                            "additionalProperties" : false,
+                            "properties" : {
+                              "kind" : {
+                                "enum" : [
+                                  "existingNote"
+                                ],
+                                "type" : "string"
+                              },
+                              "note" : {
+                                "additionalProperties" : false,
+                                "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                                "properties" : {
+                                  "id" : {
+                                    "description" : "The note's id, exactly as given in the library context. Preferred.",
+                                    "type" : "string"
+                                  },
+                                  "path" : {
+                                    "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                                    "type" : "string"
+                                  }
+                                },
+                                "required" : [
+
+                                ],
+                                "type" : "object"
+                              }
+                            },
+                            "required" : [
+                              "kind",
+                              "note"
+                            ],
+                            "type" : "object"
+                          },
+                          {
+                            "additionalProperties" : false,
+                            "properties" : {
+                              "folderPath" : {
+                                "description" : "Folder for the new note; \"\" for the library root. At most two levels.",
+                                "type" : "string"
+                              },
+                              "kind" : {
+                                "enum" : [
+                                  "newNote"
+                                ],
+                                "type" : "string"
+                              },
+                              "tags" : {
+                                "description" : "Freeform tags for the new note.",
+                                "items" : {
+                                  "type" : "string"
+                                },
+                                "type" : "array"
+                              },
+                              "title" : {
+                                "description" : "Title of the note to create. Becomes the filename, so no \"/\" or \":\".",
+                                "type" : "string"
+                              }
+                            },
+                            "required" : [
+                              "kind",
+                              "title",
+                              "folderPath"
+                            ],
+                            "type" : "object"
+                          }
+                        ],
+                        "description" : "Where the segment goes: an existing note, or a new one."
+                      },
+                      "divider" : {
+                        "description" : "Write a horizontal rule before the block. Defaults to true.",
+                        "type" : "boolean"
+                      },
+                      "heading" : {
+                        "description" : "Optional heading placed above the moved block, without leading \"#\".",
+                        "type" : "string"
+                      },
+                      "segment" : {
+                        "description" : "The exact text to move, copied byte-for-byte from the source note. If it does not match the note verbatim the whole plan is rejected.",
+                        "type" : "string"
+                      },
+                      "segmentHash" : {
+                        "description" : "Optional SHA-256 (lowercase hex) of \"segment\".",
+                        "type" : "string"
+                      },
+                      "source" : {
+                        "additionalProperties" : false,
+                        "description" : "A reference to an existing note. Give \"id\" whenever you know it.",
+                        "properties" : {
+                          "id" : {
+                            "description" : "The note's id, exactly as given in the library context. Preferred.",
+                            "type" : "string"
+                          },
+                          "path" : {
+                            "description" : "The note's path relative to the library root, e.g. \"Commands/curl.md\".",
+                            "type" : "string"
+                          }
+                        },
+                        "required" : [
+
+                        ],
+                        "type" : "object"
+                      },
+                      "sourceRange" : {
+                        "additionalProperties" : false,
+                        "description" : "Optional, advisory. The segment text is what actually locates the move.",
+                        "properties" : {
+                          "length" : {
+                            "description" : "Length of the segment in characters.",
+                            "type" : "integer"
+                          },
+                          "start" : {
+                            "description" : "Character offset of the segment in the source note.",
+                            "type" : "integer"
+                          }
+                        },
+                        "required" : [
+                          "start",
+                          "length"
+                        ],
+                        "type" : "object"
+                      }
+                    },
+                    "required" : [
+                      "action",
+                      "source",
+                      "segment",
+                      "destination"
+                    ],
+                    "type" : "object"
+                  }
+                ],
+                "description" : "One action from the closed set."
+              },
+              "type" : "array"
+            },
+            "summary" : {
+              "description" : "One plain-language sentence for the user, e.g. \"Merge the curl snippet into Commands/curl\". No Markdown.",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "summary",
+            "actions"
+          ],
+          "type" : "object"
+        },
+        "name" : "organization_plan",
+        "strict" : true
+      }
+    ]
+  },
+  "responseBody" : {
+    "content" : [
+      {
+        "id" : "toolu_plan_ok",
+        "input" : {
+          "actions" : [
+            {
+              "action" : "moveSegment",
+              "destination" : {
+                "kind" : "existingNote",
+                "note" : {
+                  "id" : "22222222-2222-4222-8222-222222222222"
+                }
+              },
+              "divider" : true,
+              "heading" : "Fetch documents",
+              "segment" : "```sh\ncurl -sS -H \"Accept: application/json\" https://example.test/documents\n```",
+              "segmentHash" : "44bc3da8a6b05fc1ba944e38cf1e99d9ceb17c25e635034ede4f24dcbac126bb",
+              "source" : {
+                "id" : "11111111-1111-4111-8111-111111111111"
+              }
+            },
+            {
+              "action" : "retitleNote",
+              "newTitle" : "Auth notes",
+              "note" : {
+                "id" : "44444444-4444-4444-8444-444444444444"
+              }
+            }
+          ],
+          "summary" : "Move the curl snippet into Commands/curl and name the untitled note"
+        },
+        "name" : "organization_plan",
+        "type" : "tool_use"
+      }
+    ],
+    "id" : "plan_ok",
+    "model" : "claude-sonnet-5",
+    "role" : "assistant",
+    "stop_reason" : "tool_use",
+    "type" : "message",
+    "usage" : {
+      "cache_creation_input_tokens" : 0,
+      "cache_read_input_tokens" : 0,
+      "input_tokens" : 1840,
+      "output_tokens" : 320
+    }
+  },
+  "version" : 1
+}
