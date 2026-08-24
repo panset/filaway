@@ -2429,3 +2429,22 @@ timestamp, query, found, seconds, optional remark.
 - M4-08's diagnostics export must skip `retrieval-log.jsonl`.
 
 ---
+
+## ADR-065 — The offline answer card prefers a covered code chunk over rank alone
+
+**Context.** After M4-07's typo repair, the smoke corpus's canonical offline
+query ("curl command to fetch documents") repaired "command"→"commands" — a word
+only the distractor note contains — flipping BM25's #1 to the wrong code chunk.
+`AnswerHeuristic` only ever examined `chunks[0]`, so the offline card vanished
+(`offline-card-is-local`), even though the true answer chunk sat at #2 with
+vector rank 1 and passing word coverage. On a tiny corpus, RRF's consensus
+preference can rank a plausible stranger above the vector-best chunk.
+
+**Decision.** `card(query:chunks:)` first scans the top `codeLookahead` (4)
+fused chunks for a **code** chunk whose query-word coverage passes, and prefers
+it; otherwise the old top-chunk rule applies unchanged. Coverage, not rank,
+vouches for the promoted chunk, so negatives stay rejected (retrieval gate
+re-run green). This also improves on the pre-M4-07 behaviour, which showed the
+*prose context* chunk as the card; now the card is the command itself
+(Figure 2b). Regression: `OfflineAnswerRegressionTests` reproduces the smoke
+corpus at the unit level and asserts the snippet contains the command.

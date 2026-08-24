@@ -48,8 +48,26 @@ public struct AnswerHeuristic: Sendable, Hashable {
             "thing", "things", "again", "there", "here", "make", "made", "one", "two",
         ])
 
+    /// How many fused chunks the code-preference pass may look at. Small on
+    /// purpose: a code chunk that is not near the top is not "the answer".
+    public var codeLookahead: Int = 4
+
     /// The card, or `nil` when nothing in the list is convincing enough.
+    ///
+    /// Preference order (M4 regression, `offline-card-is-local`):
+    /// 1. The first **code** chunk in the top ``codeLookahead`` whose word
+    ///    coverage passes — the query's own words vouch for it, and a command
+    ///    is what Figure 2b's card is for. Rank alone is not trusted here:
+    ///    on a tiny corpus RRF's consensus preference can put a plausible
+    ///    stranger above the vector-best chunk (see the regression test).
+    /// 2. Otherwise the old rule on the top chunk only: code with a clear
+    ///    margin, or prose the query's words mostly appear in.
     public func card(query: String, chunks: [RankedChunk]) -> AnswerCard? {
+        if let code = chunks.prefix(codeLookahead).first(where: {
+            $0.kind == .code && coverage(of: query, in: $0.text) >= wordCoverage
+        }) {
+            return Self.card(for: code, snippet: snippet(for: code))
+        }
         guard let top = chunks.first else { return nil }
         guard accepts(query: query, chunks: chunks) else { return nil }
         return Self.card(for: top, snippet: snippet(for: top))
