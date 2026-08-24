@@ -194,6 +194,25 @@ Dependencies use task IDs. Two tracks per milestone can run in parallel sub-agen
 
 ---
 
+### Phase 2 — AI providers (FR-6.5, NFR-5) — **DONE**
+
+Phase 1 shipped one backend. FR-6.5 promised a second: *"optionally use a local
+model instead of a cloud API"*. Phase 2 made that real, against Ollama with
+`llama3.1:8b`, on the machine described in §8.
+
+| ID | Task | Landed |
+|---|---|---|
+| P2-01 | `OllamaProvider` / `OllamaWire` behind the existing `AIProvider` protocol; a forced tool becomes the `format` JSON-schema grammar because Ollama has no `tool_choice`; `AIProviderKind`, `OllamaConfiguration`, the loopback-only `http` rule; recordings carry their provider so one fixture directory holds both wire formats | ADR-066, ADR-067 |
+| P2-02 | Settings → AI provider chooser (Figure 4), keyless `AIConnectionManager`, `AIStatus` for a backend with no credential, `GET /api/tags` as the "test connection" | ADR-068 |
+| P2-03 | Onboarding's Figure 3 local-model card (`OllamaSetupModel` in Core, behind `OllamaValidating`); provider resolution `FILAWAY_AI_PROVIDER` → preference, applied live to the running `Organizer` and `AnswerExtractor`; provider-aware timeouts (organize 180 s, search 8 s) and a launch warm-up; smoke phases `onboarding-ollama`, `onboarding-ollama2`, the gated `organize-ollama`, and `FILAWAY_SMOKE_ONLY` | ADR-069 |
+| P2-04 | Plan quality on a small model: wire-time rules + `PlanRepair` (4/9 → 8/9 usable plans, and the standard corpus proposes and applies); 14 committed real Ollama recordings; `GoldenPipelineTests` over both providers; `filaway-bench ollama probe` and `retrieval --answer ollama`; the user guide | ADR-070, ADR-071 |
+
+**DoD P2** — walked clause by clause, with the numbers, in
+`docs/verification/P2-ollama.md`. The user-facing setup guide is
+`docs/ollama.md`; the cost line is `docs/cost.md` (**$0**).
+
+---
+
 ## 4. Testing, woven (where each thing lands)
 
 - **M1-07** corpus generator + keyword perf gate + launch metric → every later milestone reuses.

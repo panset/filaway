@@ -165,7 +165,14 @@ enum AppWiringFixture {
         }
     }
 
-    static func wire(provider: any AIProvider, mode: OrganizeMode = .ask) async throws -> Wiring {
+    /// - Parameter kind: which backend the request is built for (P2-04). It
+    ///   moves the model id and therefore the fixture key, so the local
+    ///   provider reads its own recording rather than Claude's (ADR-067).
+    static func wire(
+        provider: any AIProvider,
+        mode: OrganizeMode = .ask,
+        kind: AIProviderKind = .claude
+    ) async throws -> Wiring {
         let temp = try TempLibrary()
         try await temp.store.prepare()
         for seed in seeds {
@@ -192,7 +199,7 @@ enum AppWiringFixture {
             applier: applier,
             candidateFinder: KeywordCandidateFinder(search: SearchService(metadata: metadata)),
             queueStore: queue,
-            settings: OrganizerSettings(mode: mode),
+            settings: OrganizerSettings(mode: mode, model: kind.defaultOrganizeModel, providerKind: kind),
             observer: recorder.observer
         )
         return Wiring(

@@ -294,7 +294,18 @@ enum OrganizeGolden {
         var session: Session
     }
 
-    static func makeRun(_ scenario: Scenario, provider: any AIProvider, mode: OrganizeMode = .ask) async -> Run {
+    /// Builds one scenario's world.
+    ///
+    /// - Parameter kind: which backend the *request* is built for (P2-04). It
+    ///   moves the model id, and the model id is in ``AIRequest/fixtureKey``, so
+    ///   `.ollama` reads and writes its own fixtures rather than Claude's
+    ///   (ADR-067). It also moves the request timeout (ADR-069).
+    static func makeRun(
+        _ scenario: Scenario,
+        provider: any AIProvider,
+        mode: OrganizeMode = .ask,
+        kind: AIProviderKind = .claude
+    ) async -> Run {
         let library = FakeLibrary()
         await library.add(id: curl, path: "Commands/curl.md", body: curlBody, tags: ["shell", "http"])
         await library.add(id: git, path: "Commands/git.md", body: gitBody, tags: ["git"])
@@ -318,7 +329,12 @@ enum OrganizeGolden {
             source: library,
             baselines: baselines,
             applier: FakeApplier(library: library),
-            settings: OrganizerSettings(mode: mode, excludedFolders: excludedFolders),
+            settings: OrganizerSettings(
+                mode: mode,
+                model: kind.defaultOrganizeModel,
+                providerKind: kind,
+                excludedFolders: excludedFolders
+            ),
             clock: TestClock(),
             observer: recorder.observer
         )

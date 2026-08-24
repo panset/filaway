@@ -245,3 +245,32 @@ sqlite3 <library>/filaway.sqlite "SELECT COUNT(*), AVG(LENGTH(text)) FROM chunks
 Recompute from real `usage` blocks once the fixtures have been recorded live
 (`docs/prompts.md` §5) — `bytes / 4` is deliberately pessimistic, so the real
 bill should come in under every figure here.
+
+---
+
+## 7. The other answer: **$0** (Phase 2, FR-6.5)
+
+Settings → AI → **Local model (Ollama)** runs both request shapes on the user's
+own Mac. There is no key, no account and no bill; nothing leaves the machine
+(NFR-5). The whole column above becomes zero.
+
+What it costs instead is time and memory, measured on an M2/16 GB with
+`llama3.1:8b` (`make bench ARGS="ollama probe"`):
+
+| | Claude | `llama3.1:8b`, warm | cold |
+|---|---|---|---|
+| file a session | ~4 s, ~$0.021 | 7.3 s, $0 | 22.3 s |
+| answer card | ~2 s, ~$0.003 | 3.2 s, $0 | 12.8 s |
+| resident RAM | — | ~6 GB while loaded (`keep_alive: 30m`) | — |
+
+Filing is never on a visible path, so its extra seconds cost nothing but
+patience. The answer card is: it races the offline card at 5 s (NFR-1), so a
+warm local model usually wins and a cold one shows the FR-5.5 card instead.
+
+Plan quality is the real trade — 8 of 9 organize scenarios produce a usable plan
+locally, against 9 of 9 hand-authored for Sonnet. Numbers per scenario:
+`docs/verification/P2-ollama.md`. Setup: `docs/ollama.md`.
+
+`AIUsageLedger` records local calls under `"ollama"` and excludes them from the
+billed total, so Settings → AI's usage line stays honest when a user switches
+back and forth.

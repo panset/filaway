@@ -329,10 +329,11 @@ enum AnswerGolden {
     /// house 5 s budget.
     static func configuration(
         timeout: TimeInterval = 5,
-        model: AIModel = .defaultSearch
+        model: AIModel = .defaultSearch,
+        providerKind: AIProviderKind = .claude
     ) -> AnswerExtractor.Configuration {
         AnswerExtractor.Configuration(
-            model: model, timeout: timeout, promptsDirectory: AITestPaths.prompts
+            model: model, providerKind: providerKind, timeout: timeout, promptsDirectory: AITestPaths.prompts
         )
     }
 

@@ -59,6 +59,15 @@ public enum PlanIssueKind: String, Sendable, Hashable, Codable, CaseIterable {
     case unreadableAction
     /// The plan is empty. Perfectly valid — "nothing to do".
     case nothingToDo
+    /// ``PlanRepair`` turned a creation that would have collided with an
+    /// existing note into an addition to that note (P2-04, ADR-070). Always a
+    /// warning: the plan the user is shown is not quite the one the model
+    /// wrote, and the card and the Activity row say so.
+    case repairedCollision
+    /// ``PlanRepair`` turned a `moveSegment` whose segment it could not verify
+    /// into an addition at the destination, leaving the source note whole
+    /// (P2-04, ADR-070). Always a warning.
+    case repairedMerge
 }
 
 /// One finding.

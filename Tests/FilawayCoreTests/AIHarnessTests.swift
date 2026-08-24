@@ -68,7 +68,11 @@ struct AIRecordingFixtureTests {
             // v1 (no `provider`) still loads and is Claude by definition — the
             // whole point of ADR-067's default.
             #expect((1 ... AIRecording.currentVersion).contains(recording.version))
-            #expect(recording.provider == "claude")
+            // Every fixture names a provider Filaway can still speak; a v1 file
+            // names none and is Claude by definition (ADR-067). Since P2-04 the
+            // directory holds both, so the body is checked against *its own*
+            // codec rather than Claude's.
+            let kind = try #require(AIProviderKind(rawValue: recording.provider), "unknown provider")
             #expect(recording.key == store.url(purpose: recording.purpose, key: recording.key)
                 .deletingPathExtension().lastPathComponent)
             if recording.purpose != .validate {
@@ -76,7 +80,8 @@ struct AIRecordingFixtureTests {
                     recording.request.fixtureKey == recording.key,
                     "the stored request must hash to the filename, or replay would miss"
                 )
-                #expect(recording.requestBody == ClaudeWire.body(for: recording.request))
+                #expect(recording.model == recording.request.model.id)
+                #expect(recording.requestBody == ProviderWire.named(kind.rawValue).requestBody(for: recording.request))
                 _ = try recording.response()
             }
         }

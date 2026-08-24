@@ -394,7 +394,10 @@ public actor Organizer {
         }
 
         let repaired = Self.repair(
-            plan: decoding.plan, unknownActions: decoding.unknownActions, context: built.context
+            plan: decoding.plan,
+            unknownActions: decoding.unknownActions,
+            context: built.context,
+            repairingCollisions: settings.providerKind.repairsPlanCollisions
         )
         guard case let .keep(plan, validation, dropped) = repaired else {
             guard case let .discard(validation) = repaired else { return }
@@ -624,18 +627,39 @@ public actor Organizer {
     /// Plan-level errors (too many actions, a contradiction the validator could
     /// not pin to one index) always discard: there is no action to remove that
     /// would fix them.
+    /// - Parameter repairingCollisions: run ``PlanRepair`` first, turning a
+    ///   creation that would land on an existing note into an addition to that
+    ///   note. Off for Claude, on for the local models
+    ///   (``AIProviderKind/repairsPlanCollisions``, ADR-070). Its warnings ride
+    ///   into the returned validation either way, so a repaired plan says so on
+    ///   the card and in Activity.
     static func repair(
-        plan: OrganizationPlan,
+        plan originalPlan: OrganizationPlan,
         unknownActions: [UnknownPlanAction],
-        context: OrganizeContext
+        context: OrganizeContext,
+        repairingCollisions: Bool = false
     ) -> Repair {
+        var plan = originalPlan
+        var repairWarnings: [PlanIssue] = []
+        if repairingCollisions {
+            let result = PlanRepair.repair(plan, in: context)
+            plan = result.plan
+            repairWarnings = result.warnings
+        }
+        func annotate(_ validation: PlanValidation) -> PlanValidation {
+            guard !repairWarnings.isEmpty else { return validation }
+            var annotated = validation
+            annotated.warnings = repairWarnings + annotated.warnings
+            return annotated
+        }
+
         let validator = PlanValidator(context: context)
         let validation = validator.validate(plan, unknownActions: unknownActions)
-        if validation.isValid { return .keep(plan, validation, dropped: []) }
+        if validation.isValid { return .keep(plan, annotate(validation), dropped: []) }
 
         let badIndices = Set(validation.errors.compactMap(\.actionIndex))
-        guard !badIndices.isEmpty, badIndices.count < plan.actions.count else { return .discard(validation) }
-        guard validation.errors.allSatisfy({ $0.actionIndex != nil }) else { return .discard(validation) }
+        guard !badIndices.isEmpty, badIndices.count < plan.actions.count else { return .discard(annotate(validation)) }
+        guard validation.errors.allSatisfy({ $0.actionIndex != nil }) else { return .discard(annotate(validation)) }
 
         let kept = plan.actions.enumerated().filter { !badIndices.contains($0.offset) }.map(\.element)
         let dropped = plan.actions.enumerated().filter { badIndices.contains($0.offset) }.map(\.element)
@@ -644,12 +668,12 @@ public actor Organizer {
         reduced.actions = kept
         reduced.preconditions = context.preconditions(for: reduced)
         let revalidation = validator.validate(reduced)
-        guard revalidation.isValid else { return .discard(validation) }
+        guard revalidation.isValid else { return .discard(annotate(validation)) }
         guard summaryStillMatches(plan.summary, kept: kept, dropped: dropped, context: context) else {
-            return .discard(validation)
+            return .discard(annotate(validation))
         }
         let droppedIssues = validation.errors.filter { $0.actionIndex.map(badIndices.contains) ?? false }
-        return .keep(reduced, revalidation, dropped: droppedIssues)
+        return .keep(reduced, annotate(revalidation), dropped: droppedIssues)
     }
 
     /// `false` when the summary names something only a dropped action was going
