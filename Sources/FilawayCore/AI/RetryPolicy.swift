@@ -37,28 +37,41 @@ public struct RetryPolicy: Sendable, Equatable {
     public var maxDelay: TimeInterval
     /// Fraction of the computed delay that is randomised (0 = none, 1 = full).
     public var jitter: Double
+    /// Whether a `.timedOut` earns another attempt. `false` for a local model
+    /// at temperature 0: the same prompt deterministically runs away again, and
+    /// each identical attempt costs the full request budget of GPU time
+    /// (measured: a 180 s organize timeout retried 3× is nine minutes of churn
+    /// for three identical failures). Network errors still retry — those are
+    /// about the transport, not the generation.
+    public var retriesTimeouts: Bool
 
     public init(
         maxAttempts: Int = 3,
         baseDelay: TimeInterval = 0.5,
         multiplier: Double = 2,
         maxDelay: TimeInterval = 30,
-        jitter: Double = 0.5
+        jitter: Double = 0.5,
+        retriesTimeouts: Bool = true
     ) {
         self.maxAttempts = Swift.max(1, maxAttempts)
         self.baseDelay = baseDelay
         self.multiplier = multiplier
         self.maxDelay = maxDelay
         self.jitter = Swift.min(Swift.max(jitter, 0), 1)
+        self.retriesTimeouts = retriesTimeouts
     }
 
     /// No retries at all — what the replay harness and unit tests use.
     public static let none = RetryPolicy(maxAttempts: 1)
 
+    /// The default for a local daemon: transport errors retry, timeouts do not.
+    public static let local = RetryPolicy(retriesTimeouts: false)
+
     /// Whether another attempt should be made after `error` on `attempt`
     /// (1-based).
     public func shouldRetry(_ error: AIError, attempt: Int) -> Bool {
-        attempt < maxAttempts && error.isRetryable
+        if case .timedOut = error, !retriesTimeouts { return false }
+        return attempt < maxAttempts && error.isRetryable
     }
 
     /// Delay before the attempt following `attempt` (1-based).

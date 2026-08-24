@@ -27,6 +27,14 @@ public enum OrganizeRequestBuilder {
 
     public static let maxTokens = 4_096
 
+    /// The cap when the backend is a local model (`num_predict`). A valid plan
+    /// is a few hundred tokens; the first real-world Ollama session produced a
+    /// runaway constrained generation (1,480+ tokens at ~17 tok/s) that blew
+    /// the 180 s budget and lost the session. Capped, the generation either
+    /// finishes inside the budget (~60 s worst case) or truncates into a clean,
+    /// visible `.maxTokens` failure instead of a timeout.
+    public static let localMaxTokens = 1_024
+
     /// The rendered system prompt.
     public static func systemPrompt(
         _ version: PromptVersion = .organize,
@@ -51,7 +59,7 @@ public enum OrganizeRequestBuilder {
             messages: [.user(built.promptText)],
             tools: [OrganizationPlan.tool],
             toolChoice: .tool(name: OrganizationPlan.toolName),
-            maxTokens: maxTokens,
+            maxTokens: settings.providerKind == .ollama ? localMaxTokens : maxTokens,
             thinking: .adaptive(),
             effort: settings.effort,
             timeout: settings.requestTimeout

@@ -321,3 +321,24 @@ private final class ChangeCounter: @unchecked Sendable {
 
     var reads: Int { value }
 }
+
+@Suite("Local request budgets (the runaway-generation fixes)")
+struct LocalBudgetTests {
+    @Test("an organize request to a local model caps generation at localMaxTokens")
+    func localCap() throws {
+        #expect(OrganizeRequestBuilder.localMaxTokens < OrganizeRequestBuilder.maxTokens)
+        // The cap must leave room for every committed golden plan.
+        #expect(OrganizeRequestBuilder.localMaxTokens >= 1_024)
+    }
+
+    @Test("the local retry policy retries transport errors but never a timeout")
+    func localRetryPolicy() {
+        let policy = RetryPolicy.local
+        #expect(policy.shouldRetry(.network(code: 1, description: "x"), attempt: 1))
+        #expect(!policy.shouldRetry(.timedOut, attempt: 1),
+                "temperature 0: an identical prompt deterministically runs away again")
+        let claude = RetryPolicy()
+        #expect(claude.shouldRetry(.timedOut, attempt: 1),
+                "the cloud default is unchanged")
+    }
+}
