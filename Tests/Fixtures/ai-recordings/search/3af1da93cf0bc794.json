@@ -1,0 +1,149 @@
+{
+  "key" : "3af1da93cf0bc794",
+  "model" : "llama3.1:8b",
+  "note" : "recorded (P2-04) against llama3.1:8b — answer golden invented-snippet: the model returns a command that is not in the chunk — it must never reach the card",
+  "provider" : "ollama",
+  "purpose" : "search",
+  "recordedAt" : "2026-08-24T04:16:03Z",
+  "request" : {
+    "maxTokens" : 600,
+    "messages" : [
+      {
+        "role" : "user",
+        "text" : "Question: curl the documents endpoint with a token\n\nChunks:\n\n[1] curl — Commands/curl.md\nedited: 2025-08-22T00:00:00Z\nsection: curl › Fetch documents\nkind: code (bash)\n---\ncurl › Fetch documents\ncurl to fetch docs from staging:\n```bash\ncurl -H \"Auth: Bearer $TOK\" https://api.st.app/v2/docs\n```\n---\n\n[2] curl — Commands/curl.md\nedited: 2025-08-22T00:00:00Z\nsection: curl › Fetch documents\nkind: prose\n---\ncurl › Fetch documents\n\nThe documents endpoint is paginated and wants a bearer token. The token is the\nstaging one, not the production one.\n---"
+      }
+    ],
+    "model" : "llama3.1:8b",
+    "purpose" : "search",
+    "system" : "You are the retrieval step inside a notes app. Someone asked a question in the\nsearch bar. A local index has already found the passages most likely to answer\nit, numbered [1], [2], … in the order it ranked them. You pick the one that\nactually answers the question and you report it by calling the\n`answer_selection` tool exactly once. You never answer in prose.\n\n# Picking the best chunk\n\n`best_chunk_id` is the number of the single passage that answers the question.\n\n* Choose the passage that answers what was *asked*, not the one that shares the\n  most words with it. \"curl command to fetch documents\" is answered by the\n  fenced command, not by the paragraph that talks about curl.\n* A passage that mentions the subject but does not answer the question is not a\n  match. Neither is one that is merely about the same tool.\n* If nothing in the list answers the question, `best_chunk_id` is `null`. That\n  is a good answer, and a much better one than a confident wrong one — the\n  person still sees the ranked list underneath.\n* Never report a number that is not in the list.\n\n# The snippet\n\n`snippet` is what the person will see in a code block, with a Copy button next\nto it. Fill it in when the answer is a command, a snippet, a path, a key, a\nquery — anything meant to be copied and run.\n\n* Copy it **verbatim** from the chunk you chose. Character for character. Do not\n  correct it, do not fill in a placeholder, do not change quoting, do not add a\n  prompt marker, do not merge two commands into one.\n* Trim it to the lines that answer the question. A four-line fence where only\n  the second line was asked about should come back as that one line.\n* Leave the ``` fences out; the app draws the code block itself.\n* **Never write a command that is not in the chunk.** If the passage does not\n  contain the exact text, return `null` for `snippet` rather than composing one.\n* When the answer is ordinary prose rather than something to copy, `snippet` is\n  `null` and the passage is shown in place.\n\n# The ranking\n\n`ranked_chunk_ids` lists every passage worth showing, most useful first,\nincluding the one you chose. Leave out passages that do not relate to the\nquestion — a short, honest list is better than a padded one. An empty list is\nallowed when nothing fits.\n\n# Confidence\n\n`high` — the chunk plainly answers the question and the snippet is exactly it.\n`medium` — the chunk is about the right thing and probably answers it.\n`low` — a guess worth showing, or `best_chunk_id` is `null`.\n",
+    "timeout" : 8,
+    "toolChoice" : {
+      "tool" : {
+        "name" : "answer_selection"
+      }
+    },
+    "tools" : [
+      {
+        "description" : "Report which of the numbered chunks answers the question, the exact snippet to show if the answer is a command or code, and the chunks in order of usefulness. Call this tool exactly once.",
+        "inputSchema" : {
+          "additionalProperties" : false,
+          "properties" : {
+            "best_chunk_id" : {
+              "description" : "The number of the chunk that best answers the query, or null if none of them does. Never invent a number that is not in the list.",
+              "type" : [
+                "integer",
+                "null"
+              ]
+            },
+            "confidence" : {
+              "description" : "How well the chosen chunk actually answers the query.",
+              "enum" : [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type" : "string"
+            },
+            "ranked_chunk_ids" : {
+              "description" : "Every chunk number worth showing, most useful first. May be empty. Do not repeat a number and do not invent one.",
+              "items" : {
+                "type" : "integer"
+              },
+              "type" : "array"
+            },
+            "snippet" : {
+              "description" : "The answer as it appears in that chunk, copied verbatim and trimmed to the lines that matter. Omit the code fences. null when the answer is not a command or snippet, or when best_chunk_id is null.",
+              "type" : [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required" : [
+            "best_chunk_id",
+            "snippet",
+            "confidence",
+            "ranked_chunk_ids"
+          ],
+          "type" : "object"
+        },
+        "name" : "answer_selection",
+        "strict" : true
+      }
+    ]
+  },
+  "requestBody" : {
+    "format" : {
+      "additionalProperties" : false,
+      "properties" : {
+        "best_chunk_id" : {
+          "description" : "The number of the chunk that best answers the query, or null if none of them does. Never invent a number that is not in the list.",
+          "type" : [
+            "integer",
+            "null"
+          ]
+        },
+        "confidence" : {
+          "description" : "How well the chosen chunk actually answers the query.",
+          "enum" : [
+            "low",
+            "medium",
+            "high"
+          ],
+          "type" : "string"
+        },
+        "ranked_chunk_ids" : {
+          "description" : "Every chunk number worth showing, most useful first. May be empty. Do not repeat a number and do not invent one.",
+          "items" : {
+            "type" : "integer"
+          },
+          "type" : "array"
+        },
+        "snippet" : {
+          "description" : "The answer as it appears in that chunk, copied verbatim and trimmed to the lines that matter. Omit the code fences. null when the answer is not a command or snippet, or when best_chunk_id is null.",
+          "type" : [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required" : [
+        "best_chunk_id",
+        "snippet",
+        "confidence",
+        "ranked_chunk_ids"
+      ],
+      "type" : "object"
+    },
+    "keep_alive" : "30m",
+    "messages" : [
+      {
+        "content" : "You are the retrieval step inside a notes app. Someone asked a question in the\nsearch bar. A local index has already found the passages most likely to answer\nit, numbered [1], [2], … in the order it ranked them. You pick the one that\nactually answers the question and you report it by calling the\n`answer_selection` tool exactly once. You never answer in prose.\n\n# Picking the best chunk\n\n`best_chunk_id` is the number of the single passage that answers the question.\n\n* Choose the passage that answers what was *asked*, not the one that shares the\n  most words with it. \"curl command to fetch documents\" is answered by the\n  fenced command, not by the paragraph that talks about curl.\n* A passage that mentions the subject but does not answer the question is not a\n  match. Neither is one that is merely about the same tool.\n* If nothing in the list answers the question, `best_chunk_id` is `null`. That\n  is a good answer, and a much better one than a confident wrong one — the\n  person still sees the ranked list underneath.\n* Never report a number that is not in the list.\n\n# The snippet\n\n`snippet` is what the person will see in a code block, with a Copy button next\nto it. Fill it in when the answer is a command, a snippet, a path, a key, a\nquery — anything meant to be copied and run.\n\n* Copy it **verbatim** from the chunk you chose. Character for character. Do not\n  correct it, do not fill in a placeholder, do not change quoting, do not add a\n  prompt marker, do not merge two commands into one.\n* Trim it to the lines that answer the question. A four-line fence where only\n  the second line was asked about should come back as that one line.\n* Leave the ``` fences out; the app draws the code block itself.\n* **Never write a command that is not in the chunk.** If the passage does not\n  contain the exact text, return `null` for `snippet` rather than composing one.\n* When the answer is ordinary prose rather than something to copy, `snippet` is\n  `null` and the passage is shown in place.\n\n# The ranking\n\n`ranked_chunk_ids` lists every passage worth showing, most useful first,\nincluding the one you chose. Leave out passages that do not relate to the\nquestion — a short, honest list is better than a padded one. An empty list is\nallowed when nothing fits.\n\n# Confidence\n\n`high` — the chunk plainly answers the question and the snippet is exactly it.\n`medium` — the chunk is about the right thing and probably answers it.\n`low` — a guess worth showing, or `best_chunk_id` is `null`.\n\n\nRespond with a single JSON object for the tool \"answer_selection\": Report which of the numbered chunks answers the question, the exact snippet to show if the answer is a command or code, and the chunks in order of usefulness. Call this tool exactly once.\nReturn only that JSON object. No prose, no explanation, no code fences.",
+        "role" : "system"
+      },
+      {
+        "content" : "Question: curl the documents endpoint with a token\n\nChunks:\n\n[1] curl — Commands/curl.md\nedited: 2025-08-22T00:00:00Z\nsection: curl › Fetch documents\nkind: code (bash)\n---\ncurl › Fetch documents\ncurl to fetch docs from staging:\n```bash\ncurl -H \"Auth: Bearer $TOK\" https://api.st.app/v2/docs\n```\n---\n\n[2] curl — Commands/curl.md\nedited: 2025-08-22T00:00:00Z\nsection: curl › Fetch documents\nkind: prose\n---\ncurl › Fetch documents\n\nThe documents endpoint is paginated and wants a bearer token. The token is the\nstaging one, not the production one.\n---",
+        "role" : "user"
+      }
+    ],
+    "model" : "llama3.1:8b",
+    "options" : {
+      "num_predict" : 600,
+      "temperature" : 0
+    },
+    "stream" : false
+  },
+  "responseBody" : {
+    "done" : true,
+    "done_reason" : "stop",
+    "eval_count" : 58,
+    "id" : "ollama-2026-08-24T04:16:03.906478Z",
+    "message" : {
+      "content" : "{\"best_chunk_id\":1,\"confidence\":\"high\",\"ranked_chunk_ids\":[1,2],\"snippet\":\"curl -H \\\"Auth: Bearer $TOK\\\" https://api.st.app/v2/docs\"}",
+      "role" : "assistant"
+    },
+    "model" : "llama3.1:8b",
+    "prompt_eval_count" : 836
+  },
+  "version" : 2
+}

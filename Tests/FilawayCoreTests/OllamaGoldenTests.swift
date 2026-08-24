@@ -7,15 +7,16 @@ import Testing
 ///
 /// Two suites live here and they are deliberately different in kind:
 ///
-/// * **`Ollama goldens (replay)`** runs in every `swift test`. It replays the
-///   committed `provider: "ollama"` fixtures and asserts the *pipeline*: the
-///   daemon's JSON decodes, the plan decodes, and the organizer reaches a named
-///   outcome — proposed, nothing-to-do, or rejected for a reason the validator
-///   can name. Plan **quality** is not gated here; an 8B model is not Sonnet
-///   and pinning its taste would make every model bump a red build. The numbers
-///   are reported in `docs/verification/P2-ollama.md` instead. The one
-///   exception is the smoke corpus (`OrganizeWiringTests`), which *must*
-///   validate, because the `organize-ollama` smoke phase needs a card.
+/// * **`Golden pipeline (both providers)`** (below) runs in every `swift
+///   test`. It replays the committed fixtures for *each* ``AIProviderKind`` and
+///   asserts the *pipeline*: the recorded wire body decodes through its own
+///   codec, the plan decodes, and the organizer reaches a named outcome —
+///   proposed, nothing-to-do, or rejected for a reason the validator can name.
+///   Plan **quality** is not gated there; an 8B model is not Sonnet and pinning
+///   its taste would make every model bump a red build. The numbers are
+///   reported in `docs/verification/P2-ollama.md` instead. The one exception is
+///   the smoke corpus (`AppWiringFixture`), which *must* produce a card,
+///   because the `organize-ollama` smoke phase needs one.
 /// * **`Ollama goldens (live)`** is off unless `FILAWAY_TEST_OLLAMA=1`. It is
 ///   the measuring instrument: it calls the real daemon once per scenario and
 ///   prints a content-free table — outcome, action kinds, validator issue
@@ -44,6 +45,30 @@ enum OllamaGolden {
     }
 
     static var isRecording: Bool { AIMode.current() == .record }
+
+    /// Writes the exchange the timing wrapper captured, with a note naming the
+    /// scenario — `RecordingProvider` would store the same bytes but no note,
+    /// and an unlabelled fixture directory is unreadable a month later.
+    static func record(_ exchange: TimingProvider.Exchange?, as note: String) throws {
+        guard isRecording, let exchange else { return }
+        // Two scenarios can legitimately hash to one request — the
+        // excluded-folder golden is *designed* to, and the smoke corpus
+        // reproduces merge-code-block exactly. Keep every name on the file.
+        var note = note
+        if let existing = try store.load(for: exchange.request)?.note,
+           let tail = existing.range(of: " — ").map({ String(existing[$0.upperBound...]) }),
+           !tail.contains(note) {
+            note = "\(tail) | \(note)"
+        }
+        let url = try store.save(AIRecording(
+            request: exchange.request,
+            response: exchange.response,
+            provider: kind.rawValue,
+            recordedAt: Date(),
+            note: "recorded (P2-04) against \(exchange.response.model) — \(note)"
+        ))
+        print("    wrote \(url.lastPathComponent) — \(note)")
+    }
 
     /// A live provider with retries off — a retry would hide a slow first token
     /// behind a second cold load, and this suite is here to measure.
@@ -186,12 +211,10 @@ struct OllamaLiveGoldenTests {
     /// Runs one scenario through the whole organizer against the live daemon.
     private func run(_ scenario: OrganizeGolden.Scenario) async throws -> OllamaGolden.Row {
         let timing = TimingProvider(upstream: OllamaGolden.liveProvider())
-        let provider: any AIProvider = OllamaGolden.isRecording
-            ? RecordingProvider(upstream: timing, store: OllamaGolden.store)
-            : timing
-        let run = await OrganizeGolden.makeRun(scenario, provider: provider, kind: OllamaGolden.kind)
+        let run = await OrganizeGolden.makeRun(scenario, provider: timing, kind: OllamaGolden.kind)
         await run.organizer.sessionEnded(run.session)
         await run.organizer.drain()
+        try OllamaGolden.record(timing.last, as: "organize golden \(scenario.name): \(scenario.note)")
 
         let exchange = timing.last
         var row = OllamaGolden.Row(
@@ -242,14 +265,11 @@ struct OllamaLiveGoldenTests {
                 query: scenario.query, chunks: scenario.results.promptChunks, configuration: configuration
             )
             let timing = TimingProvider(upstream: OllamaGolden.liveProvider())
-            let provider: any AIProvider = OllamaGolden.isRecording
-                ? RecordingProvider(upstream: timing, store: OllamaGolden.store)
-                : timing
 
             var outcome = "ok"
             var decoded = false
             do {
-                let response = try await provider.complete(request)
+                let response = try await timing.complete(request)
                 let selection = try AnswerSelection.decode(
                     response: response, chunkCount: scenario.results.promptChunks.count
                 )
@@ -259,6 +279,7 @@ struct OllamaLiveGoldenTests {
             } catch {
                 outcome = String(describing: error).prefix(48).replacingOccurrences(of: "|", with: "/")
             }
+            try OllamaGolden.record(timing.last, as: "answer golden \(scenario.name): \(scenario.note)")
             let exchange = timing.last
             rows.append("""
             | \(scenario.name) | \(decoded ? "yes" : "no") | \(outcome) \
@@ -278,12 +299,12 @@ struct OllamaLiveGoldenTests {
     @Test("the smoke corpus, end to end against the daemon", arguments: OrganizeMode.allCases)
     func smokeCorpus(mode: OrganizeMode) async throws {
         let timing = TimingProvider(upstream: OllamaGolden.liveProvider())
-        let provider: any AIProvider = OllamaGolden.isRecording
-            ? RecordingProvider(upstream: timing, store: OllamaGolden.store)
-            : timing
-        let wiring = try await AppWiringFixture.wire(provider: provider, mode: mode, kind: OllamaGolden.kind)
+        let wiring = try await AppWiringFixture.wire(provider: timing, mode: mode, kind: OllamaGolden.kind)
         await wiring.organizer.sessionEnded(wiring.session())
         await wiring.organizer.drain()
+        try OllamaGolden.record(
+            timing.last, as: "app wiring / organize-ollama smoke corpus (\(mode.rawValue) mode)"
+        )
 
         let exchange = timing.last
         var row = OllamaGolden.Row(
@@ -319,5 +340,129 @@ struct OllamaLiveGoldenTests {
         print(OllamaGolden.Row.header)
         print(row.markdown)
         print("")
+    }
+}
+
+// MARK: - Replay, both providers
+
+/// The offline half: the same nine scenarios, replayed from committed
+/// fixtures, for **every** provider (P2-04).
+///
+/// What is asserted here is the *pipeline*, not the taste: the recorded wire
+/// body decodes through its own provider's codec, the plan decodes, and the
+/// organizer reaches one of its named outcomes. Claude's goldens additionally
+/// pin what the plan says — that suite is `OrganizeGoldenTests` and it stays
+/// the contract. Pinning `llama3.1:8b`'s choices the same way would make every
+/// model or daemon bump a red build for no safety gained; the quality numbers
+/// live in `docs/verification/P2-ollama.md` and are re-measured with
+/// `FILAWAY_TEST_OLLAMA=1`.
+@Suite("Golden pipeline (both providers)")
+struct GoldenPipelineTests {
+    static let store = AITestPaths.recordingStore
+
+    @Test(
+        "every organize golden decodes and reaches a named outcome",
+        arguments: AIProviderKind.allCases, OrganizeGolden.scenarios
+    )
+    func pipeline(kind: AIProviderKind, scenario: OrganizeGolden.Scenario) async throws {
+        let run = await OrganizeGolden.makeRun(
+            scenario, provider: ReplayProvider(store: Self.store), kind: kind
+        )
+        await run.organizer.sessionEnded(run.session)
+        await run.organizer.drain()
+
+        // A missing fixture, a transport error or a decode failure are all
+        // pipeline breakage and must not read as "the model had an off day".
+        for failure in run.recorder.failures {
+            switch failure {
+            case .invalidPlan:
+                continue  // a named, content-free rejection: that is a result.
+            default:
+                Issue.record("\(kind.rawValue)/\(scenario.name): \(failure)")
+            }
+        }
+        #expect(run.recorder.kinds.count == 1, "\(kind.rawValue)/\(scenario.name): \(run.recorder.kinds)")
+
+        guard let proposal = run.recorder.proposals.first else { return }
+        #expect(proposal.plan.model == kind.defaultOrganizeModel.id)
+        #expect(proposal.plan.promptVersion == .organize)
+        #expect(proposal.plan.neverDeletesUserText, "FR-4.4")
+        #expect(!proposal.plan.summary.isEmpty)
+        #expect(!proposal.plan.actions.isEmpty)
+    }
+
+    @Test("every answer golden has a fixture for every provider, and decodes")
+    func answerFixtures() async throws {
+        for kind in AIProviderKind.allCases {
+            for scenario in AnswerGolden.scenarios {
+                let configuration = AnswerGolden.configuration(
+                    model: kind.defaultSearchModel, providerKind: kind
+                )
+                let request = try AnswerExtractor.request(
+                    query: scenario.query, chunks: scenario.results.promptChunks, configuration: configuration
+                )
+                let loaded = try Self.store.load(for: request)
+                let recording = try #require(
+                    loaded,
+                    "\(kind.rawValue)/\(scenario.name): no fixture for key \(request.fixtureKey)"
+                )
+                #expect(recording.provider == kind.rawValue)
+                let response = try recording.response()
+                let decoded = try AnswerSelection.decode(
+                    response: response, chunkCount: scenario.results.promptChunks.count
+                )
+                // Whether the model found an answer is its business; that the
+                // reply is *readable* is the pipeline's.
+                #expect(decoded.rankedChunks.allSatisfy { $0 >= 1 })
+            }
+        }
+    }
+
+    @Test("the smoke corpus produces a card on both providers", arguments: AIProviderKind.allCases)
+    func smokeCorpusValidates(kind: AIProviderKind) async throws {
+        let wiring = try await AppWiringFixture.wire(
+            provider: ReplayProvider(store: Self.store), kind: kind
+        )
+        await wiring.organizer.sessionEnded(wiring.session())
+        await wiring.organizer.drain()
+        // This one *is* a gate: `organize-ollama` needs a card, and a fixture
+        // whose plan no longer validates would fail that phase 180 s at a time.
+        let proposal = try #require(
+            wiring.recorder.proposals.first,
+            "\(kind.rawValue): no card — \(wiring.recorder.kinds) \(wiring.recorder.failures)"
+        )
+        #expect(!proposal.plan.actions.isEmpty)
+        #expect(proposal.plan.neverDeletesUserText)
+    }
+
+    @Test("the local recordings are what they claim to be")
+    func localRecordingsAreTagged() throws {
+        var seen = 0
+        for recording in try Self.store.all() where recording.provider == AIProviderKind.ollama.rawValue {
+            seen += 1
+            #expect(recording.version == AIRecording.currentVersion)
+            #expect(recording.model == AIModel.defaultOllama.id, "\(recording.key)")
+            #expect(recording.recordedAt != nil, "\(recording.key) claims to be recorded")
+            // A forced tool becomes `format`, never `tools` / `tool_choice`.
+            #expect(recording.requestBody["format"] != nil, "\(recording.key)")
+            #expect(recording.requestBody["tool_choice"] == nil, "\(recording.key)")
+            #expect(recording.requestBody["keep_alive"]?.stringValue == OllamaWire.keepAlive, "\(recording.key)")
+            // The wire-time rules reached the model (ADR-070).
+            if recording.purpose == .organize {
+                let system = recording.requestBody["messages"]?.arrayValue?.first?["content"]?.stringValue ?? ""
+                #expect(system.contains("is a correct and welcome answer"), "\(recording.key)")
+            }
+        }
+        #expect(seen == 14, "expected the 9 organize + 5 search local recordings, saw \(seen)")
+    }
+
+    @Test("no local recording contains a byte of the excluded folder (FR-4.5)")
+    func exclusionsNeverRecordedLocally() throws {
+        for recording in try Self.store.all() where recording.provider == AIProviderKind.ollama.rawValue {
+            let haystack = recording.requestBody.allStrings.joined(separator: "\n")
+            for secret in ["88888", "Pay review", "compensation", "Private", OrganizeGolden.payReview.uuidString] {
+                #expect(!haystack.contains(secret), "\(recording.key) leaked \(secret)")
+            }
+        }
     }
 }
