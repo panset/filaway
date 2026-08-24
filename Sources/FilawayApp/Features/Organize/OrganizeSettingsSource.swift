@@ -86,7 +86,7 @@ struct CoreOrganizeSettings: OrganizeSettingsSource {
     /// Claude. The environment is first so a bench run, a smoke phase or a
     /// developer can pin a backend without writing the user's preferences.
     var providerKind: AIProviderKind {
-        AIProviderKind.fromEnvironment() ?? settings.aiProvider
+        settings.resolvedAIProvider
     }
 
     var ollamaConfiguration: OllamaConfiguration { settings.ollamaConfiguration }

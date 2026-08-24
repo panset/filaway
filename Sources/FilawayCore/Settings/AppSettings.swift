@@ -232,7 +232,7 @@ public final class AppSettings: @unchecked Sendable {
     /// Under Ollama the model is ``ollamaModel`` — the Advanced override is a
     /// Claude-only concept (FR-6.2, FR-6.5).
     public var effectiveOrganizeModel: AIModel {
-        switch aiProvider {
+        switch resolvedAIProvider {
         case .ollama: return ollamaModel
         case .claude: return advancedModelOverride ? organizeModel : .defaultOrganize
         }
@@ -240,7 +240,7 @@ public final class AppSettings: @unchecked Sendable {
 
     /// What search answer extraction should actually send.
     public var effectiveSearchModel: AIModel {
-        switch aiProvider {
+        switch resolvedAIProvider {
         case .ollama: return ollamaModel
         case .claude: return advancedModelOverride ? searchModel : .defaultSearch
         }
@@ -261,6 +261,27 @@ public final class AppSettings: @unchecked Sendable {
         set {
             defaults.set(newValue.rawValue, forKey: DefaultsKey.aiProvider)
             notify(.aiProvider)
+        }
+    }
+
+    /// The provider the pipeline actually talks to: `FILAWAY_AI_PROVIDER`
+    /// when set (ADR-069), else ``aiProvider``. The effective models follow
+    /// *this*, not the stored preference — the `organize-ollama` smoke phase
+    /// found the two disagreeing: kind `ollama`, model `claude-sonnet-5`.
+    public var resolvedAIProvider: AIProviderKind {
+        resolvedAIProvider(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// ``resolvedAIProvider`` against an explicit environment, for tests.
+    public func resolvedAIProvider(environment: [String: String]) -> AIProviderKind {
+        AIProviderKind.fromEnvironment(environment) ?? aiProvider
+    }
+
+    /// ``effectiveOrganizeModel`` against an explicit environment, for tests.
+    public func effectiveOrganizeModel(environment: [String: String]) -> AIModel {
+        switch resolvedAIProvider(environment: environment) {
+        case .ollama: return ollamaModel
+        case .claude: return advancedModelOverride ? organizeModel : .defaultOrganize
         }
     }
 
