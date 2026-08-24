@@ -105,6 +105,15 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
 #                                  localhost:11434, else "SKIPPED (no Ollama)"
 #                                  and not a failure
+# -> === smoke phase: organize-ollama-suite === GATED the same way (P2-09).
+#                                  Three live scenarios on the library shapes
+#                                  real dogfooding failed on: a folderless
+#                                  library + a bulleted feedback session (ask),
+#                                  the same library + a command note (auto), and
+#                                  a library whose right answer is a folder that
+#                                  already exists (auto). Each gets its own
+#                                  library; a plan the validator REJECTS is a
+#                                  phase failure, printing the issue kinds
 # -> === smoke phase: semantic === M3-06: ⌘K Ask on a corpus with fixed mtimes:
 #                                  ⏎ -> answer card, Copy -> pasteboard, ⏎ ->
 #                                  the note scrolled to the chunk, the temporal
@@ -147,10 +156,20 @@ and the Activity journal start empty); `1` and `2` share one so the relaunch has
 state to restore. The `semantic` corpus is seeded with **fixed mtimes**, so
 FR-5.3's "two days ago" has exactly one note to find. Every phase runs with `FILAWAY_AI_MODE=replay` and
 `FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
-network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. The one exception is the
-gated `organize-ollama` phase, which runs `FILAWAY_AI_MODE=live
-FILAWAY_AI_PROVIDER=ollama` against the local daemon — the harness axis and the
-backend axis are independent (ADR-069). A single phase directly:
+network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. The exceptions are the
+two gated phases `organize-ollama` and `organize-ollama-suite`, which run
+`FILAWAY_AI_MODE=live FILAWAY_AI_PROVIDER=ollama` against the local daemon — the
+harness axis and the backend axis are independent (ADR-069).
+
+**`organize-ollama-suite` is the plan-quality gate** (P2-09, ADR-073): three
+scenarios, each with its own library, on the shapes real dogfooding failed on —
+a folderless library, a bulleted feedback session, a library where the right
+answer is a folder that already exists. It drives the real objects but writes
+the session through `NoteStore` instead of typing it (the organizer's delta is
+`baseline → what is on disk`), so it needs no window, and it fails the phase on
+a plan the validator rejects — printing the issue *kinds*, never the summary.
+`Features/Organize/OrganizeSuiteSmokeCheck.swift` is where a new scenario goes.
+A single phase directly:
 
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
@@ -577,6 +596,16 @@ the standard organize corpus produce a card. Every repair is a
 nothing about Claude's path changed. `make test` still needs no daemon: the live
 suites are gated on `FILAWAY_TEST_OLLAMA=1`, and the 14 committed local
 recordings replay offline through `GoldenPipelineTests`.
+
+Two more live failures followed, and both are now closed: `unknownFolder` — the
+plan files into a folder it never creates — by **rule 4** (ADR-072), and
+`folderTooDeep` — a five-level path invented for a library with no folders — by
+**rule 5**, which clamps such a path to its *last* two components and lets rule
+4 create it (ADR-073). `smallModelRules` gained the matching depth line, the
+nine committed Ollama organize fixtures were re-recorded for it, and usable
+plans are now **9/9**. Every one of the three was found by a person, which is
+why the gated `organize-ollama-suite` phase exists: it runs the *library shapes*
+the failures came from, and a rejected plan fails the phase.
 
 **M4-07's retrieval lever.** `Search/TypoExpansion.swift` repairs query words
 whose document frequency is zero, using FTS5's own term index through the new

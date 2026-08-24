@@ -11,8 +11,11 @@ Everything below is reproducible on a machine with the daemon up:
 FILAWAY_TEST_OLLAMA=1 swift test --filter OllamaLiveGoldenTests   # § 1, § 2
 make bench ARGS="ollama probe"                                    # § 3
 make bench ARGS="retrieval --embedder bge --answer ollama"        # § 4
-FILAWAY_SMOKE_OLLAMA=1 FILAWAY_SMOKE_ONLY="organize organize-auto organize-offline organize-ollama" Tools/smoke.sh
+FILAWAY_SMOKE_OLLAMA=1 FILAWAY_SMOKE_ONLY="organize organize-auto organize-offline organize-ollama organize-ollama-suite" Tools/smoke.sh
 ```
+
+**Task:** P2-09 added § 4a and § 4b — the live plan-quality suite and the
+`folderTooDeep` repair (ADR-073).
 
 Every table here is **content-free** (NFR-4): action kinds, validator issue
 kinds, and numbers. No note text, no titles, no paths.
@@ -234,6 +237,99 @@ separately, above, which is the only place it belongs.
 
 ---
 
+## 4a. The live plan-quality suite (P2-09)
+
+§ 1 measured nine hand-authored goldens over *one* library shape. Three
+dogfooding sessions then failed in a row, each on a different validator error,
+and **a person found every one of them** — because the shapes that broke were
+shapes no golden had: a library with no folders at all, and a session that is a
+list of prose lines rather than a code block with an obvious home.
+
+`organize-ollama-suite` is the answer to that (ADR-073). One process, one
+Application Support, **a fresh library per scenario**, three live generations:
+
+| scenario | library | session | mode |
+|---|---|---|---|
+| `feedback-list` | ~8 notes at the root, **no folders** | a numbered list of short app-feedback lines | ask |
+| `command-note` | the same folderless library | one OIDC/`curl` invocation plus a line of prose | auto |
+| `existing-folders` | two folders, each with notes | a shell recipe whose home is one of them | auto |
+
+Two consecutive full runs on a warm daemon, `llama3.1:8b`:
+
+| scenario | outcome | action kinds | repair warnings | run 1 s | run 2 s |
+|---|---|---|---|---|---|
+| `feedback-list` | proposed → accepted → applied | `appendToNote` | — | 12.7 | 12.7 |
+| `command-note` | applied (auto) | `createFolder`, `createNote`, `retitleNote` | — | 17.7 | 17.6 |
+| `existing-folders` | applied (auto) | `createNote` | — | 13.9 | 13.7 |
+
+`SMOKE result failures=0` both times, and the four replayed/live phases beside
+it (`organize`, `organize-auto`, `organize-offline`, `organize-ollama`) stayed
+at zero as well. End to end the phase is **~55 s** of model time plus three
+library rebuilds; the watchdog is 700 s and the per-scenario budget 190 s.
+
+What each scenario proves, beyond "a plan came back":
+
+- bytes changed on disk (a content-free path → byte-count fingerprint of the
+  whole library, plus the note count, so a *created* note counts as a change);
+- the Activity log has the event, it names `llama3.1:8b`, and it has a diff;
+- **Settings → Activity** shows the same event through `ActivityModel` — the
+  object `ActivitySettingsView` renders — and shows an `organizeFailed` row when
+  one is recorded (scripted through `ActivityLog.recordFailure`: a live model
+  cannot be made to fail on demand).
+
+And what it deliberately does **not** pin: the summary, the target note, the
+folder, the action kinds. Those are the model's taste, and a suite that pins
+them turns every model bump into a red build (ADR-071). The gate is the
+*contract* — a usable outcome, and **a plan the validator rejects fails the
+phase**, printing `OrganizeCoordinator.lastFailureIssueKinds` so the next repair
+rule has a name.
+
+Note what the table does not contain: no `repairedFolderDepth`, on either run.
+The wire-time depth rule (§ 4b) is doing the work, and rule 5 is the net
+underneath it — which is the intended split, and the reason the repair rules are
+pinned by `PlanRepairTests` rather than by this suite.
+
+### 4b. The `folderTooDeep` repair, and the 9/9
+
+The third live failure was
+`folderTooDeep: Home/Projects/…/Skills/… is 5 levels deep; the cap is 2`.
+`PlanRepair` rule 5 clamps such a path to its **last** `PathRules.maxFolderDepth`
+components — the deepest components carry the model's classification, the
+leading ones are invented scaffolding — and rule 4 then inserts the
+`createFolder` the clamped folder needs. `OllamaWire.smallModelRules` gained the
+matching line, which is part of the wire body, so the nine committed Ollama
+organize fixtures were re-recorded.
+
+Re-measuring § 1.3 with both in place:
+
+| scenario | usable | outcome | actions | warnings | s | in | out |
+|---|---|---|---|---|---|---|---|
+| new-note | yes | proposed | moveSegment | — | 13.1 | 1970 | 120 |
+| merge-code-block | yes | proposed | appendToNote | repairedCollision, repairedMerge | 10.0 | 2115 | 128 |
+| retitle-untitled | yes | proposed | createNote | repairedMerge | 10.6 | 2053 | 139 |
+| new-folder | yes | proposed | createNote, tagNote | repairedMerge | 12.6 | 2041 | 176 |
+| nothing-to-do | yes | proposed | appendToNote | repairedCollision, repairedMerge | 8.4 | 1953 | 111 |
+| **convergence** | **yes** | proposed | moveSegment | — | 9.5 | 2051 | 120 |
+| excluded-folder | yes | proposed | appendToNote | repairedCollision, repairedMerge | 10.0 | 2115 | 128 |
+| invalid-action-dropped | yes | proposed | moveSegment | — | 8.1 | 1949 | 114 |
+| summary-no-longer-matches | yes | proposed | createNote | repairedMerge | 8.7 | 2021 | 115 |
+| smoke corpus (ask) | yes | proposed | appendToNote | repairedCollision, repairedMerge | 10.1 | 2115 | 128 |
+| smoke corpus (auto) | yes | applied | — | — | 10.5 | 2115 | 128 |
+
+**usable: 9/9 goldens (was 8/9), 2/2 smoke.** `convergence` — ADR-070's one
+deliberately-unrepaired case, where the model used a note's path as a
+`folderPath` — now comes back correct on its own. The depth line cost ~115
+prompt tokens (1,855 → 1,970 on the smallest scenario) and nothing regressed.
+
+| | goldens usable | smoke corpus |
+|---|---|---|
+| baseline (§ 1.1) | 4/9 | fails |
+| + wire-time rules (§ 1.2) | 5/9 | fails |
+| + `PlanRepair` rules 1–3 (§ 1.3) | 8/9 | passes |
+| + rules 4–5 and the depth line (P2-08/09) | **9/9** | **passes** |
+
+---
+
 ## 5. The smoke phases
 
 ```
@@ -247,6 +343,7 @@ FILAWAY_SMOKE_OLLAMA=1 Tools/smoke.sh
 | `organize-auto` | replay (Claude fixture) | **failures=0** |
 | `organize-offline` | mock network failure | **failures=0** |
 | `organize-ollama` | **live `llama3.1:8b`** | **failures=0** |
+| `organize-ollama-suite` | **live `llama3.1:8b`**, three libraries | **failures=0** (§ 4a) |
 
 `SMOKE result failures=0`. The three replayed phases are unchanged by any of
 this — the repair is off for Claude, and the wire addendum is Ollama-only — and
@@ -298,8 +395,12 @@ runner; it now honours it.
 
 ### Open
 
-- `convergence`'s `unknownFolder` (§ 1.4). One scenario in nine; not repaired on
-  purpose.
+- ~~`convergence`'s `unknownFolder` (§ 1.4)~~ — closed by the depth line in
+  § 4b; the scenario now returns a correct plan with no repair at all.
+- **Plan quality is measured, not gated per scenario.** `organize-ollama-suite`
+  gates the *contract* over three library shapes; a fourth shape nobody has
+  written down is still a fourth live failure waiting to happen. Adding one is a
+  `Scenario` value in `OrganizeSuiteSmokeCheck`.
 - **The answer card never wins the 5 s race on a real ⌘K prompt** (§ 4): p50
   23.8 s at ~3,200 input tokens, 0 of 89 inside the budget, even warm. The user
   gets the offline card, which scores better anyway on this corpus. Worth
