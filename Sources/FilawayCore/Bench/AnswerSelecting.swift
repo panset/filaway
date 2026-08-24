@@ -69,6 +69,155 @@ public struct LocalHeuristicSelector: AnswerSelecting {
     }
 }
 
+/// The **real** answer step, against a live provider (P2-04).
+///
+/// It builds exactly the request ``AnswerExtractor`` builds — same `answer.v1`,
+/// same strict `answer_selection` tool, same budget — and reads the reply back
+/// through ``AnswerSelection/decode(response:chunkCount:)``. So
+/// `filaway-bench retrieval --answer ollama` measures the card the app would
+/// actually show, not an approximation of it.
+///
+/// Two things it does *not* do, both on purpose:
+///
+/// * **No local fallback.** ``AnswerExtractor`` races the model against
+///   ``AnswerHeuristic`` and shows whichever arrives; folding that in here
+///   would measure the race, not the model. A failed or timed-out call
+///   abstains and is counted in ``stats``.
+/// * **No retries.** A retry hides a cold model load behind a warm one.
+///
+/// It is a class rather than a struct because it accumulates the per-query
+/// latencies the report prints; ``AnswerSelecting`` is `Sendable`, hence the
+/// lock.
+public final class LiveAnswerSelector: AnswerSelecting, @unchecked Sendable {
+    /// What the run cost, for the line the benchmark prints under the table.
+    public struct Stats: Sendable {
+        public var attempts = 0
+        public var answered = 0
+        public var abstained = 0
+        public var failed = 0
+        /// Calls that came back inside the app's own 5 s race (NFR-1) — the
+        /// rest would have been overtaken by the offline card (FR-5.5).
+        public var withinAppBudget = 0
+        public var inputTokens = 0
+        public var outputTokens = 0
+        public var seconds: [Double] = []
+
+        public var p50: Double { Self.percentile(seconds, 0.50) }
+        public var p95: Double { Self.percentile(seconds, 0.95) }
+
+        static func percentile(_ values: [Double], _ q: Double) -> Double {
+            guard !values.isEmpty else { return 0 }
+            let sorted = values.sorted()
+            let index = Int((Double(sorted.count - 1) * q).rounded())
+            return sorted[index]
+        }
+
+        /// Two lines for the report and the verification document.
+        public var line: String {
+            String(
+                format: """
+                answers:  %d/%d answered, %d abstained, %d failed · p50 %.1fs p95 %.1fs · %d in / %d out tokens
+                          %d of %d inside the app's 5 s race (NFR-1); the rest would show the offline card
+                """,
+                answered, attempts, abstained, failed, p50, p95, inputTokens, outputTokens,
+                withinAppBudget, attempts
+            )
+        }
+    }
+
+    private let provider: any AIProvider
+    private let configuration: AnswerExtractor.Configuration
+    /// The *benchmark's* budget, not the app's. See ``init``.
+    private let timeout: TimeInterval
+    /// The app's race, kept only to count how many calls would have won it.
+    private let appBudget: TimeInterval
+    private let lock = NSLock()
+    private var storage = Stats()
+
+    public let label: String
+
+    /// - Parameter timeout: how long one call may take **here**. It is
+    ///   deliberately generous and unrelated to NFR-1: the app races the model
+    ///   against the offline card at 5 s and shows whichever arrives, so a
+    ///   benchmark that cut the call off at 5 s would measure a stopwatch
+    ///   rather than a model. ``Stats/withinAppBudget`` is the NFR-1 number.
+    public init(
+        provider: any AIProvider,
+        kind: AIProviderKind,
+        model: AIModel? = nil,
+        timeout: TimeInterval = 60,
+        promptsDirectory: URL? = nil
+    ) {
+        let model = model ?? kind.defaultSearchModel
+        self.provider = provider
+        self.timeout = timeout
+        configuration = AnswerExtractor.Configuration(
+            model: model, providerKind: kind, promptsDirectory: promptsDirectory
+        )
+        appBudget = configuration.timeout
+        label = "live \(kind.rawValue) · \(model.id)"
+    }
+
+    public var stats: Stats {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    public func selectChunk(query: String, chunks: [RankedChunk]) async -> Int64? {
+        let shown = Array(chunks.prefix(AnswerSelection.maxChunks))
+        guard !shown.isEmpty,
+              var request = try? AnswerExtractor.request(
+                  query: query, chunks: shown, configuration: configuration
+              )
+        else { return nil }
+        request.timeout = timeout
+
+        let started = Date()
+        do {
+            let response = try await provider.complete(request)
+            let decoded = try AnswerSelection.decode(response: response, chunkCount: shown.count)
+            let elapsed = Date().timeIntervalSince(started)
+            // `best_chunk_id` is the 1-based position in the prompt, never a
+            // database rowid — the prompt is the only numbering the model sees.
+            let inBudget = elapsed <= appBudget
+            guard let best = decoded.bestChunk, best >= 1, best <= shown.count else {
+                record {
+                    $0.abstained += 1
+                    $0.seconds.append(elapsed)
+                    if inBudget { $0.withinAppBudget += 1 }
+                    $0.add(response.usage)
+                }
+                return nil
+            }
+            record {
+                $0.answered += 1
+                $0.seconds.append(elapsed)
+                if inBudget { $0.withinAppBudget += 1 }
+                $0.add(response.usage)
+            }
+            return shown[best - 1].id
+        } catch {
+            record { $0.failed += 1; $0.seconds.append(Date().timeIntervalSince(started)) }
+            return nil
+        }
+    }
+
+    private func record(_ mutate: (inout Stats) -> Void) {
+        lock.lock()
+        storage.attempts += 1
+        mutate(&storage)
+        lock.unlock()
+    }
+}
+
+private extension LiveAnswerSelector.Stats {
+    mutating func add(_ usage: AIUsage) {
+        inputTokens += usage.inputTokens
+        outputTokens += usage.outputTokens
+    }
+}
+
 /// Replays a recorded answer step from `Tests/Fixtures/ai-recordings/answer/`.
 ///
 /// The M3-05 agent owns that directory; until it exists this selector reports

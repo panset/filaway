@@ -92,8 +92,17 @@ struct RetrievalCommand: AsyncParsableCommand {
     @Option(help: "Core ML compute units: all | cpu | cpuAndGPU | cpuAndNeuralEngine.")
     var computeUnits = "all"
 
-    @Option(help: "Answer step: local (the offline heuristic) | replay (recorded Claude) | none.")
+    @Option(help: "Answer step: local (the offline heuristic) | replay (recorded Claude) | ollama (a live local model) | none.")
     var answer = "local"
+
+    @Option(help: "Model for --answer ollama (default: the house local tag).")
+    var answerModel: String?
+
+    @Option(help: "Ollama base URL for --answer ollama.")
+    var ollamaURL = OllamaConfiguration.defaultBaseURL.absoluteString
+
+    @Option(help: "Seconds one live answer call may take. Not NFR-1's 5 s race — the report counts that separately.")
+    var answerTimeout: TimeInterval = 60
 
     @Option(help: "Chunks each retriever contributes before fusion.")
     var candidates = 50
@@ -157,8 +166,16 @@ struct RetrievalCommand: AsyncParsableCommand {
         let (embedderInstance, description) = try await Self.resolve(
             embedder, computeUnits: computeUnits
         )
-        let selector = Self.selector(answer, keywordOnly: embedder.lowercased() == "bm25",
-                                     threshold: negativeThreshold)
+        let selector = try Self.selector(
+            answer,
+            keywordOnly: embedder.lowercased() == "bm25",
+            threshold: negativeThreshold,
+            answerTimeout: answerTimeout,
+            ollama: OllamaConfiguration(
+                baseURL: URL(string: ollamaURL) ?? OllamaConfiguration.defaultBaseURL,
+                model: answerModel.map { AIModel($0) } ?? .defaultOllama
+            )
+        )
         let configuration = RetrievalBenchmark.Configuration(
             candidateLimit: candidates,
             rrfK: rrfK,
@@ -188,6 +205,7 @@ struct RetrievalCommand: AsyncParsableCommand {
         } else {
             print("")
             print(report.table())
+            if let live = selector as? LiveAnswerSelector { print(live.stats.line) }
             if failures { print(report.failureTable()) }
             print("markdown row for docs/verification/M3-retrieval.md:")
             print(report.markdownRow(name: description))
@@ -249,11 +267,27 @@ struct RetrievalCommand: AsyncParsableCommand {
     }
 
     static func selector(
-        _ kind: String, keywordOnly: Bool, threshold: Float
-    ) -> any AnswerSelecting {
+        _ kind: String,
+        keywordOnly: Bool,
+        threshold: Float,
+        answerTimeout: TimeInterval,
+        ollama: OllamaConfiguration
+    ) throws -> any AnswerSelecting {
         switch kind.lowercased() {
         case "replay":
             return ReplaySelector()
+        case "ollama", "local-model":
+            // P2-04: the real `answer.v1` call against the daemon, one query at
+            // a time. No key, no bill, ~4 s a query on an 8B model.
+            guard ollama.validate() else {
+                throw ValidationError("--ollama-url must be https, or http to loopback (NFR-4)")
+            }
+            return LiveAnswerSelector(
+                provider: OllamaProvider(configuration: ollama, retryPolicy: .none),
+                kind: .ollama,
+                model: ollama.model,
+                timeout: answerTimeout
+            )
         case "none":
             return LocalHeuristicSelector(codeMargin: 0, minimumVectorScore: nil)
         default:
