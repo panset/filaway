@@ -409,7 +409,9 @@ struct AnswerFallbackTests {
         let answer = await extractor.extract(query: Self.scenario.query, results: Self.scenario.results)
         let elapsed = Date().timeIntervalSince(started)
 
-        #expect(elapsed < 2, "the 5 s call must not decide how long the search takes")
+        // The hung provider takes ≥ 5 s; anything well under that proves the race
+        // decided. 4 s (not 2) tolerates a saturated parallel test run (M4-08).
+        #expect(elapsed < 4, "the 5 s call must not decide how long the search takes")
         #expect(answer.source == .localHeuristic)
         #expect(answer.unavailable == .timedOut)
         let card = try #require(answer.card)

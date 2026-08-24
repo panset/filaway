@@ -79,6 +79,10 @@ final class OrganizeCoordinator: ObservableObject {
     /// nothing arrived instead of timing out with no explanation.
     @Published private(set) var lastFailureReason: String?
 
+    /// The provider the preference (or `FILAWAY_AI_PROVIDER`) currently names —
+    /// what the toolbar pill words its offline state for ("Ollama offline").
+    var providerKind: AIProviderKind { settingsSource.providerKind }
+
     /// How long an auto-mode card stays up before it fades (FR-4.2's
     /// non-blocking summary). Undo stays reachable in the Activity window.
     static let autoDismissInterval: TimeInterval = 20

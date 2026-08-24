@@ -410,6 +410,9 @@ enum SettingsSmokeCheck {
         _ = await poll(seconds: 5) { app.search.isAskAvailable }
         check("ask-returns-when-on", app.search.isAskAvailable)
 
+        // 7 — FR-6.5: the provider preference reaches the organizer and the answer card.
+        await ProviderWiringSmokeCheck.run(model: app, check: check)
+
         settings.flush()
         AppSettings.flush()
         finish()

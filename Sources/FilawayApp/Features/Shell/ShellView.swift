@@ -228,6 +228,7 @@ struct AIStatusPillHost: View {
     var body: some View {
         AIStatusPill(
             status: coordinator.status,
+            provider: coordinator.providerKind,
             queuedCount: coordinator.queuedSessionCount,
             action: { coordinator.onOpenAISettings?() }
         )
