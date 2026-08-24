@@ -257,6 +257,12 @@ run_phase() {
       *) return ;;
     esac
   fi
+  # **Defaults, and they are load-bearing.** `set -u` is on, so an unset
+  # `ai_mode` is a fatal expansion error inside the launch command — which runs
+  # in a subshell because of the `> >(tee …)` process substitution, so the
+  # subshell dies, runs the inherited EXIT trap, and deletes `$WORK` out from
+  # under every later phase. Every phase but `organize-ollama` replays (ADR-035).
+  local ai_mode="replay" ai_provider=""
   local root="$ROOT" suite="$SUITE" support="$SUPPORT" fail="" onboard_root="" shots=""
   [ "$phase" = "editor" ] && root="$EDITOR_ROOT"
   [ "$phase" = "search" ] && root="$SEARCH_ROOT"
@@ -328,6 +334,14 @@ run_phase() {
 # FR-2.3 / NFR-3: the app is SIGKILLed mid-edit — no terminate handler, no
 # flush. The phase parks on "SMOKE ready-for-kill"; we kill it there.
 run_kill_phase() {
+  # `kill` has its own runner, so it needs its own copy of the filter — without
+  # it, `FILAWAY_SMOKE_ONLY="organize"` still pays for a SIGKILL phase.
+  if [ -n "${FILAWAY_SMOKE_ONLY:-}" ]; then
+    case " $FILAWAY_SMOKE_ONLY " in
+      *" kill "*) ;;
+      *) return ;;
+    esac
+  fi
   # Polled at 200 ms so SIGKILL lands close to the last keystroke — killing a
   # second later would let the 750 ms debounce flush it and make the assertion
   # vacuous.
