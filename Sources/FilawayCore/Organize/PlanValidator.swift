@@ -72,6 +72,10 @@ public enum PlanIssueKind: String, Sendable, Hashable, Codable, CaseIterable {
     /// filed into a folder that does not exist and never created it — the
     /// live `unknownFolder` failure (P2-08). Creating a folder is additive.
     case repairedMissingFolder
+    /// ``PlanRepair`` clamped a folder path deeper than
+    /// ``PathRules/maxFolderDepth`` to its last two levels — the live
+    /// `folderTooDeep` failure (P2-09, ADR-073). Always a warning.
+    case repairedFolderDepth
 }
 
 /// One finding.

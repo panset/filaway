@@ -42,6 +42,11 @@
 #              against an injected validator (no daemon), Continue unlocks, and
 #              Finish writes ai.provider / ai.ollama.baseURL / ai.ollama.model
 #   onboarding-ollama2  relaunch: the provider preference persisted
+#   organize-ollama-suite  GATED, P2-09. Three live scenarios on the library
+#              shapes real dogfooding failed on: a folderless library with a
+#              bulleted feedback session (ask), the same library with a command
+#              note (auto), and a library whose right answer is a folder that
+#              already exists (auto). A rejected plan is a phase failure.
 #   organize-ollama  GATED. The organize session against a *live* local model.
 #              Runs only with FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
 #              localhost:11434; otherwise it prints SKIPPED and costs nothing.
@@ -123,6 +128,9 @@ ORGANIZE_OFFLINE_ROOT="$WORK/OrganizeOfflineNotes"
 # P2-03's gated live phase gets its own everything, because it is the one phase
 # that talks to a real model and must not inherit a replayed baseline.
 ORGANIZE_OLLAMA_ROOT="$WORK/OrganizeOllamaNotes"
+# P2-09's live suite makes a *fresh library per scenario* underneath this one
+# (`AppModel.reopenLibrary`), so this directory is a parent, not a corpus.
+ORGANIZE_OLLAMA_SUITE_ROOT="$WORK/OrganizeOllamaSuiteNotes"
 
 # Committed replay fixtures — `FILAWAY_AI_MODE=replay` reads them through
 # `AIRecordingStore.fromEnvironment()`. No key, no network, no cost.
@@ -134,10 +142,11 @@ ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
 ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
 ONBOARD_OLLAMA_SUITE="com.tejaspanse.filaway.smoke.onboardollama.$STAMP"
 OLLAMA_SUITE="com.tejaspanse.filaway.smoke.ollama.$STAMP"
+OLLAMA_SUITE_SUITE="com.tejaspanse.filaway.smoke.ollamasuite.$STAMP"
 mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" \
          "$SETTINGS_ROOT" "$PASTE_ROOT" "$WIRING_ROOT" "$A11Y_ROOT" \
          "$ORGANIZE_ROOT" "$ORGANIZE_AUTO_ROOT" "$ORGANIZE_OFFLINE_ROOT" \
-         "$ORGANIZE_OLLAMA_ROOT" \
+         "$ORGANIZE_OLLAMA_ROOT" "$ORGANIZE_OLLAMA_SUITE_ROOT" \
          "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT" "$ONBOARD_OLLAMA_ROOT"
 
 # Three notes on disk before the app ever runs, so the search phase also proves
@@ -234,7 +243,7 @@ cleanup() {
   fi
   for suite in "$SUITE" "$SETTINGS_SUITE" "$WIRING_SUITE" "$A11Y_SUITE" \
                "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE" "$ONBOARD_OLLAMA_SUITE" \
-               "$OLLAMA_SUITE"; do
+               "$OLLAMA_SUITE" "$OLLAMA_SUITE_SUITE"; do
     defaults delete "$suite" >/dev/null 2>&1
     rm -f "$HOME/Library/Preferences/$suite.plist"
   done
@@ -297,6 +306,11 @@ run_phase() {
     organize-ollama)
       root="$ORGANIZE_OLLAMA_ROOT"; suite="$OLLAMA_SUITE"
       support="$WORK/SupportOrganizeOllama"
+      ai_mode="live"; ai_provider="ollama" ;;
+    # P2-09: the same live backend, three scenarios, a library per scenario.
+    organize-ollama-suite)
+      root="$ORGANIZE_OLLAMA_SUITE_ROOT"; suite="$OLLAMA_SUITE_SUITE"
+      support="$WORK/SupportOrganizeOllamaSuite"
       ai_mode="live"; ai_provider="ollama" ;;
   esac
   echo
@@ -424,6 +438,9 @@ run_ollama_phase() {
     return
   fi
   run_phase organize-ollama 240
+  # Three live generations plus three library rebuilds. The per-scenario budget
+  # inside the phase is 190 s; this is the outer stop.
+  run_phase organize-ollama-suite 700
 }
 run_ollama_phase
 

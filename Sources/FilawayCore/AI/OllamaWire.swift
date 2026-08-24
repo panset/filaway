@@ -127,6 +127,9 @@ public enum OllamaWire {
         - Every "folderPath" must be a folder listed above, or one a \
         "createFolder" action in this same plan creates. Never name a folder \
         that does not exist.
+        - A "folderPath" has at most two levels, like "Projects/Cinegram" or \
+        "Commands" — never a deeper path like "Home/Projects/Cinegram/Skills", \
+        and never an invented top folder to hold it.
         - Copy every "id" exactly as it is written above. Never invent one, and \
         never use an id that is not listed.
         - "actions": [] is a correct and welcome answer when the session is \

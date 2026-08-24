@@ -103,10 +103,12 @@ In order of how much they buy:
 4. **Report it.** Help → Export Diagnostics… is content-free (NFR-4) and
    includes which model produced which plan.
 
-Filaway already repairs the two mistakes small models make most — naming a note
-that exists as one to *create*, and paraphrasing a block it meant to move. Both
-repairs are strictly additive and are shown on the card as "the plan was
-adjusted" (ADR-070). What it will never do is guess about *removing* your text.
+Filaway already repairs the four mistakes small models make most — naming a note
+that exists as one to *create*, paraphrasing a block it meant to move, filing
+into a folder it forgot to create, and inventing a folder path deeper than the
+two levels a Filaway library allows. Every repair is strictly additive and is
+shown on the card as "the plan was adjusted" (ADR-070, ADR-072, ADR-073). What
+it will never do is guess about *removing* your text.
 
 ## 5. Privacy
 
@@ -134,7 +136,7 @@ For development and for the smoke suite. None of these are needed to use the app
 | `FILAWAY_AI_FIXTURES=<dir>` | where recordings are read and written. **Record into a scratch directory and diff before committing** (ADR-067) |
 | `FILAWAY_TEST_OLLAMA=1` | enables the test suites that talk to the real daemon (`OllamaLiveProbeTests`, `OllamaLiveGoldenTests`) |
 | `FILAWAY_OLLAMA_VERBOSE=1` | those suites also print the validator's content-free summary per scenario |
-| `FILAWAY_SMOKE_OLLAMA=1` | enables the gated `organize-ollama` smoke phase; without it the phase prints SKIPPED and is not a failure |
+| `FILAWAY_SMOKE_OLLAMA=1` | enables the gated `organize-ollama` **and** `organize-ollama-suite` smoke phases; without it they print SKIPPED and are not failures |
 | `FILAWAY_SMOKE_OLLAMA_MODEL=<tag>` | what that phase expects to see on the Activity row |
 | `FILAWAY_SMOKE_ONLY="a b c"` | run only these smoke phases |
 
@@ -150,6 +152,9 @@ FILAWAY_TEST_OLLAMA=1 swift test --filter OllamaLiveGoldenTests
 
 # the end-to-end smoke phase against the daemon
 FILAWAY_SMOKE_OLLAMA=1 FILAWAY_SMOKE_ONLY="organize-ollama" Tools/smoke.sh
+
+# the plan-quality suite: three library shapes, three live plans (P2-09)
+FILAWAY_SMOKE_OLLAMA=1 FILAWAY_SMOKE_ONLY="organize-ollama-suite" Tools/smoke.sh
 ```
 
 Measured numbers, per scenario and before/after the ADR-070 repair:

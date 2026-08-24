@@ -2874,3 +2874,105 @@ runaway spent its budget copying note text into the plan.
 their tool has no rules entry). A silent failure is now structurally
 impossible: it is a banner *and* a row. Claude still gets no repair (ADR-070's
 reasoning stands).
+
+---
+
+## ADR-073 — A folder deeper than the library allows is clamped, and the live suite is three libraries wide (amends ADR-070/072)
+
+**Context.** Three dogfooding sessions in a row (P2-07…09, 2026-08-24) hit a
+*different* plan-quality failure, and **a person found every one of them**:
+
+| # | Failure | Fixed by |
+|---|---|---|
+| 1 | `titleCollision`, `segmentNotFound` | `PlanRepair` rules 1–3 (ADR-070) |
+| 2 | `unknownFolder` — the plan files into a folder it never creates | rule 4 (ADR-072) |
+| 3 | `folderTooDeep: Home/Projects/…/Skills/… is 5 levels deep; the cap is 2` | this ADR |
+
+The third came from a bulleted list of app feedback in a library with **no
+folders at all** — the shape where a model has nothing to file into and invents
+a filing cabinet to hold the session.
+
+The suite could not have caught any of them. The gated `organize-ollama` phase
+runs *one* session over *one* corpus: the classic curl library, two folders,
+five notes, a code block with an obvious home. Nothing about it resembles a
+folderless library or a list of prose lines.
+
+**Decision, part 1 — clamp the depth.** `PlanRepair` gains rule 5: a folder path
+deeper than `PathRules.maxFolderDepth` is rewritten to its **last**
+`maxFolderDepth` components (`Home/Projects/Cinegram (pro)/Skills/Cinegram` →
+`Skills/Cinegram`), and rule 4 — which already runs last — then inserts the
+`createFolder` the clamped folder needs.
+
+*Why the last components and not the first.* Read left to right, that path is a
+cabinet the model invented; read right to left it is the model's actual
+classification of the session, with the generic scaffolding (`Home`,
+`Projects`) at the front. Keeping the deepest pair keeps the judgement and drops
+the invention — and it is stable, so the same session clamped twice lands in the
+same folder.
+
+It refuses everything it cannot justify, because a repair that swaps one
+rejection for another is worse than none:
+
+- a path with a real safety problem (`..`, absolute, a null byte, a newline);
+- a path with **any** component that is not already a legal folder name —
+  sanitising one would invent a name the user never saw, and it would turn
+  `folderTooDeep` into `unsafePath` rather than removing an error;
+- a clamp that lands inside a folder the user excluded (FR-4.5);
+- a `moveNote` whose clamped destination already holds a note of that title —
+  a creation has an additive repair (rule 1) and a move does not.
+
+Like every other rule it is strictly additive, opt-in per provider
+(`AIProviderKind.repairsPlanCollisions` — Ollama yes, Claude no), and reported
+as a `repairedFolderDepth` **warning** on the card and in the Activity row.
+
+`OllamaWire.smallModelRules` gains the matching line, so the model is told
+before it is repaired. That is part of the wire body, so the nine committed
+Ollama organize fixtures were re-recorded — and the measurement moved
+**8/9 → 9/9 usable**, taking ADR-070's one remaining open case
+(`convergence`'s `unknownFolder`) with it.
+
+**Decision, part 2 — the live suite is three libraries wide.** A new gated phase
+`organize-ollama-suite` (`Features/Organize/OrganizeSuiteSmokeCheck.swift`) runs
+the shapes the failures came from, against the real daemon, through the real
+objects:
+
+| scenario | library | session | mode |
+|---|---|---|---|
+| `feedback-list` | ~8 notes at the root, **no folders** | a numbered list of short app-feedback lines | ask |
+| `command-note` | the same folderless library | one OIDC/`curl` invocation plus a line of prose | auto |
+| `existing-folders` | two folders, each with notes | a shell recipe whose home is one of them | auto |
+
+Three properties make it a regression signal rather than a taste test:
+
+- **A rejected plan is a phase failure**, and the transcript prints the
+  validator's *issue kinds* (`OrganizeCoordinator.lastFailureIssueKinds`, new)
+  so the next repair rule has a name. The allowed outcomes are applied, proposed
+  then accepted, or an explicit `nothingToDo` (FR-4.6).
+- **Nothing about the model's taste is pinned** — not the summary, not the
+  target, not the action kinds. What is pinned is the contract: bytes changed on
+  disk, the Activity row exists and names the model, and **Settings → Activity**
+  shows the same event through `ActivityModel` (plus an `organizeFailed` row,
+  scripted through `ActivityLog.recordFailure` — a live model cannot be made to
+  fail on demand).
+- **Every printed line is content-free** (NFR-4): action kinds, issue kinds,
+  counts, seconds.
+
+`organize-ollama` stays as it is: it is the phase that types into the live
+`NSTextView`, and it is the one that pins the classic corpus.
+
+**Consequences.**
+- One process, one Application Support, **a fresh notes root per scenario** via
+  `AppModel.reopenLibrary(at:)` — each root is its own `Library.key` and
+  therefore its own database, so baselines and the Activity journal start empty
+  every time. The session text is written through `NoteStore` rather than typed,
+  because the organizer's delta is `baseline → what is on disk`; that also makes
+  the phase independent of whether a window ever arrived.
+- Both gated phases skip visibly (`SKIPPED`, never a failure) without
+  `FILAWAY_SMOKE_OLLAMA=1` and a daemon that answers, exactly as before. The
+  suite's watchdog is 700 s for three live generations plus three library
+  rebuilds; the per-scenario budget inside it is 190 s.
+- `PlanIssueKind` gains `repairedFolderDepth`. Nothing switches exhaustively
+  over it and it is `Codable` by raw value, so old Activity rows still decode.
+- What is *not* fixed: the model still reaches for a folder that does not exist
+  more often than for one that does. The repair makes that harmless; making it
+  rare is prompt work, and the suite is now where it would be measured.

@@ -79,6 +79,14 @@ final class OrganizeCoordinator: ObservableObject {
     /// nothing arrived instead of timing out with no explanation.
     @Published private(set) var lastFailureReason: String?
 
+    /// The validator's *kinds* from the last rejected plan — `titleCollision`,
+    /// `folderTooDeep`, … — with no detail string attached (P2-09).
+    ///
+    /// ``lastFailureReason`` carries the whole summary, which names paths and
+    /// titles; a smoke transcript is a file an agent pastes into a report, so
+    /// the live suite prints these instead. Empty for every other failure.
+    @Published private(set) var lastFailureIssueKinds: [String] = []
+
     /// The provider the preference (or `FILAWAY_AI_PROVIDER`) currently names —
     /// what the toolbar pill words its offline state for ("Ollama offline").
     var providerKind: AIProviderKind { settingsSource.providerKind }
@@ -614,6 +622,11 @@ final class OrganizeCoordinator: ObservableObject {
         case let .failed(_, failure):
             log.error("organize failed: \(failure.label, privacy: .public)")
             lastFailureReason = failure.label
+            if case let .invalidPlan(validation) = failure {
+                lastFailureIssueKinds = validation.errors.map(\.kind.rawValue)
+            } else {
+                lastFailureIssueKinds = []
+            }
             if case let .provider(error) = failure {
                 status = AIHealth.status(for: error)
             }

@@ -24,6 +24,7 @@ import Foundation
 /// | `createNote` whose folder + title name an existing note | `appendToNote` to that note, same content (`+ tagNote` when it carried tags) |
 /// | `moveSegment` into a *new* note whose folder + title name an existing note | the same `moveSegment` into that existing note |
 /// | `moveSegment` whose `segment` is not in the source verbatim | `appendToNote` (or `createNote`) of that text at the destination — **the source keeps every byte** |
+/// | a folder path deeper than ``PathRules/maxFolderDepth`` | clamped to its **last** `maxFolderDepth` components (P2-09's live `folderTooDeep`) |
 /// | a filing target's folder does not exist and no `createFolder` makes it | the missing `createFolder` is inserted first — the model's intent, minus its forgetfulness (P2-08's live `unknownFolder`) |
 ///
 /// Every result is strictly *additive*. The third rule in particular trades a
@@ -77,7 +78,12 @@ public enum PlanRepair {
         var warnings: [PlanIssue] = []
         actions.reserveCapacity(plan.actions.count)
 
-        for (index, action) in plan.actions.enumerated() {
+        // Rule 5 (P2-09) runs first, as a pre-pass: a clamped folder can then
+        // collide with a note that is already there (rule 1 repairs that), and
+        // it is the *clamped* folder rule 4 has to remember to create.
+        let source = clampFolderDepth(plan.actions, in: context, warnings: &warnings)
+
+        for (index, action) in source.enumerated() {
             switch action {
             case let .createNote(create):
                 guard let occupant = occupant(folder: create.folderPath, title: create.title, in: context) else {
@@ -171,6 +177,104 @@ public enum PlanRepair {
         // rejects the result for `missingPrecondition` instead.
         repaired.preconditions = context.preconditions(for: repaired)
         return Result(plan: repaired, warnings: warnings)
+    }
+
+    // MARK: - Rule 5: a folder deeper than the library allows (P2-09)
+
+    /// Rewrites every folder path deeper than ``PathRules/maxFolderDepth`` to
+    /// its **last** `maxFolderDepth` components, one warning per action.
+    ///
+    /// **Why the last ones.** The live failure was
+    /// `Home/Projects/<something>/Skills/<something>` — five levels, in a
+    /// library that had no folders at all. Read left to right that path is a
+    /// mental filing cabinet the model invented; read right to left it is the
+    /// model's actual classification of the session, and the leading components
+    /// are the generic ones (`Home`, `Projects`). Keeping the deepest pair
+    /// keeps the judgement and drops the scaffolding — and it is *stable*: the
+    /// same session clamped twice lands in the same folder.
+    ///
+    /// **When it refuses.** Anything that would move the rejection one error
+    /// later rather than remove it: a path with a real safety problem, a
+    /// component that is not already a legal folder name (sanitising one would
+    /// be inventing a name the user never saw), a clamped folder the user
+    /// excluded (FR-4.5), or a `moveNote` whose clamped destination already
+    /// holds a note of that title — a clamp may not manufacture a
+    /// `titleCollision` nobody can repair.
+    private static func clampFolderDepth(
+        _ actions: [PlanAction],
+        in context: OrganizeContext,
+        warnings: inout [PlanIssue]
+    ) -> [PlanAction] {
+        var out: [PlanAction] = []
+        out.reserveCapacity(actions.count)
+
+        for (index, action) in actions.enumerated() {
+            guard let deep = action.targetFolderPaths.first,
+                  let shallow = clamped(deep, in: context)
+            else {
+                out.append(action)
+                continue
+            }
+
+            let rewritten: PlanAction
+            switch action {
+            case let .createNote(original):
+                var create = original
+                create.folderPath = shallow
+                rewritten = .createNote(create)
+            case let .createFolder(original):
+                var create = original
+                create.path = shallow
+                rewritten = .createFolder(create)
+            case let .moveNote(original):
+                // A move may not be repaired *into* a collision.
+                guard let note = context.note(for: original.note),
+                      context.note(inFolder: shallow, title: note.title) == nil
+                else {
+                    out.append(action)
+                    continue
+                }
+                var move = original
+                move.toFolderPath = shallow
+                rewritten = .moveNote(move)
+            case let .moveSegment(original):
+                guard case let .newNote(title, _, tags) = original.destination else {
+                    out.append(action)
+                    continue
+                }
+                var move = original
+                move.destination = .newNote(title: title, folderPath: shallow, tags: tags)
+                rewritten = .moveSegment(move)
+            default:
+                out.append(action)
+                continue
+            }
+
+            out.append(rewritten)
+            warnings.append(PlanIssue(
+                kind: .repairedFolderDepth,
+                actionIndex: index,
+                detail: "the plan filed into a folder \(PathRules.depth(ofFolder: deep)) levels deep; "
+                    + "the cap is \(PathRules.maxFolderDepth), so its last \(PathRules.maxFolderDepth) "
+                    + "levels were kept (\(shallow))."
+            ))
+        }
+        return out
+    }
+
+    /// The clamped form of `folder`, or `nil` when it is shallow enough already
+    /// or when clamping it would not be an improvement.
+    private static func clamped(_ folder: String, in context: OrganizeContext) -> String? {
+        guard PlanValidator.pathSafetyIssue(folder) == nil else { return nil }
+        let parts = PathRules.components(folder)
+        guard parts.count > PathRules.maxFolderDepth else { return nil }
+        // Every component, not merely the kept ones: an unsafe component the
+        // clamp happens to drop would turn `folderTooDeep` into a *different*
+        // rejection, and the repair may only ever remove errors.
+        guard parts.allSatisfy({ PathRules.sanitizeTitle($0) == $0 }) else { return nil }
+        let shallow = parts.suffix(PathRules.maxFolderDepth).joined(separator: "/")
+        guard !context.isExcluded(shallow) else { return nil }
+        return shallow
     }
 
     // MARK: - The unverifiable merge
