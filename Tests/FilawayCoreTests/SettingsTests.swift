@@ -310,6 +310,20 @@ struct AppSettingsProviderTests {
         #expect(s.effectiveOrganizeModel == .opus5)
     }
 
+    @Test("FILAWAY_AI_PROVIDER moves the effective model with the kind (ADR-069)")
+    func environmentOverrideMovesTheModel() {
+        let s = fresh()
+        #expect(s.aiProvider == .claude)
+        let env = ["FILAWAY_AI_PROVIDER": "ollama"]
+        #expect(s.resolvedAIProvider(environment: env) == .ollama)
+        #expect(s.effectiveOrganizeModel(environment: env) == .defaultOllama,
+                "the smoke phase caught kind=ollama with model=claude-sonnet-5")
+        #expect(s.effectiveOrganizeModel(environment: [:]) == .defaultOrganize)
+        s.aiProvider = .ollama
+        #expect(s.resolvedAIProvider(environment: ["FILAWAY_AI_PROVIDER": "claude"]) == .claude)
+        #expect(s.effectiveOrganizeModel(environment: ["FILAWAY_AI_PROVIDER": "claude"]) == .defaultOrganize)
+    }
+
     @Test("Ollama URL and model persist, an invalid URL is ignored, blank model resets")
     func ollamaValues() {
         let s = fresh()

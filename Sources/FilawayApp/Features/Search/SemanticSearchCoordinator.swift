@@ -177,7 +177,7 @@ final class SemanticSearchCoordinator: ObservableObject {
     /// `CoreOrganizeSettings.providerKind` — the two must never disagree, or
     /// ⌘K and the organizer would be talking to different backends.
     static func resolvedKind(_ settings: CoreSettings) -> AIProviderKind {
-        AIProviderKind.fromEnvironment() ?? settings.aiProvider
+        settings.resolvedAIProvider
     }
 
     /// The provider the answer step uses — the same one the organizer gets.
