@@ -77,6 +77,18 @@ public struct AIHealth: Sendable, Equatable {
         consecutiveFailures = 0
     }
 
+    /// Records a status the error taxonomy cannot express.
+    ///
+    /// One caller: the keyless provider, whose "the daemon is up but that model
+    /// has not been pulled" is neither a bad key nor an outage, and whose remedy
+    /// is a shell command rather than a retry (ADR-068). Not retryable by
+    /// definition, so the failure streak resets.
+    public mutating func record(status: AIStatus, at now: Date = Date()) {
+        raw = status
+        updatedAt = now
+        consecutiveFailures = 0
+    }
+
     /// Folds an error into the status.
     public mutating func recordFailure(_ error: AIError, at now: Date = Date()) {
         raw = AIHealth.status(for: error, at: now)
