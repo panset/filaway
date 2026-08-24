@@ -157,3 +157,18 @@ enum AppSettings {
         defaults.synchronize()
     }
 }
+
+/// ADR-041's rule, in one place: the **app** defaults to `live` where the test
+/// harness (`AIMode.current()`) defaults to `replay`. A shipped build must
+/// never quietly serve fixtures — replay in the app needs `FILAWAY_AI_MODE`
+/// *and* `FILAWAY_AI_FIXTURES`, which is exactly what `Tools/smoke.sh` sets.
+/// `OrganizeCoordinator.makeProvider`, `SettingsModel` and `OnboardingModel`
+/// all resolve through this, so the pipeline and the status pane cannot
+/// disagree about which world they are in (the "Model not pulled against a
+/// mock's Claude list" bug).
+extension AIMode {
+    static func appMode(environment: [String: String] = ProcessInfo.processInfo.environment) -> AIMode {
+        environment[AIMode.environmentVariable]
+            .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
+    }
+}

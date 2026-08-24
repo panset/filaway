@@ -487,3 +487,27 @@ struct AIConnectionCopyTests {
         #expect(AIConnectionCopy.usageSummary(kind: .claude, totals: totals) == "This month: ~2 requests · ~35 tokens")
     }
 }
+
+/// The user-visible scenario behind the "Model not pulled" bug: the default
+/// factory in `.live` against the real daemon must report connected when the
+/// tag is pulled. Gated the same way as the provider's own live probe.
+@Suite("AIConnectionManager against the live daemon",
+       .enabled(if: ProcessInfo.processInfo.environment["FILAWAY_TEST_OLLAMA"] == "1"))
+struct AIConnectionManagerLiveOllamaTests {
+    @Test("connectLocal over the default live factory sees the pulled model")
+    func liveConnect() async {
+        let manager = AIConnectionManager(
+            secrets: InMemorySecretStore(),
+            kind: .ollama,
+            providerFactory: AIConnectionManager.defaultProviderFactory(mode: .live, store: nil)
+        )
+        let result = await manager.connectLocal()
+        guard case .success(let models) = result else {
+            Issue.record("connectLocal failed: \(result)")
+            return
+        }
+        #expect(OllamaConfiguration().isPulled(in: models))
+        #expect(await manager.status == .connected)
+        #expect(await manager.isConfigured)
+    }
+}

@@ -83,7 +83,8 @@ final class SettingsModel: ObservableObject {
             secrets: AppSettings.isSmokeRun ? InMemorySecretStore() : KeychainStore(),
             ledger: try? AIUsageLedger(library: library),
             kind: settings.aiProvider,
-            ollama: settings.ollamaConfiguration
+            ollama: settings.ollamaConfiguration,
+            providerFactory: AIConnectionManager.defaultProviderFactory(mode: AIMode.appMode())
         )
     }
 
