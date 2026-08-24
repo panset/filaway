@@ -266,8 +266,7 @@ final class OrganizeCoordinator: ObservableObject {
                 : .network(code: URLError.notConnectedToInternet.rawValue, description: "smoke: offline")
             return MockProvider.failing(error)
         }
-        let mode = environment[AIMode.environmentVariable]
-            .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
+        let mode = AIMode.appMode(environment: environment)
         return try AIProviderFactory.make(
             mode: mode,
             store: AIRecordingStore.fromEnvironment(environment),
@@ -289,8 +288,7 @@ final class OrganizeCoordinator: ObservableObject {
     ) {
         guard kind == .ollama, ollama.validate() else { return }
         guard environment["FILAWAY_AI_FAIL"]?.isEmpty ?? true else { return }
-        let mode = environment[AIMode.environmentVariable]
-            .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
+        let mode = AIMode.appMode(environment: environment)
         guard mode.isLive else { return }
         Task.detached(priority: .utility) {
             await OllamaProvider(configuration: ollama).warmUp()

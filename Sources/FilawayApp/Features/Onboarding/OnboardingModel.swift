@@ -93,7 +93,9 @@ final class OnboardingModel {
     /// The manager is deliberately *not* library-bound: the key is app-global,
     /// and the library does not exist yet when this flow runs.
     private static func makeConnection() -> AIConnectionManager {
-        AppSettings.isSmokeRun ? AIConnectionManager(secrets: InMemorySecretStore()) : AIConnectionManager()
+        AppSettings.isSmokeRun
+            ? AIConnectionManager(secrets: InMemorySecretStore())
+            : AIConnectionManager(providerFactory: AIConnectionManager.defaultProviderFactory(mode: AIMode.appMode()))
     }
 
     /// A smoke run must never reach a daemon either — the `onboarding-ollama`
