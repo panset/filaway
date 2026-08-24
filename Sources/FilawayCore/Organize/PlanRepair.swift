@@ -24,6 +24,7 @@ import Foundation
 /// | `createNote` whose folder + title name an existing note | `appendToNote` to that note, same content (`+ tagNote` when it carried tags) |
 /// | `moveSegment` into a *new* note whose folder + title name an existing note | the same `moveSegment` into that existing note |
 /// | `moveSegment` whose `segment` is not in the source verbatim | `appendToNote` (or `createNote`) of that text at the destination — **the source keeps every byte** |
+/// | a filing target's folder does not exist and no `createFolder` makes it | the missing `createFolder` is inserted first — the model's intent, minus its forgetfulness (P2-08's live `unknownFolder`) |
 ///
 /// Every result is strictly *additive*. The third rule in particular trades a
 /// move for a copy: an unverifiable merge would have removed text from the
@@ -127,6 +128,39 @@ public enum PlanRepair {
                 actions.append(action)
             }
         }
+
+        // Rule 4 (P2-08): insert the `createFolder` the model forgot. Only for
+        // a folder that would pass the validator anyway (safe components,
+        // depth <= PathRules.maxFolderDepth) — repairing an unsafe path would
+        // just move the rejection one error later.
+        var creates = Set(actions.compactMap { action -> String? in
+            if case let .createFolder(create) = action { return create.path }
+            return nil
+        })
+        var inserted: [PlanAction] = []
+        for (index, action) in actions.enumerated() {
+            let folder: String?
+            switch action {
+            case let .createNote(create): folder = create.folderPath
+            case let .moveNote(move): folder = move.toFolderPath
+            case let .moveSegment(move):
+                if case let .newNote(_, folderPath, _) = move.destination { folder = folderPath } else { folder = nil }
+            default: folder = nil
+            }
+            guard let folder, !folder.isEmpty,
+                  !context.folderExists(folder), !creates.contains(folder),
+                  !context.isExcluded(folder),
+                  (try? PathRules.sanitizeFolderPath(folder)) == folder
+            else { continue }
+            creates.insert(folder)
+            inserted.append(.createFolder(CreateFolderAction(path: folder)))
+            warnings.append(PlanIssue(
+                kind: .repairedMissingFolder,
+                actionIndex: index,
+                detail: "the plan files into \(folder), which does not exist; the missing createFolder was added."
+            ))
+        }
+        actions = inserted + actions
 
         guard !warnings.isEmpty else { return Result(plan: plan) }
 

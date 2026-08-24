@@ -336,3 +336,48 @@ struct PlanRepairTests {
         }
     }
 }
+
+// MARK: - Rule 4: the createFolder the model forgot (P2-08)
+
+@Suite("Plan repair — missing folders (P2-08)")
+struct PlanRepairMissingFolderTests {
+    /// The live failure verbatim: file into a folder that does not exist,
+    /// with no createFolder in the plan.
+    @Test("an unknownFolder plan gains the createFolder and validates")
+    func insertsTheMissingFolder() throws {
+        let original = PlanRepairTests.plan([
+            .createNote(CreateNoteAction(title: "OIDC", folderPath: "Reference", content: "curl …\n")),
+        ])
+        #expect(PlanRepairTests.validate(original).hasError(.unknownFolder), "the premise")
+
+        let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+        #expect(result.warnings.map(\.kind) == [.repairedMissingFolder])
+        #expect(result.plan.actions.first == .createFolder(CreateFolderAction(path: "Reference")))
+        #expect(PlanRepairTests.validate(result.plan).isValid,
+                "\(PlanRepairTests.validate(result.plan).summary)")
+        #expect(result.plan.neverDeletesUserText)
+    }
+
+    @Test("an unsafe or over-deep folder is not repaired")
+    func leavesUnsafeFoldersAlone() throws {
+        for folder in ["A/B/C", "../up", ""] {
+            let original = PlanRepairTests.plan([
+                .createNote(CreateNoteAction(title: "x", folderPath: folder, content: "y\n")),
+            ])
+            let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+            #expect(!result.warnings.contains { $0.kind == .repairedMissingFolder },
+                    "\(folder) must stay the validator's rejection")
+        }
+    }
+
+    @Test("a folder the plan already creates is not created twice")
+    func respectsTheModelsOwnCreateFolder() throws {
+        let original = PlanRepairTests.plan([
+            .createFolder(CreateFolderAction(path: "Reference")),
+            .createNote(CreateNoteAction(title: "OIDC", folderPath: "Reference", content: "curl …\n")),
+        ])
+        let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+        #expect(!result.didRepair, "nothing to fix")
+        #expect(result.plan.actions == original.actions)
+    }
+}

@@ -34,6 +34,10 @@ public enum ActivityEventKind: String, Sendable, Hashable, Codable, CaseIterable
     /// A change Filaway recorded but did not make — reserved for external
     /// edits the app wants to show in the log.
     case external
+    /// A session the organizer could not turn into an applied plan (FR-6.4).
+    /// Nothing touched the disk; the summary carries a content-free reason.
+    /// Decoders on builds older than this case fall back to ``external``.
+    case organizeFailed
 }
 
 /// How far an event got. This is the journal half of the row (NFR-3).

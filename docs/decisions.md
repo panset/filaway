@@ -2847,3 +2847,30 @@ would say nothing about whether Filaway is correct.
   second wire format would otherwise be untested.
 - `make test` still needs no daemon, no key and no network: everything above is
   replay. The live suites are gated on `FILAWAY_TEST_OLLAMA=1`.
+
+---
+
+## ADR-072 — Failed organizations are durable rows; the repair learns createFolder (amends ADR-070)
+
+**Context.** First real dogfooding (P2-08, 2026-08-24). A live session failed
+twice and the user saw only "No organizations yet": the banner vanished in
+seconds and nothing persisted. The live failure itself was ADR-070's one
+unrepaired case — `unknownFolder: Commands does not exist and the plan does
+not create it` — a plan with the right intent minus its `createFolder`.
+
+**Decision.** (1) `ActivityEventKind.organizeFailed` +
+`ActivityLog.recordFailure(reason:model:)`: every failed organization is a row
+in the Activity log (content-free reason, never undoable), and the banner ends
+with "— details in Activity". (2) `PlanRepair` rule 4 inserts the missing
+`createFolder` for a filing target's folder, only when the path would pass the
+validator anyway (safe components, depth ≤ 2, not excluded) — creating a folder
+is purely additive, so `neverDeletesUserText` is untouched. (3) The wire-time
+small-model rules now say "keep the plan short; never copy a note's existing
+text into content", and `localMaxTokens` rose 1,024 → 1,536 — the observed
+runaway spent its budget copying note text into the plan.
+
+**Consequences.** The nine committed Ollama organize fixtures were re-recorded
+(the rules text is part of the wire body; search fixtures were untouched —
+their tool has no rules entry). A silent failure is now structurally
+impossible: it is a banner *and* a row. Claude still gets no repair (ADR-070's
+reasoning stands).

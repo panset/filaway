@@ -114,6 +114,7 @@ private struct RecentActivityRow: View {
         case .undone: return "arrow.uturn.backward"
         case .proposedDismissed: return "xmark.circle"
         case .external: return "square.and.pencil"
+        case .organizeFailed: return "exclamationmark.triangle"
         }
     }
 }

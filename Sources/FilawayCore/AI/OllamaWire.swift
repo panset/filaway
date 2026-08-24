@@ -131,6 +131,10 @@ public enum OllamaWire {
         never use an id that is not listed.
         - "actions": [] is a correct and welcome answer when the session is \
         already where it belongs.
+        - Keep the plan short. Prefer "moveNote", "retitleNote" and "tagNote", \
+        which name a note by id. Never copy a note\'s existing text into a \
+        "content" field — "content" is only for NEW material quoted from the \
+        session text. A long plan is cut off and thrown away.
         """,
     ]
 

@@ -620,8 +620,11 @@ final class OrganizeCoordinator: ObservableObject {
             await refreshQueueCount()
             // The session is not applied and not queued — saying nothing here
             // is how "no organizations yet" stays a mystery. One banner line,
-            // content-free (the label is an error kind, never note text).
-            onBanner?("Couldn't organize this session (\(failure.label)).", "exclamationmark.triangle")
+            // content-free (the label is an error kind, never note text), and
+            // a durable Activity row so the reason outlives the banner.
+            let failedModel = await organizer?.currentSettings.model.id
+            try? await activity?.recordFailure(reason: failure.label, model: failedModel)
+            onBanner?("Couldn't organize this session (\(failure.label)) — details in Activity.", "exclamationmark.triangle")
 
         case let .skipped(_, reason):
             lastFailureReason = "skipped: \(reason)"

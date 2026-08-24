@@ -105,6 +105,26 @@ public actor ActivityLog {
         return id
     }
 
+    /// Records a session the organizer could not organize (FR-6.4). The banner
+    /// vanishes in seconds; this row is where the reason can still be found.
+    /// `reason` must be content-free — an error kind, never note text (NFR-4).
+    @discardableResult
+    public func recordFailure(
+        reason: String,
+        model: String? = nil,
+        at timestamp: Date = Date()
+    ) throws -> ActivityEventID {
+        let summary = model.map { "Couldn\'t organize a writing session (\($0)) — \(reason)" }
+            ?? "Couldn\'t organize a writing session — \(reason)"
+        return try begin(
+            kind: .organizeFailed,
+            status: .none,
+            summary: summary,
+            isUndoable: false,
+            at: timestamp
+        )
+    }
+
     /// Records a plan the user dismissed (ask mode). Nothing touched the disk,
     /// but FR-4.3 asks the log to list *all* AI actions.
     @discardableResult

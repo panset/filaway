@@ -118,3 +118,21 @@ struct ActivityDiffTests {
         #expect(TextDiff.between("gone\n", "").insertedLineCount == 0)
     }
 }
+
+@Suite("Activity — failed organizations are findable (P2-08)")
+struct ActivityFailureRowTests {
+    @Test("recordFailure writes a row the log lists, and Undo never sees it")
+    func failureRow() async throws {
+        let temp = try TempLibrary()
+        let log = try ActivityLog(inMemoryFor: temp.library)
+
+        let id = try await log.recordFailure(reason: "output cap", model: "llama3.1:8b")
+        let events = try await log.events(limit: 10)
+        let row = try #require(events.first { $0.id == id })
+        #expect(row.kind == .organizeFailed)
+        #expect(!row.isUndoable)
+        #expect(row.summary.contains("output cap"))
+        #expect(row.summary.contains("llama3.1:8b"))
+        #expect(try await log.undoableEvents().isEmpty, "a failure is never undoable")
+    }
+}
