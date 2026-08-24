@@ -41,15 +41,19 @@ RESOURCES_DIR="${CONTENTS}/Resources"
 FRAMEWORKS_DIR="${CONTENTS}/Frameworks"
 
 # --- 1. Build ----------------------------------------------------------------
-UNIVERSAL=1
+UNIVERSAL=0
 BUILD_FLAGS=(-c release --product FilawayApp --arch arm64 --arch x86_64)
-if [[ ! -x /Library/Developer/SharedFrameworks/XCBuild.framework/Versions/A/Support/xcbuild ]]; then
+# Universal builds need Xcode's build system. Two ways it can be present:
+# the standalone XCBuild install, or an Xcode.app selected as the developer
+# dir (the GitHub runner — its XCBuild lives inside Xcode.app, which is why
+# probing only the /Library path wrongly said "not possible" there).
+if [[ -x /Library/Developer/SharedFrameworks/XCBuild.framework/Versions/A/Support/xcbuild ]]; then
+    UNIVERSAL=1
+elif xcode-select -p 2>/dev/null | grep -qv CommandLineTools; then
+    UNIVERSAL=1
+fi
+if [[ $UNIVERSAL -eq 1 ]] && ! swift build "${BUILD_FLAGS[@]}" --help >/dev/null 2>&1; then
     UNIVERSAL=0
-else
-    # xcbuild exists but may still refuse; probe with a dry run.
-    if ! swift build "${BUILD_FLAGS[@]}" --help >/dev/null 2>&1; then
-        UNIVERSAL=0
-    fi
 fi
 
 BUILT_UNIVERSAL=0
