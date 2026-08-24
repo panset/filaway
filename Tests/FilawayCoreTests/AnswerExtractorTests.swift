@@ -410,12 +410,15 @@ struct AnswerFallbackTests {
         let elapsed = Date().timeIntervalSince(started)
 
         // The hung provider takes ≥ 5 s; anything well under that proves the race
-        // decided. 4 s (not 2) tolerates a saturated parallel test run (M4-08),
-        // and the bound stretches with the machine — a hosted runner measured
-        // 6.0 s of pure scheduling noise around a race that behaved correctly
-        // (the source and unavailable asserts below are the real proof).
-        #expect(elapsed < 4 * TestEnvironment.perfBudgetScale,
-                "the 5 s call must not decide how long the search takes")
+        // decided. The real proof is the two asserts below — the answer came
+        // from the local heuristic, marked timed out. The wall clock is a
+        // second witness that only testifies on a machine whose clock means
+        // something: a hosted runner measured 2.1, 6.0 and then 8.4 seconds of
+        // scheduling noise around this 0.2 s race, so there it stays silent
+        // (convention 8 — the budget describes the machine).
+        if !TestEnvironment.isCI {
+            #expect(elapsed < 4, "the 5 s call must not decide how long the search takes")
+        }
         #expect(answer.source == .localHeuristic)
         #expect(answer.unavailable == .timedOut)
         let card = try #require(answer.card)
