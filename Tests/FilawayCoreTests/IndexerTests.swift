@@ -383,7 +383,10 @@ struct IndexerTests {
             ((try? await indexer.chunkCount()) ?? 0) > 0
         }
         #expect(indexed)
-        #expect(await indexer.pendingCount == 0)
+        // The chunk lands before the pending counter drops; on a loaded runner
+        // the gap is observable, so drain it rather than race it (M4-08).
+        let drained = await waitUntil(timeout: 15) { await indexer.pendingCount == 0 }
+        #expect(drained, "pending never drained after the chunks were written")
         await indexer.stop()
     }
 
