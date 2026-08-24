@@ -9,6 +9,8 @@ import FilawayCore
 /// | `onboarding` | First launch shows the flow; the folder step adopts a folder chosen programmatically; the mock key validates and the status goes `connected`; finishing writes the bookmark, `onboardingCompleted` and the AI preference — and the library this launch opens is the chosen folder, not `~/Notes`. |
 /// | `onboarding2` | Relaunch on the same defaults suite: no flow, and the library is still the chosen folder (FR-1.5, FR-7.1). |
 /// | `onboardingskip` | The "Skip for now" path: `aiConnectionSkipped` is set, the flow still completes, and the gentle sidebar prompt is visible and dismissable for the launch. |
+/// | `onboarding-ollama` | FR-6.5 (P2-03): the local-model card is selectable, Test connection succeeds against the injected validator, Continue unlocks, and Finish writes `ai.provider`, `ai.ollama.baseURL` and `ai.ollama.model`. |
+/// | `onboarding-ollama2` | Relaunch: no flow, and the provider preference is still Ollama. |
 ///
 /// **The driver runs inside the modal session.** `OnboardingPresenter` blocks in
 /// `applicationWillFinishLaunching`, so ``armIfNeeded()`` schedules the first
@@ -39,7 +41,16 @@ enum OnboardingSmokeCheck {
 
     static func handles(phase: String) -> Bool {
         phase == "onboarding" || phase == "onboarding2" || phase == "onboardingskip"
+            || phase == "onboarding-ollama" || phase == "onboarding-ollama2"
     }
+
+    /// `true` for the phase that drives Figure 3's *local* card (P2-03).
+    private static var isOllamaPhase: Bool { phase.hasPrefix("onboarding-ollama") }
+
+    /// The tag the phase picks. `OnboardingModel` scripts the daemon for any
+    /// smoke run (`FILAWAY_SMOKE_OLLAMA_MODELS`), so no daemon is needed and a
+    /// machine without Ollama installed still runs this.
+    private static let ollamaTag = "llama3.1:8b"
 
     // MARK: - Inside the modal session
 
@@ -47,7 +58,8 @@ enum OnboardingSmokeCheck {
     /// see one. Called from `applicationWillFinishLaunching`, before the gate.
     static func armIfNeeded() {
         guard let name = ProcessInfo.processInfo.environment["FILAWAY_SMOKE"],
-              handles(phase: name), name != "onboarding2" else { return }
+              handles(phase: name), name != "onboarding2", name != "onboarding-ollama2"
+        else { return }
         phase = name
         DispatchQueue.main.async { Task { @MainActor in await driveFlow() } }
     }
@@ -85,8 +97,10 @@ enum OnboardingSmokeCheck {
         check("advanced-to-step-2", model.step == .connectAI, model.step.label)
         check("step-label-is-2-of-3", model.step.label == "2 of 3", model.step.label)
 
-        // 2 — Figure 3: connect, or skip.
-        if phase == "onboardingskip" {
+        // 2 — Figure 3: connect (Claude or the local daemon), or skip.
+        if isOllamaPhase {
+            await driveLocalModelCard(model)
+        } else if phase == "onboardingskip" {
             model.skipAI()
             check("skip-sets-the-preference", model.settings.aiConnectionSkipped)
             check("skip-advances", model.step == .orientation, model.step.label)
@@ -114,6 +128,63 @@ enum OnboardingSmokeCheck {
         check("flow-finished", model.isFinished)
         check("onboarding-completed-written", model.settings.onboardingCompleted)
         check("bookmark-written", model.settings.notesRootBookmark != nil)
+
+        if isOllamaPhase {
+            check("provider-written", model.settings.aiProvider == .ollama,
+                  model.settings.aiProvider.rawValue)
+            check("base-url-written",
+                  model.settings.ollamaBaseURL == OllamaConfiguration.defaultBaseURL,
+                  model.settings.ollamaBaseURL.absoluteString)
+            check("model-written", model.settings.ollamaModel.id == ollamaTag,
+                  model.settings.ollamaModel.id)
+            check("local-connection-is-not-a-skip", !model.settings.aiConnectionSkipped)
+        }
+    }
+
+    /// FR-6.5's card: choose local, test, and only then may Continue proceed.
+    private static func driveLocalModelCard(_ model: OnboardingModel) async {
+        check("claude-is-the-default-choice", model.provider == .claude, model.provider.rawValue)
+
+        model.selectProvider(.ollama)
+        check("local-card-selectable", model.provider == .ollama, model.provider.rawValue)
+        check("local-card-blocks-continue-before-a-test", !model.canContinue,
+              String(describing: model.ollama.phase))
+        check("local-card-defaults-to-localhost",
+              model.ollama.baseURLText == OllamaSetupModel.defaultBaseURLText,
+              model.ollama.baseURLText)
+        check("local-card-defaults-to-the-house-model",
+              model.ollama.selectedModel == ollamaTag, model.ollama.selectedModel)
+
+        // A bad address must be refused before anything is asked (NFR-4).
+        model.ollamaURLEdited("http://198.51.100.7:11434")
+        await model.testOllama()
+        check("plaintext-to-another-host-is-refused",
+              model.ollama.phase == .failed(.badURL), String(describing: model.ollama.phase))
+        model.ollamaURLEdited(OllamaSetupModel.defaultBaseURLText)
+
+        // Refresh fills the popup from the (scripted) daemon.
+        await model.refreshOllamaModels()
+        check("refresh-lists-the-daemons-models", !model.ollama.availableModels.isEmpty,
+              model.ollama.availableModels.joined(separator: ", "))
+
+        await model.testOllama()
+        check("test-connection-succeeds", model.ollama.isConnected,
+              String(describing: model.ollama.phase))
+        check("status-names-the-model",
+              model.ollama.statusMessage.contains(ollamaTag), model.ollama.statusMessage)
+        check("continue-unlocks-after-the-test", model.canContinue)
+        check("no-key-was-needed", model.keyPhase == .idle, String(describing: model.keyPhase))
+
+        // Going back to Claude drops the local verdict, so Continue does not
+        // imply a connection the user has moved away from.
+        model.selectProvider(.claude)
+        check("claude-card-restores-the-key-flow", !model.isConnected,
+              String(describing: model.status))
+        model.selectProvider(.ollama)
+        check("returning-keeps-the-local-verdict", model.isConnected)
+
+        model.advance()
+        check("advanced-to-step-3", model.step == .orientation, model.step.label)
     }
 
     private static func connect(_ model: OnboardingModel, key: String) async -> Bool {
@@ -131,7 +202,7 @@ enum OnboardingSmokeCheck {
         Task { @MainActor in
             await settle(seconds: 1.2)
             switch name {
-            case "onboarding2": await runRelaunchPhase()
+            case "onboarding2", "onboarding-ollama2": await runRelaunchPhase()
             default: await runPostLaunchPhase()
             }
         }
@@ -155,7 +226,17 @@ enum OnboardingSmokeCheck {
                   AppSettings.notesRoot.path)
         }
 
-        if phase == "onboardingskip" {
+        if isOllamaPhase {
+            // FR-6.5: a working local provider is not a skipped connection, so
+            // the gentle prompt has nothing to offer.
+            check("provider-preference-is-local", AppSettings.core.aiProvider == .ollama,
+                  AppSettings.core.aiProvider.rawValue)
+            check("no-gentle-prompt-under-a-local-provider",
+                  !ConnectAIPromptModel.shared.isVisible)
+            let probe = await model.organize?.providerKindProbe()
+            check("organizer-resolved-the-local-provider", probe?.kind == .ollama,
+                  probe?.kind.rawValue ?? "no organizer")
+        } else if phase == "onboardingskip" {
             // FR-7.1's persistent, gentle prompt.
             let prompt = ConnectAIPromptModel.shared
             check("gentle-prompt-visible", prompt.isVisible)
@@ -186,6 +267,12 @@ enum OnboardingSmokeCheck {
         check("gate-did-not-run", !OnboardingPresenter.didRunThisLaunch)
         check("no-onboarding-window", OnboardingPresenter.window == nil)
         check("completed-persisted", AppSettings.core.onboardingCompleted)
+        if isOllamaPhase {
+            check("provider-persisted", AppSettings.core.aiProvider == .ollama,
+                  AppSettings.core.aiProvider.rawValue)
+            check("local-model-persisted", AppSettings.core.ollamaModel.id == ollamaTag,
+                  AppSettings.core.ollamaModel.id)
+        }
 
         let model = AppModel.shared
         _ = await poll(seconds: 10) { model.isLoaded }

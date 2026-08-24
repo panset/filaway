@@ -55,6 +55,7 @@ enum SmokeDriver {
             case "organize": await runOrganizePhase(mode: "ask")
             case "organize-auto": await runOrganizePhase(mode: "auto")
             case "organize-offline": await runOrganizePhase(mode: "offline")
+            case "organize-ollama": await runOrganizePhase(mode: "ollama")
             case "2": await runRelaunchPhase()
             default: await runCapturePhase()
             }

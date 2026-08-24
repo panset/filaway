@@ -348,7 +348,38 @@ that moment on, so nothing has to wait and nothing has to be rebuilt.
 | `maxTokens` | 4 096 | a truncated plan is unusable |
 | `thinking` | adaptive | the filing decision is the hard part |
 | `effort` | `low` | plans are short; the user pays (FR-6.2) |
-| `timeout` | 60 s | `AIPurpose.organize` |
+| `timeout` | 60 s Claude / 180 s Ollama | `providerKind.timeout(for:)` (ADR-069) |
+
+### Which provider (FR-6.5, P2-03)
+
+The organizer holds a provider *object*, so "which backend" is not a per-request
+lookup the way the Claude key is. Two things follow.
+
+**Resolution order is `FILAWAY_AI_PROVIDER` → `CoreSettings.aiProvider` →
+Claude**, written once in `CoreOrganizeSettings.providerKind` and mirrored
+exactly by `SemanticSearchCoordinator.resolvedKind(_:)` — ⌘K and the organizer
+must never end up on different backends. The environment is first so a bench
+run or a smoke phase can pin one without writing the user's preferences. It is
+a *different axis* from `FILAWAY_AI_MODE`, which picks the harness: a replayed
+fixture is served whichever backend recorded it (ADR-067), and
+`FILAWAY_AI_FAIL` short-cuts both.
+
+**The rebuild is live.** `.aiProvider`, `.ollamaBaseURL` and `.ollamaModel` push
+through the same `AppSettings.observe(_:)` subscription mode and model already
+use, and `OrganizeCoordinator.providerChanged()` builds a new provider and hands
+it to the running actor with `Organizer.setProvider(_:)`. Requests already in
+flight keep the provider they started with; the next one uses the new one.
+`OrganizerSettings` goes with it, because the model *and* the budget move with
+the backend. On a live Ollama launch or switch, one fire-and-forget warm-up
+(`OllamaProvider.warmUp()`) preloads the model so the first answer card is not
+charged for a cold load.
+
+Probe what the actors actually hold with
+`OrganizeCoordinator.providerKindProbe()` and
+`SemanticSearchCoordinator.providerKindProbe()` — both read the actor, not the
+preference. `Features/Organize/ProviderWiringSmokeCheck.swift` is the
+`settings-wiring` assertion built on them, and the gated `organize-ollama` smoke
+phase runs the whole session against a real local model.
 
 ---
 

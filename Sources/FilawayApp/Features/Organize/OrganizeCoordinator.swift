@@ -71,6 +71,13 @@ final class OrganizeCoordinator: ObservableObject {
     @Published private(set) var queuedSessionCount = 0
     /// `true` once the pipeline is running. Nothing below is non-nil before it.
     @Published private(set) var isReady = false
+    /// The last content-free reason a session produced no card (P2-03).
+    ///
+    /// `OrganizeFailure.label` and `OrganizeSkipReason` are both content-free by
+    /// construction (NFR-4), which is what lets the `organize-ollama` smoke
+    /// phase — the one that asks a *real* local model for a real plan — say why
+    /// nothing arrived instead of timing out with no explanation.
+    @Published private(set) var lastFailureReason: String?
 
     /// How long an auto-mode card stays up before it fades (FR-4.2's
     /// non-blocking summary). Undo stays reachable in the Activity window.
@@ -604,12 +611,16 @@ final class OrganizeCoordinator: ObservableObject {
 
         case let .failed(_, failure):
             log.error("organize failed: \(failure.label, privacy: .public)")
+            lastFailureReason = failure.label
             if case let .provider(error) = failure {
                 status = AIHealth.status(for: error)
             }
             await refreshQueueCount()
 
-        case .cancelled, .skipped:
+        case let .skipped(_, reason):
+            lastFailureReason = "skipped: \(reason)"
+
+        case .cancelled:
             break
         }
     }

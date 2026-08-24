@@ -2562,3 +2562,91 @@ a fixture says which wire it is in, so one fixture directory can hold both.
   `FILAWAY_AI_FIXTURES` directory, and check `git diff` before committing. If
   P2 later wants both at once, the key gains the provider — which changes every
   filename, so it is a deliberate migration, not a drive-by.
+
+---
+
+## ADR-069 — Provider resolution order, and the live rebuild
+
+**Context.** P2-01 gave Filaway a second backend and P2-02 gave it a preference.
+Neither answered the question the app layer has to: *at this instant, which
+provider object does the `Organizer` hold, and which does ⌘K's `AnswerExtractor`
+hold?* Both were built once, at launch, from a hard-wired `.claude`, so the
+preference was inert — and the two objects could have disagreed, which would
+mean organizing against Claude while answering against a local model.
+
+There are also two *independent* axes that had been conflated in one variable's
+worth of thinking. `FILAWAY_AI_MODE` picks the **harness** (`live` / `record` /
+`replay`, ADR-041); the provider kind picks the **backend**. A replayed fixture
+is served whichever backend recorded it (ADR-067), and `FILAWAY_AI_FAIL`
+short-cuts both.
+
+**Decision.**
+
+1. **Resolution order is `FILAWAY_AI_PROVIDER` → `CoreSettings.aiProvider` →
+   Claude**, in exactly one expression, reached from exactly two places:
+   `CoreOrganizeSettings.providerKind` and
+   `SemanticSearchCoordinator.resolvedKind(_:)`. The environment is first so a
+   bench run, a smoke phase or a developer can pin a backend without writing the
+   user's preferences; Claude is last so nothing changes for a user who never
+   touches it.
+2. **`.aiProvider`, `.ollamaBaseURL` and `.ollamaModel` rebuild the provider
+   live**, through the same `AppSettings.observe(_:)` subscription mode and
+   model already use (FR-8.1). `Organizer.setProvider(_:)` swaps the backend on
+   the running actor — requests in flight keep the provider they started with,
+   because a half-finished exchange on one wire format decoded by another is not
+   a thing anybody wants to debug — and the `AnswerExtractor` is rebuilt
+   wholesale, since its provider is `let`.
+3. **The request budget travels with the kind**, not with the purpose:
+   `OrganizerSettings.providerKind` feeds `OrganizeRequestBuilder`
+   (60 s Claude, 180 s Ollama) and `AnswerExtractor.Configuration.providerKind`
+   feeds the answer request (8 s either way today). NFR-1's **5 s answer race is
+   unchanged for both** — it is enforced inside the actor, with the local
+   heuristic behind it (ADR-054), so a slow local model degrades to an offline
+   card rather than to a slow ⌘K.
+4. **A live Ollama launch fires one warm-up**, `POST /api/chat` with empty
+   `messages` and `keep_alive` — Ollama's documented preload. Fire-and-forget,
+   never awaited, skipped under replay and under `FILAWAY_AI_FAIL`. Without it
+   the first answer card after a launch pays the cold model load and loses the
+   race for no reason but timing.
+5. **`AnswerSource.claude` is now `.model`.** The card's tint means "a model
+   answered", and under FR-6.5 that model may be one running on this Mac. The
+   old raw value deliberately does not decode: nothing persists it, and a silent
+   alias would outlive the reason for it.
+
+**Consequences.**
+- The key manager is bypassed under Ollama, in two places. `OrganizeCoordinator`
+  stops folding `AIConnectionManager`'s status into the pill, and
+  `SemanticSearchCoordinator` stops gating the answer step on it. There is no
+  key to be missing; a daemon that is down surfaces as `.network` from the
+  request itself, which is what the pill should say. Switching *back* to Claude
+  re-subscribes.
+- FR-7.1's gentle "connect your AI" row now asks "does this Mac have an AI
+  Filaway can use?" rather than "is there a stored key". It reads
+  `aiProvider` plus the pill's status, pushed through a new
+  `OrganizeCoordinator.onStatusChanged` seam.
+- The fixture key is unaffected: a timeout is not part of *what was asked*
+  (ADR-067), so `claude.fixtureKey == ollama.fixtureKey` and no committed
+  recording is orphaned. `ProviderWiringTests` pins that.
+- Two probes exist for the smoke suite —
+  `OrganizeCoordinator.providerKindProbe()` and the same on
+  `SemanticSearchCoordinator` — and both read the **actor**, not the preference
+  they were just asked about. `ProviderWiringSmokeCheck` is the assertion.
+
+### The onboarding constraints this hit
+
+Figure 3's local card is a real choice now (a radio per card, an address field,
+a model popup off `GET /api/tags`, Test connection), and it is still plain
+AppKit for the reasons ADR-037 and ADR-049 record — nothing about a second
+provider makes an `NSHostingView` safe in a pre-scene window. Two things the
+work confirmed:
+
+- **The state machine had to leave the app target.** The app has no test target
+  (plan §8), so a card's logic living in `OnboardingWindowController` is
+  reachable only from a smoke phase. `OllamaSetupModel` is therefore in Core,
+  `@MainActor`, behind an `OllamaValidating` seam — eight unit tests, no window,
+  no daemon.
+- **Continue gates on the test for the local card only.** Claude's card has
+  always let Continue through (a key can be added later in Settings), but an
+  unreachable daemon is a setup problem the user can fix *here*, in seconds, and
+  a status line that names `ollama serve` or `ollama pull <tag>` is what makes
+  that true. "Skip for now" is untouched: FR-7.1's flow never blocks.
