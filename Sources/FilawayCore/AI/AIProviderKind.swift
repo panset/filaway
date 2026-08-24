@@ -53,6 +53,28 @@ public enum AIProviderKind: String, Sendable, Codable, CaseIterable {
         }
     }
 
+    /// The model this backend organizes with when nothing overrides it.
+    ///
+    /// Settings has the same switch (`AppSettings.effectiveOrganizeModel`), but
+    /// the goldens, the benchmark and the recording harness all need it without
+    /// a `UserDefaults` behind them — and a fixture key is a hash that includes
+    /// the model id, so getting it wrong silently records over another
+    /// provider's fixture (ADR-067).
+    public var defaultOrganizeModel: AIModel {
+        switch self {
+        case .claude: return .defaultOrganize
+        case .ollama: return .defaultOllama
+        }
+    }
+
+    /// The model this backend extracts answer cards with.
+    public var defaultSearchModel: AIModel {
+        switch self {
+        case .claude: return .defaultSearch
+        case .ollama: return .defaultOllama
+        }
+    }
+
     /// The kind named by `FILAWAY_AI_PROVIDER`, or `nil` when it is unset or
     /// unrecognised — `nil` means "whatever the caller's default is", never a
     /// silent switch to the wrong backend.
