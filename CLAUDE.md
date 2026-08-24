@@ -92,6 +92,17 @@ make smoke          # or: Tools/smoke.sh [--keep]
 # -> === smoke phase: onboarding2  relaunch: no flow, same library
 # -> === smoke phase: onboardingskip  "Skip for now" -> the gentle sidebar
 #                                  prompt is visible and dismissable
+# -> === smoke phase: onboarding-ollama  P2-03: Figure 3's local-model card is
+#                                  selectable, Test connection succeeds against
+#                                  an injected validator (no daemon), Continue
+#                                  unlocks, Finish writes ai.provider /
+#                                  ai.ollama.baseURL / ai.ollama.model
+# -> === smoke phase: onboarding-ollama2  relaunch: the provider persisted
+# -> === smoke phase: organize-ollama === GATED. The organize session against a
+#                                  *live* local model: only with
+#                                  FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
+#                                  localhost:11434, else "SKIPPED (no Ollama)"
+#                                  and not a failure
 # -> === smoke phase: semantic === M3-06: ⌘K Ask on a corpus with fixed mtimes:
 #                                  ⏎ -> answer card, Copy -> pasteboard, ⏎ ->
 #                                  the note scrolled to the chunk, the temporal
@@ -134,8 +145,10 @@ and the Activity journal start empty); `1` and `2` share one so the relaunch has
 state to restore. The `semantic` corpus is seeded with **fixed mtimes**, so
 FR-5.3's "two days ago" has exactly one note to find. Every phase runs with `FILAWAY_AI_MODE=replay` and
 `FILAWAY_AI_FIXTURES=Tests/Fixtures/ai-recordings`, so no phase can reach the
-network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. A single
-phase directly:
+network (ADR-035); `organize-offline` adds `FILAWAY_AI_FAIL=network`. The one exception is the
+gated `organize-ollama` phase, which runs `FILAWAY_AI_MODE=live
+FILAWAY_AI_PROVIDER=ollama` against the local daemon — the harness axis and the
+backend axis are independent (ADR-069). A single phase directly:
 
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway

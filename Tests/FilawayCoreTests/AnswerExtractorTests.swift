@@ -47,7 +47,9 @@ struct AnswerRequestTests {
     func purpose() throws {
         let request = try AnswerGolden.request(for: AnswerGolden.scenario("no-answer"))
         #expect(request.purpose == .search)
-        #expect(request.timeout == 5)
+        // The *provider's* budget is the kind's (P2-03); NFR-1's 5 s answer
+        // race is enforced inside the actor, not on the wire (ADR-069).
+        #expect(request.timeout == AIProviderKind.claude.timeout(for: .search))
     }
 
     @Test("the tool is strict and closed")
@@ -308,7 +310,7 @@ struct AnswerGoldenTests {
         let scenario = AnswerGolden.scenario("curl-code-card")
         let answer = await extractor.extract(query: scenario.query, results: scenario.results)
 
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
         #expect(answer.confidence == .high)
         #expect(answer.promptVersion == .answer)
         #expect(answer.model == .haiku45)
@@ -332,7 +334,7 @@ struct AnswerGoldenTests {
         #expect(scenario.results.strippedQuery == "the thing I edited about auth")
 
         let answer = await extractor.extract(query: scenario.query, results: scenario.results)
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
         let card = try #require(answer.card)
         #expect(!card.isCode, "prose answers are not code blocks")
         #expect(card.noteID == AnswerGolden.authID)
@@ -373,7 +375,7 @@ struct AnswerGoldenTests {
         let card = try #require(answer.card)
         #expect(card.snippetText == AnswerGolden.curlCommand, "the chunk's own command, not the model's")
         #expect(!card.snippetText.contains("--fail"))
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
     }
 
     @Test("no committed answer fixture carries excluded text (FR-4.5)")
@@ -407,7 +409,9 @@ struct AnswerFallbackTests {
         let answer = await extractor.extract(query: Self.scenario.query, results: Self.scenario.results)
         let elapsed = Date().timeIntervalSince(started)
 
-        #expect(elapsed < 2, "the 5 s call must not decide how long the search takes")
+        // The hung provider takes ≥ 5 s; anything well under that proves the race
+        // decided. 4 s (not 2) tolerates a saturated parallel test run (M4-08).
+        #expect(elapsed < 4, "the 5 s call must not decide how long the search takes")
         #expect(answer.source == .localHeuristic)
         #expect(answer.unavailable == .timedOut)
         let card = try #require(answer.card)

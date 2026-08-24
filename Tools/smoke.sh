@@ -38,6 +38,13 @@
 #              opens the library at the chosen folder
 #   onboarding2  relaunch: no flow, same library
 #   onboardingskip  the "Skip for now" path: the gentle sidebar prompt appears
+#   onboarding-ollama  P2-03: Figure 3's local-model card — selected, tested
+#              against an injected validator (no daemon), Continue unlocks, and
+#              Finish writes ai.provider / ai.ollama.baseURL / ai.ollama.model
+#   onboarding-ollama2  relaunch: the provider preference persisted
+#   organize-ollama  GATED. The organize session against a *live* local model.
+#              Runs only with FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
+#              localhost:11434; otherwise it prints SKIPPED and costs nothing.
 #
 # Exits non-zero on any failure. Never leaves the app running.
 #
@@ -96,6 +103,7 @@ PASTE_ROOT="$WORK/PasteNotes"
 # FILAWAY_NOTES_ROOT — the point of the phase is that the bookmark decides.
 ONBOARD_ROOT="$WORK/OnboardChosen"
 ONBOARD_SKIP_ROOT="$WORK/OnboardSkipChosen"
+ONBOARD_OLLAMA_ROOT="$WORK/OnboardOllamaChosen"
 SUPPORT="$WORK/Support"
 SUITE="com.tejaspanse.filaway.smoke.$STAMP"
 # The settings phases need their own defaults domain: they write preferences the
@@ -112,6 +120,9 @@ A11Y_SUITE="com.tejaspanse.filaway.smoke.a11y.$STAMP"
 ORGANIZE_ROOT="$WORK/OrganizeNotes"
 ORGANIZE_AUTO_ROOT="$WORK/OrganizeAutoNotes"
 ORGANIZE_OFFLINE_ROOT="$WORK/OrganizeOfflineNotes"
+# P2-03's gated live phase gets its own everything, because it is the one phase
+# that talks to a real model and must not inherit a replayed baseline.
+ORGANIZE_OLLAMA_ROOT="$WORK/OrganizeOllamaNotes"
 
 # Committed replay fixtures — `FILAWAY_AI_MODE=replay` reads them through
 # `AIRecordingStore.fromEnvironment()`. No key, no network, no cost.
@@ -121,10 +132,13 @@ FIXTURES="$PWD/Tests/Fixtures/ai-recordings"
 # variant needs one the connected variant has not already answered.
 ONBOARD_SUITE="com.tejaspanse.filaway.smoke.onboard.$STAMP"
 ONBOARD_SKIP_SUITE="com.tejaspanse.filaway.smoke.onboardskip.$STAMP"
+ONBOARD_OLLAMA_SUITE="com.tejaspanse.filaway.smoke.onboardollama.$STAMP"
+OLLAMA_SUITE="com.tejaspanse.filaway.smoke.ollama.$STAMP"
 mkdir -p "$ROOT" "$EDITOR_ROOT" "$SEARCH_ROOT" "$SEMANTIC_ROOT" "$KILL_ROOT" \
          "$SETTINGS_ROOT" "$PASTE_ROOT" "$WIRING_ROOT" "$A11Y_ROOT" \
          "$ORGANIZE_ROOT" "$ORGANIZE_AUTO_ROOT" "$ORGANIZE_OFFLINE_ROOT" \
-         "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT"
+         "$ORGANIZE_OLLAMA_ROOT" \
+         "$ONBOARD_ROOT" "$ONBOARD_SKIP_ROOT" "$ONBOARD_OLLAMA_ROOT"
 
 # Three notes on disk before the app ever runs, so the search phase also proves
 # a cold launch indexes a library Filaway has never seen. Titles and the tail
@@ -219,7 +233,8 @@ cleanup() {
     kill -9 "$app_pid" 2>/dev/null
   fi
   for suite in "$SUITE" "$SETTINGS_SUITE" "$WIRING_SUITE" "$A11Y_SUITE" \
-               "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE"; do
+               "$ONBOARD_SUITE" "$ONBOARD_SKIP_SUITE" "$ONBOARD_OLLAMA_SUITE" \
+               "$OLLAMA_SUITE"; do
     defaults delete "$suite" >/dev/null 2>&1
     rm -f "$HOME/Library/Preferences/$suite.plist"
   done
@@ -259,6 +274,16 @@ run_phase() {
       root=""; suite="$ONBOARD_SUITE"; onboard_root="$ONBOARD_ROOT" ;;
     onboardingskip)
       root=""; suite="$ONBOARD_SKIP_SUITE"; onboard_root="$ONBOARD_SKIP_ROOT" ;;
+    onboarding-ollama|onboarding-ollama2)
+      root=""; suite="$ONBOARD_OLLAMA_SUITE"; onboard_root="$ONBOARD_OLLAMA_ROOT"
+      support="$WORK/SupportOnboardOllama" ;;
+    # P2-03: the one phase that is not replayed. `FILAWAY_AI_PROVIDER=ollama`
+    # pins the backend regardless of the preference (ADR-069), and the caller
+    # has already proved the daemon answers.
+    organize-ollama)
+      root="$ORGANIZE_OLLAMA_ROOT"; suite="$OLLAMA_SUITE"
+      support="$WORK/SupportOrganizeOllama"
+      ai_mode="live"; ai_provider="ollama" ;;
   esac
   echo
   echo "=== smoke phase: $phase ==============================================="
@@ -267,7 +292,8 @@ run_phase() {
   FILAWAY_ONBOARD_ROOT="$onboard_root" \
   FILAWAY_SUPPORT_ROOT="$support" \
   FILAWAY_DEFAULTS_SUITE="$suite" \
-  FILAWAY_AI_MODE="replay" \
+  FILAWAY_AI_MODE="$ai_mode" \
+  FILAWAY_AI_PROVIDER="$ai_provider" \
   FILAWAY_AI_FIXTURES="$FIXTURES" \
   FILAWAY_AI_FAIL="$fail" \
   FILAWAY_SMOKE_SHOTS="$shots" \
@@ -352,9 +378,32 @@ run_phase paste 90
 run_phase onboarding 120
 run_phase onboarding2 60
 run_phase onboardingskip 120
+# P2-03: Figure 3's local-model card. No daemon — `OnboardingModel` injects a
+# scripted validator for every smoke run, so this runs on any machine.
+run_phase onboarding-ollama 120
+run_phase onboarding-ollama2 60
 # Last: the embedder compiles the bundled Core ML package on first use, which
 # can take a few seconds on a cold Application Support.
 run_phase semantic 240
+
+# P2-03, gated: the organize session against a **live** local model. It is opt
+# in twice over — the flag says "spend the minutes", and the daemon has to
+# actually answer — because it costs a real generation (tens of seconds on an
+# 8B model) and no CI runner has Ollama on it. Skipping is not a failure.
+run_ollama_phase() {
+  if [ "${FILAWAY_SMOKE_OLLAMA:-0}" != "1" ]; then
+    echo
+    echo "=== smoke phase: organize-ollama === SKIPPED (set FILAWAY_SMOKE_OLLAMA=1)"
+    return
+  fi
+  if ! curl -s -m 2 "${FILAWAY_SMOKE_OLLAMA_URL:-http://localhost:11434}/api/tags" >/dev/null 2>&1; then
+    echo
+    echo "=== smoke phase: organize-ollama === SKIPPED (no Ollama)"
+    return
+  fi
+  run_phase organize-ollama 240
+}
+run_ollama_phase
 
 # M4-06: AppKit's "reentrant operation in its NSTableView delegate", which it
 # says "will become an assert in the future". It fires **once per population of

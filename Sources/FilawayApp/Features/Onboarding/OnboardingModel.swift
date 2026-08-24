@@ -54,6 +54,13 @@ final class OnboardingModel {
     private(set) var keyPhase: KeyPhase = .idle { didSet { changed() } }
     private(set) var status: AIStatus = .notConfigured { didSet { changed() } }
     private(set) var isFinished = false
+    /// Which card of Figure 3's step 2 is selected (FR-6.5). Claude by default:
+    /// a first-run user who has never heard of Ollama should not have to
+    /// un-choose it.
+    private(set) var provider: AIProviderKind = .claude { didSet { changed() } }
+    /// The local-model card's own state machine, in Core so it is unit-tested
+    /// (``OllamaSetupModel``).
+    let ollama: OllamaSetupModel
 
     /// Called once, when the flow ends. The presenter uses it to stop the modal.
     var onFinish: (() -> Void)?
@@ -70,12 +77,15 @@ final class OnboardingModel {
     init(
         settings: CoreSettings = AppSettings.core,
         connection: AIConnectionManager? = nil,
-        notesRoot: URL = AppSettings.notesRoot
+        notesRoot: URL = AppSettings.notesRoot,
+        ollamaValidator: (any OllamaValidating)? = nil
     ) {
         self.settings = settings
         self.connection = connection ?? OnboardingModel.makeConnection()
         self.notesRoot = notesRoot
+        ollama = OllamaSetupModel(validator: ollamaValidator ?? OnboardingModel.makeOllamaValidator())
         refreshFolderSummary()
+        ollama.onChange = { [weak self] in self?.changed() }
     }
 
     /// A smoke run must never touch the real Keychain — an unsigned bundle can
@@ -84,6 +94,25 @@ final class OnboardingModel {
     /// and the library does not exist yet when this flow runs.
     private static func makeConnection() -> AIConnectionManager {
         AppSettings.isSmokeRun ? AIConnectionManager(secrets: InMemorySecretStore()) : AIConnectionManager()
+    }
+
+    /// A smoke run must never reach a daemon either — the `onboarding-ollama`
+    /// phase asserts the *flow*, and a machine with no Ollama installed would
+    /// otherwise fail it for the wrong reason. `FILAWAY_SMOKE_OLLAMA_MODELS`
+    /// scripts the list, and an empty value scripts a dead daemon.
+    private static func makeOllamaValidator() -> any OllamaValidating {
+        guard AppSettings.isSmokeRun else { return LiveOllamaValidator() }
+        let raw = ProcessInfo.processInfo.environment["FILAWAY_SMOKE_OLLAMA_MODELS"]
+        let tags = (raw ?? AIModel.defaultOllama.id)
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if tags.isEmpty {
+            return StubOllamaValidator(
+                models: [], failure: .network(code: -1004, description: "smoke: no daemon")
+            )
+        }
+        return StubOllamaValidator(models: tags)
     }
 
     /// `true` when the launch gate should show this flow at all.
@@ -174,6 +203,20 @@ final class OnboardingModel {
         keyPhase = .idle
     }
 
+    /// Figure 3's two cards. Choosing one drops the other's verdict, so the
+    /// footer never enables Continue on a connection the user has moved away
+    /// from.
+    func selectProvider(_ kind: AIProviderKind) {
+        guard kind != provider else { return }
+        provider = kind
+    }
+
+    /// The local card's field.
+    func ollamaURLEdited(_ text: String) { ollama.urlEdited(text) }
+    func selectOllamaModel(_ tag: String) { ollama.selectModel(tag) }
+    func testOllama() async { await ollama.test() }
+    func refreshOllamaModels() async { await ollama.refreshModels() }
+
     var canValidateKey: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && keyPhase != .validating
     }
@@ -204,8 +247,24 @@ final class OnboardingModel {
         advance()
     }
 
-    /// `true` once a key has validated in this flow.
-    var isConnected: Bool { status == .connected }
+    /// `true` once *this flow's* chosen provider is known to work — a validated
+    /// key for Claude, a daemon that answered and has the tag for Ollama.
+    var isConnected: Bool {
+        switch provider {
+        case .claude: return status == .connected
+        case .ollama: return ollama.isConnected
+        }
+    }
+
+    /// FR-7.1: step 2 never blocks — "Skip for now" is always there — but
+    /// Continue must not imply a connection that was never made. Claude's card
+    /// has always let Continue through (a key can be added later in Settings);
+    /// the local card gates on the test, because an unreachable daemon is a
+    /// setup problem the user can fix *here*, in seconds.
+    var canContinue: Bool {
+        guard step == .connectAI, provider == .ollama else { return true }
+        return ollama.isConnected
+    }
 
     // MARK: - Navigation
 
@@ -237,9 +296,18 @@ final class OnboardingModel {
         }
         AppSettings.setNotesRoot(notesRoot)
 
-        // A key that never validated must not leave "skipped" false, or the
-        // gentle prompt would never appear.
-        if status != .connected { settings.aiConnectionSkipped = true }
+        // FR-6.5: the chosen backend, and where the local daemon is.
+        settings.aiProvider = provider
+        if let configuration = ollama.configuration {
+            settings.ollamaBaseURL = configuration.baseURL
+            settings.ollamaModel = configuration.model
+        }
+
+        // A connection that never validated must not leave "skipped" false, or
+        // the gentle prompt would never appear. Ollama counts: a daemon that
+        // answered and has the model is a working AI with no key at all.
+        if isConnected { settings.aiConnectionSkipped = false }
+        else { settings.aiConnectionSkipped = true }
 
         settings.onboardingCompleted = true
         settings.flush()

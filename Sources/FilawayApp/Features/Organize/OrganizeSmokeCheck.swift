@@ -14,6 +14,7 @@ import FilawayCore
 /// | `organize` | ask mode: type → session ends → the Figure 2a card appears with the plan's summary → **Accept** → the bytes move on disk → Activity has the event with a diff → **Undo** restores every byte |
 /// | `organize-auto` | auto mode: the same session applies itself and the card offers Undo |
 /// | `organize-offline` | the provider fails with a network error: nothing changes, the session is queued durably, the pill says so, and capture still works |
+/// | `organize-ollama` | **gated** (P2-03): the same session against a *live* local model. `Tools/smoke.sh` runs it only with `FILAWAY_SMOKE_OLLAMA=1` and a daemon answering `/api/tags`; everywhere else it prints SKIPPED and is not a failure. |
 ///
 /// ## Why the corpus is spelled out here
 ///
@@ -197,6 +198,7 @@ enum OrganizeSmokeCheck {
         switch mode {
         case "offline": return await runOffline(organize: organize, store: store)
         case "auto": return await runAuto(model: model, organize: organize, store: store)
+        case "ollama": return await runLive(model: model, organize: organize, store: store)
         default: return await runAsk(model: model, organize: organize, store: store)
         }
     }
@@ -283,6 +285,81 @@ enum OrganizeSmokeCheck {
         }
         check("card-undo-restored-the-session-note", restored)
         return failures
+    }
+
+    // MARK: - A live local model (FR-6.5, P2-03)
+
+    /// The same session as `organize`, but nothing is replayed: an 8B model on
+    /// this machine is asked for a real plan and has to produce one the
+    /// validator accepts.
+    ///
+    /// What it can and cannot assert is deliberately different from the
+    /// replayed phases. The *summary* is the model's own words and the target
+    /// note is the model's own choice, so neither is pinned. What is pinned is
+    /// the contract: a card arrives, Accept moves bytes on disk, Activity
+    /// records the event, and the event names the model that produced it.
+    ///
+    /// A model that returns nothing usable is a **finding**, not a flake: the
+    /// check reports the validator's own content-free reason (NFR-4) so the
+    /// prompt or the model can be looked at.
+    private static func runLive(model: AppModel, organize: OrganizeCoordinator, store: NoteStore) async -> Int {
+        let expectedModel = ProcessInfo.processInfo.environment["FILAWAY_SMOKE_OLLAMA_MODEL"]
+            ?? AIModel.defaultOllama.id
+        let probe = await organize.providerKindProbe()
+        check("provider-is-the-local-daemon", probe.kind == .ollama, probe.kind.rawValue)
+        check("provider-object-is-ollama", probe.identifier == "ollama", probe.identifier)
+        check("model-is-the-local-tag", probe.model.id == expectedModel, probe.model.id)
+        let budget = await organize.organizerSettingsProbe()?.requestTimeout
+        check("organize-budget-is-the-local-one", budget == 180, budget.map { "\($0)s" } ?? "nil")
+
+        // A cold model load plus a plan-shaped generation is tens of seconds on
+        // a laptop; the phase's own watchdog is 240 s.
+        let started = Date()
+        let appeared = await poll(seconds: 190) { !organize.cards.isEmpty }
+        let elapsed = Int(Date().timeIntervalSince(started))
+        guard appeared, let card = organize.cards.first else {
+            check("live-card-appeared", false,
+                  "after \(elapsed)s — status=\(organize.status.label) "
+                      + "reason=\(organize.lastFailureReason ?? "none")")
+            return failures
+        }
+        check("live-card-appeared", true, "\(elapsed)s")
+        check("live-card-is-a-question", card.isProposal && card.title == "Organize this session?", card.title)
+        check("live-card-has-a-summary", !card.summary.isEmpty, card.summary)
+        guard let plan = card.plan, !plan.actions.isEmpty else {
+            check("live-plan-has-an-action", false,
+                  "the model returned an empty plan — \(organize.lastFailureReason ?? "no reason given")")
+            return failures
+        }
+        check("live-plan-has-an-action", true, "\(plan.actions.count) actions")
+
+        let before = await tree(store)
+        organize.accept(card)
+        let applied = await poll(seconds: 60) { await tree(store) != before }
+        check("live-accept-moved-bytes", applied,
+              applied ? "" : "nothing on disk changed — \(organize.lastFailureReason ?? "no reason given")")
+
+        // FR-4.3 / FR-6.6: the row has to say which model did it, or a mixed
+        // Claude/Ollama history is unreadable.
+        guard let activity = organize.activity else {
+            check("live-activity-log", false)
+            return failures
+        }
+        let events = (try? await activity.events(limit: 5)) ?? []
+        check("live-activity-has-the-event", events.first?.kind == .applied, "\(events.count) events")
+        let recorded = events.first?.plan?.model ?? events.first?.model
+        check("live-activity-names-the-model", recorded == expectedModel, recorded ?? "nil")
+        return failures
+    }
+
+    /// A content-free fingerprint of the corpus, so "something moved" needs no
+    /// guess about *what* the model chose to do.
+    private static func tree(_ store: NoteStore) async -> [String: Int] {
+        var sizes: [String: Int] = [:]
+        for seed in seeds {
+            sizes[seed.path] = ((try? await store.read(seed.path).body) ?? "").utf8.count
+        }
+        return sizes
     }
 
     // MARK: - Offline (FR-6.4, M2-09)

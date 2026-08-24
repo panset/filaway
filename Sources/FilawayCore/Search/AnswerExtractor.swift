@@ -7,7 +7,7 @@ import Foundation
 /// let extractor = AnswerExtractor(provider: provider, ledger: ledger)
 /// let answer = await extractor.extract(query: "curl command to fetch documents", results: results)
 /// answer.card?.snippetText     // the command, verbatim
-/// answer.source                // .claude | .localHeuristic | .none
+/// answer.source                // .model | .localHeuristic | .none
 /// ```
 ///
 /// Three properties hold no matter what happens:
@@ -29,6 +29,10 @@ public actor AnswerExtractor {
     public struct Configuration: Sendable {
         /// `effectiveSearchModel`; the house default is Haiku 4.5 (plan §1).
         public var model: AIModel
+        /// Which backend answers (FR-6.5, P2-03). It sets the *request's* own
+        /// budget — ``timeout`` below is the race this actor runs regardless,
+        /// and the local heuristic is what wins when the race is lost.
+        public var providerKind: AIProviderKind
         public var promptVersion: PromptVersion
         /// A card is a few dozen tokens; 600 is room for a long snippet and a
         /// full ranking, and a hard stop on a model that decides to essay.
@@ -43,6 +47,7 @@ public actor AnswerExtractor {
 
         public init(
             model: AIModel = .defaultSearch,
+            providerKind: AIProviderKind = .claude,
             promptVersion: PromptVersion = .answer,
             maxTokens: Int = 600,
             timeout: TimeInterval = 5,
@@ -50,6 +55,7 @@ public actor AnswerExtractor {
             heuristic: AnswerHeuristic = AnswerHeuristic()
         ) {
             self.model = model
+            self.providerKind = providerKind
             self.promptVersion = promptVersion
             self.maxTokens = max(64, maxTokens)
             self.timeout = max(0.1, timeout)
@@ -78,6 +84,10 @@ public actor AnswerExtractor {
 
     /// Settings changed (`effectiveSearchModel`, FR-6.2).
     public func setModel(_ model: AIModel) { configuration.model = model }
+    /// Settings changed provider (FR-6.5). Only the *budget* lives here; the
+    /// provider object itself is `let`, so a kind change rebuilds the extractor.
+    public func setProviderKind(_ kind: AIProviderKind) { configuration.providerKind = kind }
+    public var providerKind: AIProviderKind { configuration.providerKind }
     public func setTimeout(_ timeout: TimeInterval) { configuration.timeout = max(0.1, timeout) }
     public var model: AIModel { configuration.model }
     public nonisolated var providerIdentifier: String { provider.identifier }
@@ -112,7 +122,10 @@ public actor AnswerExtractor {
             // keeps the recorded request body honest.
             thinking: configuration.model.supportsAdaptiveThinking ? .adaptive() : nil,
             effort: configuration.model.supportsEffort ? .low : nil,
-            timeout: configuration.timeout
+            // The provider's own budget, not the race: ``complete`` enforces
+            // ``Configuration/timeout`` here in the actor so a replay or a mock
+            // cannot outrun NFR-1 either (ADR-069).
+            timeout: configuration.providerKind.timeout(for: .search)
         )
     }
 
@@ -233,7 +246,7 @@ public actor AnswerExtractor {
         return AnswerResult(
             card: card,
             rankedNotes: Self.rank(results.notes, by: decoded.rankedChunks, chunks: chunks, card: card),
-            source: card == nil ? .none : .claude,
+            source: card == nil ? .none : .model,
             confidence: card == nil ? .low : decoded.confidence,
             latency: latency,
             unavailable: nil,

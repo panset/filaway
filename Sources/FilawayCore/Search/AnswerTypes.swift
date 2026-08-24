@@ -6,8 +6,10 @@ import Foundation
 /// offline heuristic picked are drawn the same way, but only one of them
 /// requires a working provider, and the panel has to be able to say so.
 public enum AnswerSource: String, Sendable, Hashable, Codable, CaseIterable {
-    /// `answer.v1` picked the chunk and trimmed the snippet.
-    case claude
+    /// `answer.v1` picked the chunk and trimmed the snippet — whichever model
+    /// served it (Claude or a local Ollama model, P2-03). The card's tint means
+    /// "a model answered", not "Anthropic answered".
+    case model
     /// The provider was unreachable, slow, disabled or unconfigured, and the
     /// local heuristic answered instead.
     case localHeuristic
@@ -161,7 +163,7 @@ public struct AnswerResult: Sendable, Equatable {
     /// Set when the Claude step did not run or did not survive — drives the
     /// FR-5.5 notice.
     public let unavailable: SemanticUnavailable?
-    /// The prompt that produced a `.claude` answer (spec §9 versioning).
+    /// The prompt that produced a `.model` answer (spec §9 versioning).
     public let promptVersion: PromptVersion?
     public let model: AIModel?
 

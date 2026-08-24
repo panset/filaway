@@ -64,11 +64,24 @@ final class OrganizeCoordinator: ObservableObject {
 
     // MARK: - Status (FR-6.4, M2-09)
 
-    @Published private(set) var status: AIStatus = .connected
+    @Published private(set) var status: AIStatus = .connected {
+        didSet { if status != oldValue { onStatusChanged?(status) } }
+    }
     /// Sessions waiting for the provider to come back.
     @Published private(set) var queuedSessionCount = 0
     /// `true` once the pipeline is running. Nothing below is non-nil before it.
     @Published private(set) var isReady = false
+    /// The last content-free reason a session produced no card (P2-03).
+    ///
+    /// `OrganizeFailure.label` and `OrganizeSkipReason` are both content-free by
+    /// construction (NFR-4), which is what lets the `organize-ollama` smoke
+    /// phase — the one that asks a *real* local model for a real plan — say why
+    /// nothing arrived instead of timing out with no explanation.
+    @Published private(set) var lastFailureReason: String?
+
+    /// The provider the preference (or `FILAWAY_AI_PROVIDER`) currently names —
+    /// what the toolbar pill words its offline state for ("Ollama offline").
+    var providerKind: AIProviderKind { settingsSource.providerKind }
 
     /// How long an auto-mode card stays up before it fades (FR-4.2's
     /// non-blocking summary). Undo stays reachable in the Activity window.
@@ -104,6 +117,10 @@ final class OrganizeCoordinator: ObservableObject {
     var onBanner: ((String, String) -> Void)?
     /// Clicking the AI status pill. Settings is M2-11's; this is the seam.
     var onOpenAISettings: (() -> Void)?
+    /// The pill moved. FR-7.1's gentle "connect your AI" row listens, so it
+    /// stops offering a connection that is already working — which under
+    /// FR-6.5 may be a local daemon with no key at all (P2-03).
+    var onStatusChanged: ((AIStatus) -> Void)?
 
     // MARK: - Init
 
@@ -158,7 +175,10 @@ final class OrganizeCoordinator: ObservableObject {
             )
             let undoService = UndoService(store: store, activity: activity)
 
-            let provider = try Self.makeProvider()
+            let provider = try Self.makeProvider(
+                kind: settings.providerKind, ollama: settings.ollamaConfiguration
+            )
+            Self.warmUpIfNeeded(kind: settings.providerKind, ollama: settings.ollamaConfiguration)
             let organizer = Organizer(
                 provider: provider,
                 source: OrganizeLibrarySourceLive(store: store),
@@ -214,14 +234,27 @@ final class OrganizeCoordinator: ObservableObject {
         }
     }
 
-    /// `FILAWAY_AI_MODE` picks the provider.
+    /// `FILAWAY_AI_MODE` picks the *harness*; `kind` picks the **backend**.
     ///
     /// The **app** defaults to `live` with the Keychain key where the test
     /// harness defaults to `replay` (`AIMode.current()`): a shipped build must
     /// never quietly serve fixtures, and the fixture directory only exists in
     /// the repository. `replay` therefore also needs `FILAWAY_AI_FIXTURES` —
     /// which is exactly what `Tools/smoke.sh` sets.
+    ///
+    /// The two axes are independent (ADR-069): `replay` serves a committed
+    /// fixture whichever backend recorded it, and `FILAWAY_AI_FAIL` short-cuts
+    /// both. `kind` only decides what a *live* or *recording* request talks to.
+    ///
+    /// - Parameters:
+    ///   - kind: resolved by ``OrganizeSettingsSource/providerKind`` —
+    ///     `FILAWAY_AI_PROVIDER` → the `ai.provider` preference → Claude.
+    ///   - ollama: where the local daemon is, when `kind` is `.ollama`. An
+    ///     invalid base URL (plaintext `http` to a non-loopback host) falls back
+    ///     to the default rather than tripping `OllamaProvider`'s precondition.
     static func makeProvider(
+        kind: AIProviderKind = AIProviderKind.fromEnvironment() ?? .claude,
+        ollama: OllamaConfiguration = OllamaConfiguration(),
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> any AIProvider {
         // `FILAWAY_AI_FAIL=network` is the smoke suite's outage: there is no
@@ -238,8 +271,30 @@ final class OrganizeCoordinator: ObservableObject {
         return try AIProviderFactory.make(
             mode: mode,
             store: AIRecordingStore.fromEnvironment(environment),
-            keySource: .storeThenEnvironment(KeychainStore())
+            keySource: .storeThenEnvironment(KeychainStore()),
+            kind: kind,
+            ollama: ollama.validate() ? ollama : OllamaConfiguration(model: ollama.model)
         )
+    }
+
+    /// One preload so the *first* answer card is not charged for a cold model
+    /// load (ADR-069). Fire-and-forget: nothing waits on it, ever.
+    ///
+    /// Skipped for anything but a live Ollama — a replayed phase has no daemon
+    /// to warm, and `FILAWAY_AI_FAIL` is an outage the phase is asserting.
+    static func warmUpIfNeeded(
+        kind: AIProviderKind,
+        ollama: OllamaConfiguration,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        guard kind == .ollama, ollama.validate() else { return }
+        guard environment["FILAWAY_AI_FAIL"]?.isEmpty ?? true else { return }
+        let mode = environment[AIMode.environmentVariable]
+            .flatMap { AIMode(rawValue: $0.lowercased()) } ?? .live
+        guard mode.isLive else { return }
+        Task.detached(priority: .utility) {
+            await OllamaProvider(configuration: ollama).warmUp()
+        }
     }
 
     func stop() {
@@ -295,10 +350,52 @@ final class OrganizeCoordinator: ObservableObject {
             case .organizationMode, .idleInterval, .excludedFolders,
                  .organizeModel, .advancedModelOverride:
                 Task { @MainActor in self?.settingsChanged() }
+            // FR-6.5 / FR-8.1: switching backend, or moving the daemon or the
+            // local model tag, must not need a relaunch (ADR-069). The provider
+            // is an *object*, not a per-request lookup like the Claude key, so
+            // this rebuilds it and hands it to the running actor.
+            case .aiProvider, .ollamaBaseURL, .ollamaModel:
+                Task { @MainActor in self?.providerChanged() }
             default:
                 break
             }
         }
+    }
+
+    /// Rebuilds the provider from the current settings and swaps it into the
+    /// live `Organizer` (FR-6.5, FR-8.1).
+    ///
+    /// It pushes ``OrganizerSettings`` too, because the model *and* the request
+    /// timeout move with the backend: `effectiveOrganizeModel` becomes the
+    /// Ollama tag and `providerKind.timeout(for: .organize)` becomes 180 s.
+    func providerChanged() {
+        let settings = settingsSource
+        let kind = settings.providerKind
+        let ollama = settings.ollamaConfiguration
+        guard let organizer else { return }
+        let provider: any AIProvider
+        do {
+            provider = try Self.makeProvider(kind: kind, ollama: ollama)
+        } catch {
+            log.error("provider rebuild failed: \(String(describing: error), privacy: .public)")
+            return
+        }
+        Self.warmUpIfNeeded(kind: kind, ollama: ollama)
+        // Leaving Claude drops the key-based pill state on the floor; arriving
+        // at Claude re-subscribes to it.
+        if kind == .ollama {
+            connectionTask?.cancel()
+            connectionTask = nil
+            if status == .notConfigured || status == .invalidKey { status = .connected }
+        } else {
+            observeConnection()
+        }
+        let organizerSettings = settings.organizerSettings
+        Task {
+            await organizer.setProvider(provider)
+            await organizer.setSettings(organizerSettings)
+        }
+        log.info("organize provider switched to \(kind.rawValue, privacy: .public)")
     }
 
     /// FR-6.4 / FR-6.5: the key changed in Settings → AI, so the pill moves and
@@ -310,6 +407,11 @@ final class OrganizeCoordinator: ObservableObject {
     /// status gates the queue.
     private func observeConnection() {
         guard connectionTask == nil else { return }
+        // FR-6.5: the local provider has no credential, so folding in the key
+        // manager would park the pill on "Connect AI" for a setup that works
+        // perfectly. What the pill reports under Ollama is what the *requests*
+        // report — offline, rate limited, or nothing at all (ADR-069).
+        guard settingsSource.providerKind != .ollama else { return }
         let connection = SettingsModel.shared.connection
         connectionTask = Task { [weak self] in
             for await status in await connection.statusChanges() {
@@ -513,12 +615,16 @@ final class OrganizeCoordinator: ObservableObject {
 
         case let .failed(_, failure):
             log.error("organize failed: \(failure.label, privacy: .public)")
+            lastFailureReason = failure.label
             if case let .provider(error) = failure {
                 status = AIHealth.status(for: error)
             }
             await refreshQueueCount()
 
-        case .cancelled, .skipped:
+        case let .skipped(_, reason):
+            lastFailureReason = "skipped: \(reason)"
+
+        case .cancelled:
             break
         }
     }
@@ -588,6 +694,22 @@ final class OrganizeCoordinator: ObservableObject {
     /// next prompt. `nil` before ``start(searchService:autosave:candidateFinder:)``.
     func organizerSettingsProbe() async -> OrganizerSettings? {
         await organizer?.currentSettings
+    }
+
+    /// What the live `Organizer` will send its **next** request with (FR-6.5).
+    ///
+    /// Read off the actor, not off Settings, so `ProviderWiringSmokeCheck` is
+    /// asserting the wiring rather than the preference it just wrote. The
+    /// identifier is the provider object's own — `"ollama"`, `"claude"`,
+    /// `"replay"`, `"mock"` — which is how a replayed phase stays honest about
+    /// the fact that no backend was reached.
+    func providerKindProbe() async -> (kind: AIProviderKind, model: AIModel, identifier: String) {
+        let live = await organizer?.currentSettings
+        return (
+            kind: live?.providerKind ?? settingsSource.providerKind,
+            model: live?.model ?? settingsSource.model,
+            identifier: await organizer?.providerIdentifier ?? "none"
+        )
     }
 
     /// The idle interval the `SessionTracker` is timing with (FR-3.1).

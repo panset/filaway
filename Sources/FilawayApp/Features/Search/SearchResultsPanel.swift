@@ -382,7 +382,7 @@ struct AnswerCardView: View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Image(systemName: "sparkles")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(source == .claude ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .foregroundStyle(source == .model ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 .accessibilityHidden(true)
             Text("Best match")
                 .font(.system(size: 10, weight: .semibold))
