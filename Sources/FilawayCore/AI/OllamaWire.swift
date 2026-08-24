@@ -82,13 +82,57 @@ public enum OllamaWire {
 
     /// What replaces `tool_choice` for a model that has none: the tool's own
     /// description, plus the two sentences that keep an 8B model from wrapping
-    /// its JSON in prose or a code fence.
+    /// its JSON in prose or a code fence, plus — for the tools that have one —
+    /// the short list of rules a small model actually breaks.
     public static func instructions(for tool: AITool) -> String {
-        """
-        Respond with a single JSON object for the tool "\(tool.name)": \(tool.description)
-        Return only that JSON object. No prose, no explanation, no code fences.
-        """
+        var parts = [
+            """
+            Respond with a single JSON object for the tool "\(tool.name)": \(tool.description)
+            Return only that JSON object. No prose, no explanation, no code fences.
+            """,
+        ]
+        if let rules = smallModelRules[tool.name] { parts.append(rules) }
+        return parts.joined(separator: "\n\n")
     }
+
+    /// Per-tool restatement of the rules an 8B model breaks, appended **at wire
+    /// time** (P2-04, ADR-070).
+    ///
+    /// It does not live in `organize.v1.txt` for two reasons, and both matter:
+    ///
+    /// * The prompt files are frozen (`docs/prompts.md`) and shared by every
+    ///   provider. Sonnet does not need to be told twice, and paying for a
+    ///   restatement on every Claude call to help a local model would be the
+    ///   wrong trade.
+    /// * ``AIRequest/fixtureKey`` hashes ``AIRequest/system``, not the rendered
+    ///   wire body. Adding this here leaves every committed fixture — Claude's
+    ///   and Ollama's — on the key it already has.
+    ///
+    /// The wording is deliberately *negative and specific*: each line names an
+    /// error ``PlanValidator`` actually rejected on this corpus
+    /// (`titleCollision`, `segmentNotFound`, `unknownFolder`, `unknownNote`),
+    /// and the rules are last in the system message, where a small model weighs
+    /// them most. See `docs/verification/P2-ollama.md` for the before/after.
+    static let smallModelRules: [String: String] = [
+        OrganizationPlan.toolName: """
+        Before you answer, check your plan against each of these. A plan that \
+        breaks any of them is thrown away and the person gets nothing:
+
+        - Never use "createNote" whose "title" and "folderPath" together name a \
+        note that is already in the library above. That note exists. Append to \
+        it with "appendToNote" and its id instead.
+        - "segment" in "moveSegment" must be copied character for character out \
+        of the session text above, opening and closing code fences included. If \
+        you cannot copy it exactly, use "appendToNote" instead.
+        - Every "folderPath" must be a folder listed above, or one a \
+        "createFolder" action in this same plan creates. Never name a folder \
+        that does not exist.
+        - Copy every "id" exactly as it is written above. Never invent one, and \
+        never use an id that is not listed.
+        - "actions": [] is a correct and welcome answer when the session is \
+        already where it belongs.
+        """,
+    ]
 
     static func messageValue(_ message: AIMessage) -> JSONValue {
         .object(["role": .string(message.role.rawValue), "content": .string(message.text)])
