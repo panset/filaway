@@ -105,15 +105,19 @@ make smoke          # or: Tools/smoke.sh [--keep]
 #                                  FILAWAY_SMOKE_OLLAMA=1 and a daemon answering
 #                                  localhost:11434, else "SKIPPED (no Ollama)"
 #                                  and not a failure
-# -> === smoke phase: organize-ollama-suite === GATED the same way (P2-09).
-#                                  Three live scenarios on the library shapes
+# -> === smoke phase: organize-ollama-suite === GATED the same way (P2-09/11).
+#                                  Four live scenarios on the library shapes
 #                                  real dogfooding failed on: a folderless
 #                                  library + a bulleted feedback session (ask),
-#                                  the same library + a command note (auto), and
-#                                  a library whose right answer is a folder that
-#                                  already exists (auto). Each gets its own
+#                                  the same library + a command note (auto), a
+#                                  library whose right answer is a folder that
+#                                  already exists (auto), and a root-level OIDC
+#                                  command note (auto). Each gets its own
 #                                  library; a plan the validator REJECTS is a
-#                                  phase failure, printing the issue kinds
+#                                  phase failure, printing the issue kinds, and
+#                                  so is junk that APPLIES — an empty folder the
+#                                  plan created, an action applied twice, or a
+#                                  written block carrying no line of the session
 # -> === smoke phase: semantic === M3-06: ⌘K Ask on a corpus with fixed mtimes:
 #                                  ⏎ -> answer card, Copy -> pasteboard, ⏎ ->
 #                                  the note scrolled to the chunk, the temporal
@@ -161,10 +165,11 @@ two gated phases `organize-ollama` and `organize-ollama-suite`, which run
 `FILAWAY_AI_MODE=live FILAWAY_AI_PROVIDER=ollama` against the local daemon — the
 harness axis and the backend axis are independent (ADR-069).
 
-**`organize-ollama-suite` is the plan-quality gate** (P2-09, ADR-073): three
-scenarios, each with its own library, on the shapes real dogfooding failed on —
-a folderless library, a bulleted feedback session, a library where the right
-answer is a folder that already exists. It drives the real objects but writes
+**`organize-ollama-suite` is the plan-quality gate** (P2-09/P2-11, ADR-073/074):
+four scenarios, each with its own library, on the shapes real dogfooding failed
+on — a folderless library, a bulleted feedback session, a library where the
+right answer is a folder that already exists, and a root-level command note.
+It drives the real objects but writes
 the session through `NoteStore` instead of typing it (the organizer's delta is
 `baseline → what is on disk`), so it needs no window, and it fails the phase on
 a plan the validator rejects — printing the issue *kinds*, never the summary.
@@ -606,6 +611,18 @@ nine committed Ollama organize fixtures were re-recorded for it, and usable
 plans are now **9/9**. Every one of the three was found by a person, which is
 why the gated `organize-ollama-suite` phase exists: it runs the *library shapes*
 the failures came from, and a rejected plan fails the phase.
+
+A fourth failure (P2-11, **ADR-074**) was the first where nothing was rejected:
+a plan of two `createFolder OIDC` actions and two appends of the bare labels
+`OIDC Commands` / `OIDC Configuration` **applied**, because a duplicate action
+and an existing folder are only warnings. Two guards close it, both additive:
+`PlanRepair` **rule 6** drops a `createFolder` no other action files into (run
+first, and for *every* provider — an empty folder is junk whoever wrote it), and
+`PlanValidator.contentNotFromSession` rejects content that is one line, ≤ 60
+characters, ≤ 4 words and absent from the session text (an *option* on the
+validator: only the organizer has the session). Still 9/9 usable. A plan can be
+valid and still be junk, so the suite's post-apply invariants now check the
+outcome as well as its existence.
 
 **M4-07's retrieval lever.** `Search/TypoExpansion.swift` repairs query words
 whose document frequency is zero, using FTS5's own term index through the new
