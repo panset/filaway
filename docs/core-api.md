@@ -1257,7 +1257,7 @@ ADR-035.
 
 ```swift
 let manager = AIConnectionManager(library: library)          // KeychainStore + ledger
-await manager.refresh()                                       // status from the stored key
+await manager.refresh()                                       // checks whichever provider is selected
 switch await manager.connect(apiKey: typed) {
 case let .success(models): …                                  // key stored, status .connected
 case let .failure(error):  …                                  // nothing stored
@@ -1265,20 +1265,79 @@ case let .failure(error):  …                                  // nothing store
 await manager.disconnect()
 for await status in await manager.statusChanges() { pill = status }
 let month = await manager.monthlyUsage()                      // AIUsageTotals? (FR-6.6)
+
+// P2-02 — the provider dimension (FR-6.5)
+if manager.setProvider(settings.aiProvider, ollama: settings.ollamaConfiguration) {
+    await manager.refresh()                                   // only when something moved
+}
+await manager.connectLocal()                                  // GET /api/tags + model presence
+await manager.providerKind                                    // .claude | .ollama
+await manager.isConfigured                                    // key, or a model that has been pulled
 ```
 
 An actor owning the `SecretStore`, the provider factory and `AIHealth`.
-Validation is the free `GET /v1/models` (plan §1 amendment 4).
+
+**Two kinds of "connected"** (ADR-068):
+
+| | Claude | Ollama |
+|---|---|---|
+| Validation | `GET /v1/models`, free (plan §1 amendment 4) | `GET /api/tags`, local |
+| Connected means | the stored key was accepted | the daemon answered **and** the configured model is in the list |
+| Configured means | `hasStoredKey` | a model that was seen in `/api/tags` (`isConfigured`) |
+| Daemon/API down | `.offline` | `.offline` |
+| Model missing | `.modelNotFound` → "not available to this key" | `.error(AIConnectionCopy.modelNotPulled)` → `ollama pull <model>` |
+| Bad base URL | — | `.error(AIConnectionCopy.invalidBaseURL)`, checked **before** the provider is built (`OllamaProvider.init` makes the loopback rule a `precondition`) |
 
 **The key is written only after validation succeeds.** A blank key never reaches
 the network, and a failed validation leaves any previously stored key alone — a
 typo in the Change… sheet must not disconnect a working install.
 
+**The local path never touches the Keychain.** `connect(apiKey:)` always
+validates against Claude (it is the key sheet's action) and leaves the local
+status alone when Ollama is selected; `disconnect()` deletes the key but only
+resets the status under Claude; switching back re-validates the stored key. A
+user can try the local model and come back without re-entering anything.
+
+`setProvider(_:ollama:)` is deliberately *not* a validation: it returns `true`
+when the selection moved, drops what the old provider cached, resets the status
+and leaves the round trip to `refresh()`. A settings observer can therefore call
+it on every notification without generating traffic.
+
+`monthlyUsage()` / `monthlyUsageByPurpose()` report **the selected provider**
+(`AIUsageLedger`'s `AIProviderKind` overloads). Local work is counted and costs
+nothing — how much went local is the FR-6.5 number worth having.
+
 `recordFailure(_:)` / `recordSuccess()` let the rest of the app fold pipeline
 outcomes into the same status the pill draws (FR-6.4); a rate limit heals itself
 once its deadline passes. Tests inject `InMemorySecretStore` and a
-`providerFactory` returning `MockProvider`; the app's default factory follows
-`FILAWAY_AI_MODE`, standing in a mock when `replay` has no fixture directory.
+`providerFactory` returning `MockProvider`; the factory takes a
+`ProviderContext` (`keySource`, `kind`, `ollama`), so a test can assert *which*
+backend was built. The app's default factory follows `FILAWAY_AI_MODE`, standing
+in a mock when `replay` has no fixture directory.
+
+### `AIConnectionCopy`
+
+Every sentence Settings → AI and the status pill say about a connection, as pure
+functions of `(kind, status, model)` — so the strings are testable by `swift
+test` instead of living inside a SwiftUI view (plan §8: no XCTest UI tests).
+
+```swift
+AIConnectionCopy.title(kind: .ollama, status: .offline)         // "Ollama · offline"
+AIConnectionCopy.statusLine(kind: .ollama, status: .connected, model: .defaultOllama)
+//   "Connected · llama3.1:8b · fully private"
+//   .offline                       → "Ollama offline — is the daemon running? (ollama serve)"
+//   .error(modelNotPulled)         → "Model not pulled — run: ollama pull llama3.1:8b"
+//   .error(invalidBaseURL)         → the loopback rule, in words
+AIConnectionCopy.privacyStatement(kind:notesPath:)              // FR-6.3, stronger under Ollama
+AIConnectionCopy.exclusionDetail(kind:)                         // FR-4.5's row detail
+AIConnectionCopy.usageSummary(kind:totals:)                     // FR-6.6; local work is "· $0"
+AIConnectionCopy.chooserTitle(_:) / .chooserDetail(_:)          // the two Figure 3/4 cards
+OllamaConfiguration.isPulled(AIModel("llama3.1"), in: tags)     // matches `llama3.1:latest`
+```
+
+`modelNotPulled` and `invalidBaseURL` are **markers**, not sentences: a status
+string is shown in the toolbar and must stay short, so the manager records the
+marker and the copy layer expands it using the model it is given.
 
 ---
 

@@ -8,8 +8,8 @@ import FilawayCore
 ///
 /// | Phase | What it proves |
 /// |---|---|
-/// | `settings` | ⌘, opens the window; mode, interval, exclusions and the semantic toggle write through `AppSettings`; the interval clamps; `AIConnectionManager.connect` walks `notConfigured → connected → notConfigured` against the replay/mock provider. |
-/// | `settings2` | Relaunch on the same defaults suite: every one of those preferences came back (FR-8.1, FR-1.5). |
+/// | `settings` | ⌘, opens the window; mode, interval, exclusions and the semantic toggle write through `AppSettings`; the interval clamps; `AIConnectionManager.connect` walks `notConfigured → connected → notConfigured` against the replay/mock provider; then P2-02's provider chooser — Ollama selected, base URL and model tag written (a remote plaintext URL refused), and Test connection driven through all three outcomes: connected, model not pulled, daemon down. |
+/// | `settings2` | Relaunch on the same defaults suite: every one of those preferences came back, provider and daemon included (FR-8.1, FR-1.5, FR-6.5). |
 /// | `settings-wiring` | M4-02: a preference reaching the *objects* — mode and model to the `Organizer` actor, the idle interval to `SessionTracker`, an exclusion to both the organizer and the index (already-indexed chunks purged), the semantic switch to ⌘K's Ask mode, and `Rebuild index` completing. |
 /// | `a11y` | M4-06: a walk of the live accessibility tree — no actionable control and no visible image without a label — plus light and dark captures. |
 ///
@@ -24,6 +24,10 @@ enum SettingsSmokeCheck {
     /// Values phase 1 writes and phase 2 reads back.
     private static let idleMinutes = 7
     private static let excluded = ["Personal", "Work/Confidential"]
+    /// P2-02: the daemon address phase 1 types and phase 2 reads back. Loopback
+    /// by IP rather than by name, so it is also the "plain http is allowed
+    /// here" case.
+    private static let ollamaBaseURL = "http://127.0.0.1:11434"
     /// The folder `Tools/smoke.sh` seeds for the `settings-wiring` phase, so
     /// there is something indexed to purge (FR-4.5).
     private static let excludedFolder = "Personal"
@@ -141,9 +145,128 @@ enum SettingsSmokeCheck {
               model.notesRootDisplayPath.hasSuffix(AppSettings.notesRoot.lastPathComponent),
               model.notesRootDisplayPath)
 
+        await runLocalProviderChecks(model: model, settings: settings)
+
         settings.flush()
         AppSettings.flush()
         finish()
+    }
+
+    // MARK: - The local provider (P2-02 — FR-6.5, FR-6.4)
+
+    /// Figure 4's provider chooser and the Ollama rows, driven end to end with
+    /// no daemon on this machine.
+    ///
+    /// The status the pane shows is a pure function of what `/api/tags`
+    /// answered, so the three outcomes that matter — pulled, not pulled, daemon
+    /// down — are each driven by a `SettingsModel` over its own
+    /// `AIConnectionManager` with a scripted provider. They share *this*
+    /// phase's `AppSettings`, so what they write is what `settings2` reads back.
+    ///
+    /// The phase leaves Ollama selected on purpose: `settings2`'s job is to
+    /// prove the provider, the base URL and the model tag survived a relaunch.
+    private static func runLocalProviderChecks(model: SettingsModel, settings: CoreSettings) async {
+        // A key first, so the assertion that the local path leaves it alone has
+        // something to be about (ADR-068).
+        _ = await model.connect(apiKey: "sk-ant-smoke-not-a-real-key")
+        check("key-stored-before-switch", model.hasStoredKey)
+
+        await model.selectProvider(.ollama)
+        check("provider-written", settings.aiProvider == .ollama, settings.aiProvider.rawValue)
+        check("key-survives-the-switch", await model.connection.hasStoredKey,
+              "switching provider must not touch the Keychain")
+        check("effective-model-is-the-local-tag", settings.effectiveOrganizeModel == .defaultOllama,
+              settings.effectiveOrganizeModel.id)
+
+        // The base URL field: loopback http is fine, http anywhere else is not,
+        // and a refused URL is never stored (NFR-4's rule).
+        model.ollamaBaseURLText = ollamaBaseURL
+        await model.commitOllamaBaseURL()
+        check("base-url-written", settings.ollamaBaseURL.absoluteString == ollamaBaseURL,
+              settings.ollamaBaseURL.absoluteString)
+
+        model.ollamaBaseURLText = "http://ollama.example.com"
+        check("remote-http-is-refused", model.ollamaBaseURLProblem != nil,
+              model.ollamaBaseURLProblem ?? "accepted plaintext to a remote host")
+        await model.commitOllamaBaseURL()
+        check("remote-http-is-not-stored", settings.ollamaBaseURL.absoluteString == ollamaBaseURL,
+              settings.ollamaBaseURL.absoluteString)
+        model.ollamaBaseURLText = ollamaBaseURL
+
+        // Through a non-default tag and back, so what phase 2 reads is a value
+        // that was actually written rather than the default it would see anyway.
+        model.ollamaModel.wrappedValue = "qwen2.5-coder:7b"
+        await settle(seconds: 0.4)
+        check("model-tag-written", settings.ollamaModel.id == "qwen2.5-coder:7b", settings.ollamaModel.id)
+        model.ollamaModel.wrappedValue = AIModel.defaultOllama.id
+        await settle(seconds: 0.4)
+        check("model-tag-rewritten", settings.ollamaModel == .defaultOllama, settings.ollamaModel.id)
+
+        // Test connection, three ways.
+        let pulled = [
+            AIModelInfo(id: AIModel.defaultOllama.id, displayName: AIModel.defaultOllama.id),
+            AIModelInfo(id: "qwen2.5-coder:7b", displayName: "qwen2.5-coder:7b"),
+        ]
+        let connected = localModel(settings: settings) {
+            MockProvider(identifier: "ollama", models: pulled) { _ in throw AIError.notConfigured }
+        }
+        await connected.testLocalConnection()
+        check("local-connect-succeeds", connected.status == .connected, connected.status.label)
+        check("local-is-configured", connected.isConfigured)
+        check("local-card-title", connected.connectionTitle == "Ollama · connected", connected.connectionTitle)
+        check("local-status-line",
+              connected.connectionStatusLine == "Connected · \(AIModel.defaultOllama.id) · fully private",
+              connected.connectionStatusLine)
+        check("local-models-listed", connected.availableOllamaModelIDs().count == 2,
+              connected.availableOllamaModelIDs().joined(separator: ", "))
+
+        let missing = localModel(settings: settings) {
+            MockProvider(identifier: "ollama", models: [pulled[1]]) { _ in throw AIError.notConfigured }
+        }
+        await missing.testLocalConnection()
+        check("model-not-pulled-status", missing.status == .error(AIConnectionCopy.modelNotPulled),
+              missing.status.label)
+        check("model-not-pulled-line",
+              missing.connectionStatusLine == "Model not pulled — run: ollama pull \(AIModel.defaultOllama.id)",
+              missing.connectionStatusLine)
+        check("model-not-pulled-is-not-configured", !missing.isConfigured)
+        check("unpulled-tag-stays-selectable",
+              missing.availableOllamaModelIDs().contains(AIModel.defaultOllama.id),
+              missing.availableOllamaModelIDs().joined(separator: ", "))
+
+        let down = localModel(settings: settings) {
+            MockProvider.failing(.network(code: -1004, description: "connection refused"))
+        }
+        await down.testLocalConnection()
+        check("daemon-down-is-offline", down.status == .offline, down.status.label)
+        check("daemon-down-line",
+              down.connectionStatusLine == "Ollama offline — is the daemon running? (ollama serve)",
+              down.connectionStatusLine)
+
+        // FR-6.3: the promise the local provider can actually make.
+        check("privacy-statement-is-local", model.privacyStatement.contains("Nothing is uploaded"),
+              model.privacyStatement)
+        check("exclusion-detail-is-local", model.exclusionDetail.contains("local or not"),
+              model.exclusionDetail)
+        check("usage-line-is-free", (model.usageSummary ?? "").contains("$0"),
+              model.usageSummary ?? "no usage line")
+    }
+
+    /// A `SettingsModel` over this phase's preferences and a scripted
+    /// `/api/tags`. The phase runs with `FILAWAY_AI_MODE=replay`, whose fixtures
+    /// are Claude's — the local path needs a provider that answers with Ollama
+    /// tags, and injecting one is what the factory parameter is for.
+    private static func localModel(
+        settings: CoreSettings,
+        provider: @escaping @Sendable () throws -> any AIProvider
+    ) -> SettingsModel {
+        let connection = AIConnectionManager(
+            secrets: InMemorySecretStore(),
+            ledger: nil,
+            kind: settings.aiProvider,
+            ollama: settings.ollamaConfiguration
+        ) { _ in try provider() }
+        return SettingsModel(settings: settings, connection: connection)
     }
 
     // MARK: - Phase: settings2 (relaunch, FR-1.5 / FR-8.1)
@@ -161,6 +284,20 @@ enum SettingsSmokeCheck {
               settings.effectiveOrganizeModel.id)
         check("key-did-not-persist", !(await SettingsModel.shared.connection.hasStoredKey),
               "the smoke run uses an in-memory secret store")
+
+        // P2-02: the provider selection and the daemon it points at (FR-6.5).
+        check("provider-persisted", settings.aiProvider == .ollama, settings.aiProvider.rawValue)
+        check("base-url-persisted", settings.ollamaBaseURL.absoluteString == ollamaBaseURL,
+              settings.ollamaBaseURL.absoluteString)
+        check("ollama-model-persisted", settings.ollamaModel == .defaultOllama, settings.ollamaModel.id)
+        // The Advanced override is still on from phase 1, and still Claude's
+        // business only: under Ollama the effective model is the local tag.
+        check("effective-model-follows-the-provider",
+              settings.effectiveOrganizeModel == .defaultOllama && settings.effectiveSearchModel == .defaultOllama,
+              settings.effectiveOrganizeModel.id)
+        check("connection-manager-starts-on-the-stored-provider",
+              await SettingsModel.shared.connection.providerKind == .ollama,
+              (await SettingsModel.shared.connection.providerKind).rawValue)
 
         // The exclusions belong to *this* library and nobody else's.
         check("exclusions-are-per-library",
@@ -305,6 +442,19 @@ enum SettingsSmokeCheck {
             audit(SettingsWindow.window, named: "settings-\(tab.rawValue)")
             capture(SettingsWindow.window, named: "settings-\(tab.rawValue)")
         }
+
+        // P2-02: the Ollama rows only exist while Ollama is selected, so the
+        // walk would never see the Base URL field, the model picker or the
+        // Refresh button on a default suite. Select it, walk, put it back.
+        let settings = SettingsModel.shared.settings
+        let selected = settings.aiProvider
+        SettingsTabSelection.shared.tab = .ai
+        settings.aiProvider = .ollama
+        await settle(seconds: 1.2)
+        audit(SettingsWindow.window, named: "settings-ai-ollama")
+        capture(SettingsWindow.window, named: "settings-ai-ollama")
+        settings.aiProvider = selected
+        await settle(seconds: 0.5)
 
         // NFR-7: both appearances, captured for a human to look at later. The
         // walk itself is appearance-independent, so it runs once.
