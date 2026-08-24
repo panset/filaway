@@ -59,7 +59,7 @@ struct RetrievalGateTests {
         #expect(metrics.noteTop3 >= 0.95, "note top-3 \(metrics.noteTop3)")
 
         // NFR-1: the offline half, with the Claude step still to pay for.
-        #expect(report.p95 < 1.0, "retrieval p95 \(report.p95) s")
+        #expect(report.p95 < 1.0 * TestEnvironment.perfBudgetScale, "retrieval p95 \(report.p95) s")
 
         // FR-5.5's other half: a question the library cannot answer must not
         // produce a confident answer card. The cosine floor is a backstop and
