@@ -47,7 +47,9 @@ struct AnswerRequestTests {
     func purpose() throws {
         let request = try AnswerGolden.request(for: AnswerGolden.scenario("no-answer"))
         #expect(request.purpose == .search)
-        #expect(request.timeout == 5)
+        // The *provider's* budget is the kind's (P2-03); NFR-1's 5 s answer
+        // race is enforced inside the actor, not on the wire (ADR-069).
+        #expect(request.timeout == AIProviderKind.claude.timeout(for: .search))
     }
 
     @Test("the tool is strict and closed")
