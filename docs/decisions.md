@@ -2249,3 +2249,52 @@ is the only case available on a locked screen.
   screen the phase prints `main-window-skipped` rather than passing on nothing.
 
 ---
+
+## ADR-061 — The launch gate runs on a run-loop turn, and nothing resolves the notes root before it
+
+**Date:** 2026-08-23 · **Task:** M4-01 follow-up · **Status:** accepted ·
+**Amends:** ADR-049
+
+**Context.** ADR-049 put the FR-7.1 first-run flow in a modal window and made
+"whoever reads `AppSettings.notesRoot` first" run it, so the folder the flow
+chooses is always the folder the launch opens. That removed one ordering
+question and introduced a worse one: *who* reads it first is decided by SwiftUI.
+
+It turned out to be `AppModel.shared`, forced from inside
+`StateObject.Box.update` — an AttributeGraph pass. `NSApp.runModal` there spins a
+nested run loop inside a SwiftUI update, and the `WindowGroup` never finishes
+installing. The app came out of onboarding with `NSApp.windows` **empty**: no
+window, no `ShellView.task`, no `bootstrap()`, no library. Moving the call to
+`applicationDidFinishLaunching` does not help either — SwiftUI is called there
+from inside AppKit's `_handleAEOpenEvent:`, the same Apple Event dispatch that
+builds the window, and the modal crashes the scene instead of wedging it.
+
+**Decision.** Three rules, together:
+
+1. **Reading the notes root never runs the gate.** `AppDelegate` calls
+   `OnboardingPresenter.scheduleIfNeeded()`, and `AppModel.bootstrap()` awaits
+   `waitUntilAnswered()` before it resolves anything.
+2. **Nothing may resolve the root before that.** `AppModel.library` is resolved
+   on first use rather than in `init`, `SettingsModel.shared` is not forced from
+   the App body (a wrapper view defers it to the first draw of the Settings
+   window), and the welcome pane names the folder only once one exists.
+3. **The gate is scheduled with `RunLoop.main.perform`, not
+   `DispatchQueue.main.async`.** A nested run loop drains the main dispatch queue
+   only when it was not started from inside a main-queue block — and a
+   `@MainActor` job is one. Started from a run-loop callback, the modal session
+   keeps main-queue work running, which everything inside the flow (including its
+   own smoke driver) depends on.
+
+**Consequences.**
+- ADR-049's "the window behind the flow would be a library on an unchosen root"
+  no longer applies: with the root unresolved, there is no library to open. The
+  empty shell does become visible behind the modal for a few frames.
+- The flow's window is created programmatically and held by a strong `let`, so
+  `isReleasedWhenClosed` has to be `false`. It was not, and once a real scene
+  existed the over-release landed in AppKit's window-close animation at the next
+  CA transaction flush and killed the process.
+- A future eager reader of `AppSettings.notesRoot` reintroduces the bug quietly.
+  The `onboarding` and `onboardingskip` phases are what catch it: `library-loaded`
+  and `blank-note-ready` both fail when the scene never materialises.
+
+---
