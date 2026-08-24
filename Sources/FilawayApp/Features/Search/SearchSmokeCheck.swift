@@ -199,10 +199,14 @@ enum SearchSmokeCheck {
                      samples.map { String(format: "%.1f ms", $0) }.joined(separator: ", ")))
         // One outlier in five is a scheduler hiccup, not perceived latency —
         // the strict p95 gate is `filaway-bench keyword`. All the rest must fit.
+        // The budgets describe the machine (convention 8): a hosted runner's
+        // cold first query measured 575 ms with an 8.4 ms steady state, so on
+        // CI both bounds stretch ×2.
+        let scale = ProcessInfo.processInfo.environment["CI"] != nil ? 2.0 : 1.0
         let sorted = samples.sorted()
         let allButWorst = sorted.dropLast()
         check("as-you-type-under-budget",
-              !samples.isEmpty && (allButWorst.max() ?? 0) < 100 && (sorted.last ?? 0) < 400,
+              !samples.isEmpty && (allButWorst.max() ?? 0) < 100 * scale && (sorted.last ?? 0) < 400 * scale,
               String(format: "worst %.1f ms, next %.1f ms", sorted.last ?? 0, allButWorst.max() ?? 0))
 
         return failures
