@@ -173,6 +173,13 @@ final class AppModel: ObservableObject {
         // Per-library window state, which could not be read before the root was
         // known (FR-1.5).
         expandedFolders = AppSettings.expandedFolders(libraryKey: library.key)
+        // Build the preference model *here*, where the root is finally known and
+        // the cost is part of launch. It used to be forced from the App body,
+        // which is too early (ADR-061); left to whoever asks first it is a
+        // `Library`, an `AIConnectionManager` and a usage ledger opening on the
+        // main actor at some arbitrary later moment — measurable as a ~130 ms
+        // stall in the middle of an as-you-type keystroke.
+        _ = SettingsModel.shared
         do {
             let store = NoteStore(library: library)
             try await store.prepare()
