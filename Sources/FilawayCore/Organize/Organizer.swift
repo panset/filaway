@@ -234,7 +234,10 @@ public actor Organizer {
         for pending in queued {
             guard (pending.nextAttemptAt ?? instant) <= instant else { continue }
             guard inFlight[pending.id] == nil, !ready.contains(where: { $0.session.id == pending.id }) else { continue }
-            try? await queueStore.remove(pending.id)
+            // The row stays until the retry reaches a *terminal* outcome
+            // (`execute`); removing it here meant a quit mid-flight lost the
+            // session for good — observed live: the 07:20 retry was dequeued,
+            // the app quit at 07:22, and pending went 1 → 0 with no event.
             emit(.retrying(pending.id, attempt: pending.attempts + 1))
             ready.append(Work(session: pending.session, noteIDs: pending.noteIDs, attempts: pending.attempts))
         }
@@ -303,14 +306,23 @@ public actor Organizer {
     private func execute(_ work: Work, token: UUID) async {
         do {
             try await run(work, token: token)
+            // Proposed, applied, stale or skipped — all terminal. A session
+            // that was never queued makes this a no-op.
+            try? await queueStore.remove(work.session.id)
         } catch is Superseded {
             // The user got there first; noteEdited() has already published.
+            // The new session covers the same notes (the baseline never
+            // moved), so a queued copy would only re-send stale material.
+            try? await queueStore.remove(work.session.id)
         } catch is CancellationError {
-            // Same.
+            // Teardown or quit mid-flight. NOT terminal: the row (if this
+            // came from the queue) survives for the next launch — the
+            // crash-safety this queue exists for (ADR-059, M4-08).
         } catch let error as AIError {
             await handleProviderError(error, work: work, token: token)
         } catch {
             emit(.failed(work.session.id, failure: .decoding("\(error)")))
+            try? await queueStore.remove(work.session.id)
         }
         finish(work.session.id, token: token)
     }
@@ -527,6 +539,7 @@ public actor Organizer {
         guard Self.shouldQueue(error) else {
             log.error("organize failed: \(error.description, privacy: .public)")
             emit(.failed(work.session.id, failure: .provider(error)))
+            try? await queueStore.remove(work.session.id)
             return
         }
 

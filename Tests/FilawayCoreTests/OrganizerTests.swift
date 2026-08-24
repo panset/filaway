@@ -614,3 +614,70 @@ struct OrganizerTests {
         #expect(haystack.contains(Self.scratchID.uuidString))
     }
 }
+
+// MARK: - Queue durability across a death mid-retry (P2-06)
+
+/// The live bug: `retryQueuedSessions` deleted the row on pickup, so a quit
+/// while the retry was in flight lost the session for good. The row must now
+/// outlive the flight and go away only on a terminal outcome.
+@Suite("Organizer — the queue survives a death mid-flight")
+struct OrganizerQueueDurabilityTests {
+    private func pending(_ harness: OrganizerTests.Harness, id: SessionID, attempts: Int = 1) -> PendingSession {
+        PendingSession(
+            session: harness.session([OrganizerTests.scratchID], id: id),
+            attempts: attempts,
+            lastError: "timed out",
+            nextAttemptAt: nil
+        )
+    }
+
+    @Test("a cancelled flight keeps the row for the next launch")
+    func cancelledFlightKeepsTheRow() async throws {
+        // The quit-mid-flight, compressed: the provider dies of cancellation.
+        // If pickup still deleted the row, nothing on this path would restore
+        // it — the count going to 0 is exactly the lost-session bug.
+        let provider = ScriptedProvider(handlers: [{ _ in throw CancellationError() }])
+        let harness = await OrganizerTests.harness(provider: provider)
+        let id = SessionID()
+        try await harness.queue.enqueue(pending(harness, id: id))
+
+        await harness.organizer.retryQueuedSessions()
+        await harness.organizer.drain()
+        #expect(provider.requestCount == 1, "the retry ran")
+        #expect(await harness.queue.count == 1, "a death mid-flight keeps the session (ADR-059, M4-08)")
+    }
+
+    @Test("a successful retry clears the row")
+    func successClearsTheRow() async throws {
+        let provider = ScriptedProvider(plan: OrganizerTests.mergePlan)
+        let harness = await OrganizerTests.harness(provider: provider)
+        let id = SessionID()
+        try await harness.queue.enqueue(pending(harness, id: id))
+
+        await harness.organizer.retryQueuedSessions()
+        await harness.organizer.drain()
+        #expect(harness.recorder.kinds.contains("proposed"))
+        #expect(await harness.queue.count == 0, "proposed is terminal")
+    }
+
+    @Test("a terminal failure clears the row; a retryable one re-queues with the attempt count")
+    func failuresDisposeCorrectly() async throws {
+        // Non-queueable: a bad request is a real failure, not a "come back later".
+        var harness = await OrganizerTests.harness(provider: ScriptedProvider(failing: .badRequest(message: "no")))
+        var id = SessionID()
+        try await harness.queue.enqueue(pending(harness, id: id))
+        await harness.organizer.retryQueuedSessions()
+        await harness.organizer.drain()
+        #expect(await harness.queue.count == 0, "a 400 must not retry forever")
+
+        // Queueable: the row is upserted with attempts+1, never lost.
+        harness = await OrganizerTests.harness(provider: ScriptedProvider(failing: .network(code: 1, description: "down")))
+        id = SessionID()
+        try await harness.queue.enqueue(pending(harness, id: id, attempts: 2))
+        await harness.organizer.retryQueuedSessions()
+        await harness.organizer.drain()
+        let rows = try await harness.queue.all()
+        #expect(rows.count == 1)
+        #expect(rows.first?.attempts == 3, "the attempt count is durable")
+    }
+}
