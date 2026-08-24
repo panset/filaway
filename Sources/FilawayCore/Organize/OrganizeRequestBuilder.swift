@@ -16,7 +16,7 @@ import Foundation
 /// | `maxTokens` | 4 096 | a plan is small; a truncated one is unusable |
 /// | `thinking` | adaptive | the filing decision is the hard part |
 /// | `effort` | `low` | plans are short and the user pays per token (FR-6.2) |
-/// | `timeout` | 60 s | `AIPurpose.organize`'s budget |
+/// | `timeout` | 60 s Claude, 180 s Ollama | `providerKind.timeout(for:)` (ADR-069) |
 public enum OrganizeRequestBuilder {
     /// The marker `organize.v1` uses to pull in the shared output contract.
     ///
@@ -54,7 +54,7 @@ public enum OrganizeRequestBuilder {
             maxTokens: maxTokens,
             thinking: .adaptive(),
             effort: settings.effort,
-            timeout: AIPurpose.organize.defaultTimeout
+            timeout: settings.requestTimeout
         )
     }
 }

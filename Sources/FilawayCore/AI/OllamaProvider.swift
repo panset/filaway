@@ -104,6 +104,39 @@ public struct OllamaProvider: AIProvider {
         return try OllamaWire.models(from: payload)
     }
 
+    /// Asks the daemon to load the model and keep it resident, without asking
+    /// it anything (P2-03, ADR-069).
+    ///
+    /// Ollama's documented preload: `POST /api/chat` with an empty `messages`
+    /// array loads the weights and returns. It matters because the *first*
+    /// answer card after a launch otherwise pays the cold model load — seconds
+    /// on an 8B model — and loses the 5 s race in ``AnswerExtractor`` for no
+    /// reason other than timing.
+    ///
+    /// It never throws and it is never awaited on a user-visible path: a daemon
+    /// that is not running is exactly the case the status pill already covers.
+    public func warmUp(model: AIModel? = nil) async {
+        let body = JSONValue.object([
+            "model": .string((model ?? configuration.model).id),
+            "messages": .array([]),
+            "stream": .bool(false),
+            "keep_alive": .string(OllamaWire.keepAlive),
+        ])
+        do {
+            _ = try await perform(
+                path: OllamaWire.chatPath,
+                method: "POST",
+                body: try body.canonicalData(),
+                timeout: AIProviderKind.ollama.timeout(for: .validate),
+                model: (model ?? configuration.model).id
+            )
+            log.debug("ollama warm-up ok model=\((model ?? configuration.model).id, privacy: .public)")
+        } catch {
+            // Content-free by construction, and not an error anybody acts on.
+            log.debug("ollama warm-up skipped: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: - Transport
 
     private func send(

@@ -50,7 +50,7 @@ import Foundation
 public actor Organizer {
     // MARK: Dependencies
 
-    private let provider: any AIProvider
+    private var provider: any AIProvider
     private let source: any OrganizeLibrarySource
     private let baselines: any BaselineStore
     private let applier: any PlanApplying
@@ -203,6 +203,22 @@ public actor Organizer {
     public func setSettings(_ settings: OrganizerSettings) {
         self.settings = settings
     }
+
+    /// The backend changed under the organizer's feet (FR-6.5, FR-8.1).
+    ///
+    /// Settings → AI switching Claude ↔ Ollama, or the base URL or the local
+    /// model tag moving, must not need a relaunch. Requests already in flight
+    /// keep the provider they started with — swapping mid-request would mean a
+    /// half-finished exchange on one wire format and a decode on another — and
+    /// the next request uses the new one. Pair it with ``setSettings(_:)`` so
+    /// the model and the timeout move with it (ADR-069).
+    public func setProvider(_ provider: any AIProvider) {
+        self.provider = provider
+        log.info("organizer provider is now \(provider.identifier, privacy: .public)")
+    }
+
+    /// Which provider the next request will use. Visible for the smoke phase.
+    public var providerIdentifier: String { provider.identifier }
 
     /// The AI status pill moved. Reaching `connected` drains the offline queue
     /// (FR-6.4).

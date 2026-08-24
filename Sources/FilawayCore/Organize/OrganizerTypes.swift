@@ -16,6 +16,14 @@ public struct OrganizerSettings: Sendable, Equatable {
     public var mode: OrganizeMode
     /// plan §1 "Default models": Sonnet 5, with Opus 5 as the advanced override.
     public var model: AIModel
+    /// Which backend the request goes to (FR-6.5, P2-03).
+    ///
+    /// It is *not* a duplicate of the provider object the organizer holds: the
+    /// provider knows how to speak the wire format, this says how long to wait
+    /// for it. An 8B model on a laptop needs 180 s where Sonnet needs 60
+    /// (ADR-054, ADR-069), and the request budget is built here rather than
+    /// sniffed off the provider so a replayed or mocked run can name it too.
+    public var providerKind: AIProviderKind
     /// FR-4.5. Applied structurally, before any prompt is built.
     public var excludedFolders: [String]
     /// Different notes may be organized concurrently; the same note never is.
@@ -36,6 +44,7 @@ public struct OrganizerSettings: Sendable, Equatable {
     public init(
         mode: OrganizeMode = .ask,
         model: AIModel = .defaultOrganize,
+        providerKind: AIProviderKind = .claude,
         excludedFolders: [String] = [],
         maxConcurrentRequests: Int = 2,
         tokenBudget: Int = 6_000,
@@ -48,6 +57,7 @@ public struct OrganizerSettings: Sendable, Equatable {
     ) {
         self.mode = mode
         self.model = model
+        self.providerKind = providerKind
         self.excludedFolders = excludedFolders
         self.maxConcurrentRequests = Swift.max(1, maxConcurrentRequests)
         self.tokenBudget = tokenBudget
@@ -58,6 +68,9 @@ public struct OrganizerSettings: Sendable, Equatable {
         self.retryPolicy = retryPolicy
         self.maxQueueAttempts = Swift.max(1, maxQueueAttempts)
     }
+
+    /// The wall-clock budget one organize request gets (ADR-069).
+    public var requestTimeout: TimeInterval { providerKind.timeout(for: .organize) }
 
     var contextBuilder: OrganizeContextBuilder {
         OrganizeContextBuilder(

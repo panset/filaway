@@ -308,7 +308,7 @@ struct AnswerGoldenTests {
         let scenario = AnswerGolden.scenario("curl-code-card")
         let answer = await extractor.extract(query: scenario.query, results: scenario.results)
 
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
         #expect(answer.confidence == .high)
         #expect(answer.promptVersion == .answer)
         #expect(answer.model == .haiku45)
@@ -332,7 +332,7 @@ struct AnswerGoldenTests {
         #expect(scenario.results.strippedQuery == "the thing I edited about auth")
 
         let answer = await extractor.extract(query: scenario.query, results: scenario.results)
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
         let card = try #require(answer.card)
         #expect(!card.isCode, "prose answers are not code blocks")
         #expect(card.noteID == AnswerGolden.authID)
@@ -373,7 +373,7 @@ struct AnswerGoldenTests {
         let card = try #require(answer.card)
         #expect(card.snippetText == AnswerGolden.curlCommand, "the chunk's own command, not the model's")
         #expect(!card.snippetText.contains("--fail"))
-        #expect(answer.source == .claude)
+        #expect(answer.source == .model)
     }
 
     @Test("no committed answer fixture carries excluded text (FR-4.5)")
