@@ -226,6 +226,11 @@ struct PlanRepairTests {
                 segment: "another line that is not there",
                 destination: .newNote(title: "Fresh subject", folderPath: "Commands", tags: [])
             )),
+            // Deeper than the library allows (P2-09).
+            .createNote(CreateNoteAction(
+                title: "Deep subject", folderPath: "Home/Projects/Skills/Cinegram", content: "deep\n"
+            )),
+            .moveNote(MoveNoteAction(note: .id(SampleLibrary.untitledID), toFolderPath: "A/B/C/D")),
             // Untouchable: an excluded target, and a target that does not exist.
             .createNote(CreateNoteAction(title: "Salary", folderPath: "Private", content: "no\n")),
             .appendToNote(AppendToNoteAction(target: .id(NoteID()), content: "nowhere\n")),
@@ -358,9 +363,12 @@ struct PlanRepairMissingFolderTests {
         #expect(result.plan.neverDeletesUserText)
     }
 
-    @Test("an unsafe or over-deep folder is not repaired")
+    /// An over-deep folder used to belong here too; since P2-09 rule 5 clamps
+    /// it first and rule 4 then creates the *clamped* folder (ADR-073), so the
+    /// only paths left un-repaired are the ones nothing could make safe.
+    @Test("an unsafe folder is not repaired")
     func leavesUnsafeFoldersAlone() throws {
-        for folder in ["A/B/C", "../up", ""] {
+        for folder in ["../up", ""] {
             let original = PlanRepairTests.plan([
                 .createNote(CreateNoteAction(title: "x", folderPath: folder, content: "y\n")),
             ])
@@ -379,5 +387,180 @@ struct PlanRepairMissingFolderTests {
         let result = PlanRepair.repair(original, in: PlanRepairTests.context)
         #expect(!result.didRepair, "nothing to fix")
         #expect(result.plan.actions == original.actions)
+    }
+}
+
+// MARK: - Rule 5: a folder deeper than the library allows (P2-09)
+
+/// The third live plan-quality failure, in the user's own words:
+/// `folderTooDeep: Home/Projects/… /Skills/… is 5 levels deep; the cap is 2`.
+/// ADR-073.
+@Suite("Plan repair — folder depth (P2-09)")
+struct PlanRepairFolderDepthTests {
+
+    static func validate(_ plan: OrganizationPlan) -> PlanValidation {
+        PlanRepairTests.validate(plan)
+    }
+
+    /// A clamp keeps the last **two** components, so it can only ever land in a
+    /// folder that is itself two levels deep. `SampleLibrary` has none, which
+    /// is exactly the shape the live failure had — this context adds one so the
+    /// "clamped onto something that already exists" cases can be pinned.
+    static let nestedID = NoteID(UUID(uuidString: "55555555-5555-4555-8555-555555555555")!)
+    static let nestedPath = "Projects/Commands/curl.md"
+    static let nestedBody = "# curl\n\nAlready filed.\n"
+
+    static var nestedContext: OrganizeContext {
+        let notes = SampleLibrary.notes + [
+            SampleLibrary.note(id: nestedID, path: nestedPath, body: nestedBody),
+        ]
+        let snapshot = LibrarySnapshot(
+            notes: notes,
+            folderPaths: SampleLibrary.folderPaths + ["Projects", "Projects/Commands"],
+            scannedAt: Date(timeIntervalSince1970: 1_756_000_000)
+        )
+        var bodies = SampleLibrary.bodies
+        bodies[nestedID] = nestedBody
+        return OrganizeContext(snapshot: snapshot, excludedFolders: ["Private"], bodies: bodies)
+    }
+
+    static func nestedPlan(_ actions: [PlanAction]) -> OrganizationPlan {
+        var plan = OrganizationPlan(summary: "Filed the session.", actions: actions, model: AIModel.defaultOllama.id)
+        plan.preconditions = nestedContext.preconditions(for: plan)
+        return plan
+    }
+
+    static func validateNested(_ plan: OrganizationPlan) -> PlanValidation {
+        PlanValidator(context: nestedContext).validate(plan)
+    }
+
+    @Test("a five-level folder is clamped to its last two, and the plan then validates")
+    func clampsTheLiveFailure() throws {
+        let original = PlanRepairTests.plan([
+            .createNote(CreateNoteAction(
+                title: "Filaway Updates",
+                folderPath: "Home/Projects/Cinegram/Skills/Cinegram",
+                content: "- the card is too small\n"
+            )),
+        ])
+        #expect(Self.validate(original).hasError(.folderTooDeep), "the premise")
+
+        let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+        #expect(result.didRepair)
+        // Rule 5 clamps, rule 4 then remembers the folder does not exist yet.
+        #expect(Set(result.warnings.map(\.kind)) == [.repairedFolderDepth, .repairedMissingFolder])
+        #expect(result.plan.actions.first == .createFolder(CreateFolderAction(path: "Skills/Cinegram")))
+        guard case let .createNote(create) = result.plan.actions.last else {
+            Issue.record("expected the createNote to survive: \(result.plan.actions)")
+            return
+        }
+        #expect(create.folderPath == "Skills/Cinegram", "the deepest components carry the classification")
+        #expect(create.content == "- the card is too small\n", "the model's content, unchanged")
+        #expect(Self.validate(result.plan).isValid, "\(Self.validate(result.plan).summary)")
+        #expect(result.plan.neverDeletesUserText)
+    }
+
+    @Test("every action kind that names a folder is clamped")
+    func clampsEveryFolderBearingAction() throws {
+        let deep = "One/Two/Three/Four"
+        let cases: [(PlanAction, String)] = [
+            (.createFolder(CreateFolderAction(path: deep)), "createFolder"),
+            (.createNote(CreateNoteAction(title: "New", folderPath: deep, content: "x\n")), "createNote"),
+            (.moveNote(MoveNoteAction(note: .id(SampleLibrary.untitledID), toFolderPath: deep)), "moveNote"),
+            (.moveSegment(MoveSegmentAction(
+                source: .id(SampleLibrary.scratchID),
+                segment: SampleLibrary.segment,
+                destination: .newNote(title: "New", folderPath: deep, tags: [])
+            )), "moveSegment"),
+        ]
+        for (action, label) in cases {
+            let result = PlanRepair.repair(PlanRepairTests.plan([action]), in: PlanRepairTests.context)
+            #expect(result.warnings.contains { $0.kind == .repairedFolderDepth }, "\(label) was not clamped")
+            let folders = result.plan.actions.flatMap(\.targetFolderPaths)
+            #expect(folders.allSatisfy { PathRules.depth(ofFolder: $0) <= PathRules.maxFolderDepth },
+                    "\(label) left a deep folder: \(folders)")
+            #expect(Self.validate(result.plan).isValid, "\(label): \(Self.validate(result.plan).summary)")
+        }
+    }
+
+    @Test("a folder that is already shallow enough is left byte-identical")
+    func leavesShallowFoldersAlone() throws {
+        for folder in ["", "Commands", "Commands/Shell"] {
+            let original = PlanRepairTests.plan([
+                .createNote(CreateNoteAction(title: "New subject", folderPath: folder, content: "x\n")),
+            ])
+            let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+            #expect(!result.warnings.contains { $0.kind == .repairedFolderDepth }, "\(folder)")
+        }
+    }
+
+    @Test("a deep path Filaway could not make safe anyway is left as the validator's rejection")
+    func refusesWhatItCannotJustify() throws {
+        // An unsafe component, an escape, and a clamp that would land inside a
+        // folder the user excluded from AI processing (FR-4.5).
+        for folder in ["A/B/C:d/E", "../A/B/C", "A/B/Private/Salary"] {
+            let original = PlanRepairTests.plan([
+                .createNote(CreateNoteAction(title: "New subject", folderPath: folder, content: "x\n")),
+            ])
+            let result = PlanRepair.repair(original, in: PlanRepairTests.context)
+            #expect(!result.warnings.contains { $0.kind == .repairedFolderDepth },
+                    "\(folder) must stay the validator's rejection")
+        }
+    }
+
+    @Test("a clamp never manufactures a collision a move cannot escape")
+    func neverClampsAMoveOntoAnExistingNote() throws {
+        // `Commands/curl.md` clamped into `Projects/Commands` would land on the
+        // note already there — and a move, unlike a creation, has no additive
+        // repair. It stays the validator's rejection.
+        let original = Self.nestedPlan([
+            .moveNote(MoveNoteAction(note: .id(SampleLibrary.curlID), toFolderPath: "Home/Projects/Commands")),
+        ])
+        let result = PlanRepair.repair(original, in: Self.nestedContext)
+        #expect(!result.warnings.contains { $0.kind == .repairedFolderDepth })
+        #expect(result.plan.actions == original.actions)
+
+        // The same move into a clamped folder with nothing in the way is fine.
+        let free = Self.nestedPlan([
+            .moveNote(MoveNoteAction(note: .id(SampleLibrary.untitledID), toFolderPath: "Home/Projects/Commands")),
+        ])
+        let moved = PlanRepair.repair(free, in: Self.nestedContext)
+        #expect(moved.warnings.contains { $0.kind == .repairedFolderDepth })
+        #expect(Self.validateNested(moved.plan).isValid, "\(Self.validateNested(moved.plan).summary)")
+    }
+
+    @Test("a clamped creation that lands on an existing note is repaired by rule 1")
+    func composesWithTheCollisionRule() throws {
+        let original = Self.nestedPlan([
+            .createNote(CreateNoteAction(
+                title: "curl", folderPath: "Home/Projects/Commands", content: "one more invocation\n"
+            )),
+        ])
+        #expect(Self.validateNested(original).hasError(.folderTooDeep), "the premise")
+
+        let result = PlanRepair.repair(original, in: Self.nestedContext)
+        #expect(Set(result.warnings.map(\.kind)) == [.repairedFolderDepth, .repairedCollision])
+        guard case let .appendToNote(append) = result.plan.actions.first else {
+            Issue.record("expected an appendToNote, got \(result.plan.actions)")
+            return
+        }
+        #expect(append.target.id == Self.nestedID)
+        #expect(Self.validateNested(result.plan).isValid, "\(Self.validateNested(result.plan).summary)")
+    }
+
+    @Test("clamping is a fixed point, and never loses or invents user text")
+    func clampingIsAFixedPoint() throws {
+        let deep = ["Home/Projects/Cinegram/Skills/Cinegram", "A/B/C", "One/Two/Three/Four/Five/Six"]
+        for folder in deep {
+            let original = PlanRepairTests.plan([
+                .createNote(CreateNoteAction(title: "New subject", folderPath: folder, content: "x\n")),
+            ])
+            let once = PlanRepair.repair(original, in: PlanRepairTests.context)
+            #expect(once.plan.summary == original.summary)
+            #expect(once.plan.neverDeletesUserText)
+            let twice = PlanRepair.repair(once.plan, in: PlanRepairTests.context)
+            #expect(!twice.didRepair, "\(folder) still had something to repair")
+            #expect(twice.plan == once.plan)
+        }
     }
 }
