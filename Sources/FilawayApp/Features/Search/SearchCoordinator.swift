@@ -247,6 +247,7 @@ final class SearchCoordinator: ObservableObject {
             selectedIndex = -1
             return
         }
+        anchorHover()
         if selectedIndex < 0 {
             selectedIndex = delta > 0 ? 0 : count - 1
             return
@@ -259,7 +260,37 @@ final class SearchCoordinator: ObservableObject {
     func select(index: Int) {
         guard index >= 0, index < itemCount else { return }
         selectedIndex = index
+        anchorHover()
     }
+
+    /// A row reporting the pointer inside it (ADR-034 amendment).
+    ///
+    /// **A stationary pointer must not steal the keyboard's selection.** The
+    /// panel is drawn *under* wherever the pointer happens to be resting, so
+    /// SwiftUI fires `onHover(true)` for whatever row lands beneath it — with
+    /// no mouse movement at all. Left to select, that silently moves ⏎ and ⌘C
+    /// off the answer card and onto a row the user never pointed at: ⌘K, type,
+    /// ⏎, ⏎ then opens the wrong note. Spotlight has the same layout and the
+    /// same rule — the mouse takes over only once it moves.
+    ///
+    /// ``anchorHover()`` records where the pointer was when something *else*
+    /// set the selection; a hover reported from that same spot is the panel
+    /// arriving under the pointer, and is ignored until it moves.
+    func hover(index: Int) {
+        if let anchor = hoverAnchor {
+            let now = NSEvent.mouseLocation
+            guard abs(now.x - anchor.x) > 1 || abs(now.y - anchor.y) > 1 else { return }
+        }
+        select(index: index)
+    }
+
+    /// Records the pointer position alongside a selection the pointer did not
+    /// make, so ``hover(index:)`` can tell "resting there" from "pointed at".
+    private func anchorHover() {
+        hoverAnchor = NSEvent.mouseLocation
+    }
+
+    private var hoverAnchor: NSPoint?
 
     var selectedHit: KeywordHit? {
         guard mode == .keyword else { return nil }
@@ -362,6 +393,7 @@ final class SearchCoordinator: ObservableObject {
         isSearching = false
         // Spotlight preselects the top hit so ⏎ opens it without an arrow key.
         selectedIndex = hits.isEmpty ? -1 : 0
+        anchorHover()
     }
 
     // MARK: - Semantic (M3-06, FR-5.1/5.2/5.5)
@@ -503,6 +535,7 @@ final class SearchCoordinator: ObservableObject {
             isAsking = true
         }
         selectedIndex = results.notes.isEmpty ? -1 : 0
+        anchorHover()
     }
 
     private func deliverAnswer(
@@ -518,6 +551,7 @@ final class SearchCoordinator: ObservableObject {
         // The card is the new item 0, so a selection on the old list would
         // point one row off. Preselect the card, or the first note.
         selectedIndex = itemCount == 0 ? -1 : (hadSelection || answer.card != nil ? 0 : -1)
+        anchorHover()
     }
 
     private func deliverRetrievalFailure(generation: Int) {

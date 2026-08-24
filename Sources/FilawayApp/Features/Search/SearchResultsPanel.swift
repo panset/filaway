@@ -147,7 +147,7 @@ struct SearchResultsPanel: View {
                         .id(hit.id)
                         .contentShape(Rectangle())
                         .onTapGesture { coordinator.open(hit) }
-                        .onHover { inside in if inside { coordinator.select(index: index) } }
+                        .onHover { inside in if inside { coordinator.hover(index: index) } }
                     }
                 }
                 .padding(.horizontal, 6)
@@ -202,7 +202,7 @@ struct SearchResultsPanel: View {
                                 onCopy: { coordinator.copyAnswerSnippet() }
                             )
                             .id(SemanticRowID.card)
-                            .onHover { inside in if inside { coordinator.select(index: 0) } }
+                            .onHover { inside in if inside { coordinator.hover(index: 0) } }
                             .padding(.bottom, 4)
                         } else if coordinator.isAsking {
                             // The list is already up; only the card is pending.
@@ -221,7 +221,7 @@ struct SearchResultsPanel: View {
                             .id(SemanticRowID.note(note.id))
                             .contentShape(Rectangle())
                             .onTapGesture { coordinator.open(.note(note)) }
-                            .onHover { inside in if inside { coordinator.select(index: index) } }
+                            .onHover { inside in if inside { coordinator.hover(index: index) } }
                         }
                     }
                     .padding(.horizontal, 6)

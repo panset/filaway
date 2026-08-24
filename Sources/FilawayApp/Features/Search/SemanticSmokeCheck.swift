@@ -91,6 +91,14 @@ enum SemanticSmokeCheck {
         // thinking" is an ordering proof rather than a race.
         semantic.overrideProvider(Self.answeringProvider(delay: 0.6))
         semantic.setProviderReady(true)
+        // **Leave the pointer resting where the rows are about to be drawn.**
+        // A panel that opens under a stationary mouse must not hand it the
+        // selection: SwiftUI reports `onHover(true)` for whatever row lands
+        // beneath the cursor with no movement at all, and letting that select
+        // moves ⏎ and ⌘C off the answer card onto a note the user never pointed
+        // at (ADR-034 amendment). Parked *before* the query, so the pointer is
+        // motionless for everything below — which is the whole point.
+        let parkedPointer = await parkPointerOverTheFirstRow()
         search.runSemantic()
         let listFirst = await poll(seconds: 20) { !search.isRetrieving && !search.semanticNotes.isEmpty }
         check("hybrid-list-paints-first", listFirst, "\(search.semanticNotes.map(\.title))")
@@ -112,7 +120,8 @@ enum SemanticSmokeCheck {
         check("card-source-is-the-note", card.title == Self.stagingTitle, card.title)
         check("card-source-label-has-the-folder", card.sourceLabel == "Commands / \(Self.stagingTitle)",
               card.sourceLabel)
-        check("card-is-selected-first", search.selectedIndex == 0 && search.isAnswerCardSelected)
+        check("card-is-selected-first", search.selectedIndex == 0 && search.isAnswerCardSelected,
+              parkedPointer ? "with the pointer resting on row 1" : "no window to park a pointer in")
         check("ranked-notes-below-the-card", !search.semanticNotes.isEmpty,
               "\(search.semanticNotes.map(\.title))")
         check("card-note-not-repeated-below",
@@ -162,6 +171,8 @@ enum SemanticSmokeCheck {
         } else {
             print("SMOKE info no-window — skipping the scroll assertions (headless session)")
         }
+
+        restorePointer()
 
         // 5 — a temporal query filters by edit time (FR-5.3). Only the auth
         // note was touched two days ago.
@@ -225,6 +236,54 @@ enum SemanticSmokeCheck {
         search.handleEscape()
         print("SMOKE phase=semantic result failures=\(failures)")
         return failures
+    }
+
+    /// Where the pointer was before ``parkPointerOverTheFirstRow()`` moved it.
+    @MainActor private static var pointerOrigin: NSPoint?
+
+    /// Moves the real pointer onto the row that sits under the answer card and
+    /// leaves it there.
+    ///
+    /// Both halves are needed: `CGWarpMouseCursorPosition` moves the cursor but
+    /// generates no event, and a posted `NSEvent` is routed without moving the
+    /// cursor `onHover` reads — either alone leaves the panel none the wiser.
+    ///
+    /// The offset is Figure 2b's layout: caption, then the answer card, then
+    /// the rows. Returns `false` in a session with no window, where there is
+    /// nothing to prove.
+    @MainActor
+    private static func parkPointerOverTheFirstRow() async -> Bool {
+        // `mainWindow` is nil whenever the app is not the active one, which a
+        // scripted run cannot rely on being true — go by the scene itself.
+        let window = NSApp.mainWindow ?? NSApp.keyWindow
+            ?? NSApp.windows.first { $0.contentView != nil && $0.isVisible }
+        guard let window, let screen = NSScreen.screens.first else { return false }
+        pointerOrigin = NSEvent.mouseLocation
+        window.acceptsMouseMovedEvents = true
+        let frame = window.frame
+        /// Below the caption and the card, on the first ranked note.
+        let inset: CGFloat = 180
+        CGWarpMouseCursorPosition(
+            CGPoint(x: frame.midX, y: screen.frame.height - frame.maxY + inset))
+        if let move = NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: NSPoint(x: frame.width / 2, y: frame.height - inset),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 0, pressure: 0
+        ) {
+            NSApp.postEvent(move, atStart: false)
+        }
+        await settle(seconds: 0.3)
+        return true
+    }
+
+    /// Puts the pointer back where the person running the suite left it.
+    @MainActor
+    private static func restorePointer() {
+        guard let origin = pointerOrigin, let screen = NSScreen.screens.first else { return }
+        pointerOrigin = nil
+        CGWarpMouseCursorPosition(CGPoint(x: origin.x, y: screen.frame.height - origin.y))
     }
 
     // MARK: - The scripted provider
