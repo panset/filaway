@@ -26,6 +26,15 @@ struct APIKeySheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // FR-6.5: the keyless option is never more than one sentence away.
+            // The key stays in the Keychain either way, so switching costs
+            // nothing and switching back needs no re-entry.
+            Text("Prefer to keep everything on this Mac? Choose "
+                + "\(AIConnectionCopy.chooserTitle(.ollama)) in Settings → AI — no key needed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             SecureField("sk-ant-…", text: $key)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Claude API key")
