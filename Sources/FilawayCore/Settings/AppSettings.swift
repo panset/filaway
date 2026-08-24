@@ -43,6 +43,9 @@ public final class AppSettings: @unchecked Sendable {
         case aiConnectionSkipped
         case pasteIntelligenceEnabled
         case usageMonthStart
+        case aiProvider
+        case ollamaBaseURL
+        case ollamaModel
     }
 
     /// Cancels an ``AppSettings/observe(_:)`` registration. Dropping it is
@@ -99,6 +102,9 @@ public final class AppSettings: @unchecked Sendable {
         static let aiConnectionSkipped = "ai.connectionSkipped"
         static let pasteIntelligenceEnabled = "editor.pasteIntelligence"
         static let usageMonthStart = "ai.usageMonthStart"
+        static let aiProvider = "ai.provider"
+        static let ollamaBaseURL = "ai.ollama.baseURL"
+        static let ollamaModel = "ai.ollama.model"
 
         static func excludedFolders(_ libraryKey: String) -> String { "ai.excludedFolders.\(libraryKey)" }
     }
@@ -222,13 +228,74 @@ public final class AppSettings: @unchecked Sendable {
     }
 
     /// What the organizer should actually send.
+    ///
+    /// Under Ollama the model is ``ollamaModel`` — the Advanced override is a
+    /// Claude-only concept (FR-6.2, FR-6.5).
     public var effectiveOrganizeModel: AIModel {
-        advancedModelOverride ? organizeModel : .defaultOrganize
+        switch aiProvider {
+        case .ollama: return ollamaModel
+        case .claude: return advancedModelOverride ? organizeModel : .defaultOrganize
+        }
     }
 
     /// What search answer extraction should actually send.
     public var effectiveSearchModel: AIModel {
-        advancedModelOverride ? searchModel : .defaultSearch
+        switch aiProvider {
+        case .ollama: return ollamaModel
+        case .claude: return advancedModelOverride ? searchModel : .defaultSearch
+        }
+    }
+
+    // MARK: - Provider (FR-6.5, NFR-5)
+
+    /// Which provider the organizer and the answer card talk to. Claude unless
+    /// the user picked the local model; `FILAWAY_AI_PROVIDER` overrides both
+    /// (`AIProviderKind.fromEnvironment`) and is applied by the app's factory,
+    /// not here — this is the stored preference.
+    public var aiProvider: AIProviderKind {
+        get {
+            guard let raw = defaults.string(forKey: DefaultsKey.aiProvider),
+                  let kind = AIProviderKind(rawValue: raw) else { return .claude }
+            return kind
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: DefaultsKey.aiProvider)
+            notify(.aiProvider)
+        }
+    }
+
+    /// The Ollama daemon. Stored only when it is a valid base URL
+    /// (`OllamaConfiguration.isValidBaseURL` — plain `http` on loopback only);
+    /// an invalid one is ignored and the previous value stays.
+    public var ollamaBaseURL: URL {
+        get {
+            guard let raw = defaults.string(forKey: DefaultsKey.ollamaBaseURL),
+                  let url = URL(string: raw), OllamaConfiguration.isValidBaseURL(url)
+            else { return OllamaConfiguration.defaultBaseURL }
+            return url
+        }
+        set {
+            guard OllamaConfiguration.isValidBaseURL(newValue) else { return }
+            defaults.set(newValue.absoluteString, forKey: DefaultsKey.ollamaBaseURL)
+            notify(.ollamaBaseURL)
+        }
+    }
+
+    /// The Ollama model tag (`llama3.1:8b` by default). Blank resets to the
+    /// default.
+    public var ollamaModel: AIModel {
+        get { storedModel(DefaultsKey.ollamaModel) ?? OllamaConfiguration.defaultModel }
+        set {
+            let id = newValue.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if id.isEmpty { defaults.removeObject(forKey: DefaultsKey.ollamaModel) }
+            else { defaults.set(id, forKey: DefaultsKey.ollamaModel) }
+            notify(.ollamaModel)
+        }
+    }
+
+    /// The provider's connection settings as the factory wants them.
+    public var ollamaConfiguration: OllamaConfiguration {
+        OllamaConfiguration(baseURL: ollamaBaseURL, model: ollamaModel)
     }
 
     /// Resets both pickers to the house defaults and turns the override off.

@@ -282,3 +282,57 @@ final class Locked<Value>: @unchecked Sendable {
         body(&storage)
     }
 }
+
+@Suite("AppSettings — provider (P2-02 seam)")
+struct AppSettingsProviderTests {
+    private func fresh() -> AppSettings {
+        let suite = "filaway.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return AppSettings(defaults: defaults, libraryKey: "lib")
+    }
+
+    @Test("Claude is the default and the Advanced override stays Claude-only")
+    func defaults() {
+        let s = fresh()
+        #expect(s.aiProvider == .claude)
+        #expect(s.ollamaBaseURL == OllamaConfiguration.defaultBaseURL)
+        #expect(s.ollamaModel == .defaultOllama)
+        #expect(s.effectiveOrganizeModel == .defaultOrganize)
+
+        s.aiProvider = .ollama
+        #expect(s.effectiveOrganizeModel == .defaultOllama)
+        #expect(s.effectiveSearchModel == .defaultOllama)
+        s.advancedModelOverride = true
+        s.organizeModel = .opus5
+        #expect(s.effectiveOrganizeModel == .defaultOllama, "the override is a Claude concept")
+        s.aiProvider = .claude
+        #expect(s.effectiveOrganizeModel == .opus5)
+    }
+
+    @Test("Ollama URL and model persist, an invalid URL is ignored, blank model resets")
+    func ollamaValues() {
+        let s = fresh()
+        let seen = Locked<[AppSettings.Key]>([])
+        let token = s.observe { key in seen.mutate { $0.append(key) } }
+        defer { token.invalidate() }
+
+        s.ollamaBaseURL = URL(string: "http://127.0.0.1:11435")!
+        #expect(s.ollamaBaseURL.absoluteString == "http://127.0.0.1:11435")
+        s.ollamaBaseURL = URL(string: "http://example.com:11434")!
+        #expect(s.ollamaBaseURL.absoluteString == "http://127.0.0.1:11435", "plain http off loopback is rejected")
+        s.ollamaBaseURL = URL(string: "https://ollama.example.com")!
+        #expect(s.ollamaBaseURL.host == "ollama.example.com")
+
+        s.ollamaModel = AIModel("qwen3:8b")
+        #expect(s.ollamaModel.id == "qwen3:8b")
+        #expect(s.ollamaConfiguration == OllamaConfiguration(baseURL: s.ollamaBaseURL, model: AIModel("qwen3:8b")))
+        s.ollamaModel = AIModel("  ")
+        #expect(s.ollamaModel == .defaultOllama)
+
+        #expect(seen.value.contains(.ollamaBaseURL))
+        #expect(seen.value.contains(.ollamaModel))
+        s.aiProvider = .ollama
+        #expect(seen.value.last == .aiProvider)
+    }
+}
