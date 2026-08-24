@@ -56,6 +56,7 @@ enum SmokeDriver {
             case "organize-auto": await runOrganizePhase(mode: "auto")
             case "organize-offline": await runOrganizePhase(mode: "offline")
             case "organize-ollama": await runOrganizePhase(mode: "ollama")
+            case "organize-ollama-suite": await runOrganizeSuitePhase()
             case "2": await runRelaunchPhase()
             default: await runCapturePhase()
             }
@@ -313,6 +314,17 @@ enum SmokeDriver {
             + "fixtures=\(ProcessInfo.processInfo.environment["FILAWAY_AI_FIXTURES"] ?? "unset")")
         failures += await OrganizeSmokeCheck.run(mode: mode)
         print("SMOKE phase=organize-\(mode) result failures=\(failures)")
+        finish()
+    }
+
+    /// P2-09: three live scenarios on the library shapes real dogfooding
+    /// failed on. See `Features/Organize/OrganizeSuiteSmokeCheck.swift`.
+    private static func runOrganizeSuitePhase() async {
+        header()
+        print("SMOKE info ai-mode=\(ProcessInfo.processInfo.environment["FILAWAY_AI_MODE"] ?? "unset") "
+            + "provider=\(ProcessInfo.processInfo.environment["FILAWAY_AI_PROVIDER"] ?? "unset")")
+        failures += await OrganizeSuiteSmokeCheck.run()
+        print("SMOKE phase=organize-ollama-suite result failures=\(failures)")
         finish()
     }
 
