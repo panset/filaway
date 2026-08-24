@@ -530,17 +530,17 @@ func largeDocumentEditPerformance() {
     // Release is the real budget (≈0.06 ms/edit); debug is ~40× slower and the
     // suite often runs beside concurrent builds, so only gate loosely there.
     #if DEBUG
-    #expect(mean < 15.0)
-    #expect(median < 15.0)
-    #expect(p95 < 30.0)
+    #expect(mean < 15.0 * TestEnvironment.perfBudgetScale)
+    #expect(median < 15.0 * TestEnvironment.perfBudgetScale)
+    #expect(p95 < 30.0 * TestEnvironment.perfBudgetScale)
     #else
-    #expect(mean < 5.0)
+    #expect(mean < 5.0 * TestEnvironment.perfBudgetScale)
     #if DEBUG
-    #expect(median < 15.0)
-    #expect(p95 < 30.0)
+    #expect(median < 15.0 * TestEnvironment.perfBudgetScale)
+    #expect(p95 < 30.0 * TestEnvironment.perfBudgetScale)
     #else
-    #expect(median < 5.0)
-    #expect(p95 < 10.0)
+    #expect(median < 5.0 * TestEnvironment.perfBudgetScale)
+    #expect(p95 < 10.0 * TestEnvironment.perfBudgetScale)
     #endif
     #endif
 
@@ -576,6 +576,6 @@ func mediumDocumentEditPerformance() {
     // Same reasoning as the 1 MB gate above: a single worst edit is a
     // scheduling artefact when the machine is running other test suites, so
     // the assertion is on central tendency with headroom at p95.
-    #expect(median < 5.0)
-    #expect(p95 < 10.0)
+    #expect(median < 5.0 * TestEnvironment.perfBudgetScale)
+    #expect(p95 < 10.0 * TestEnvironment.perfBudgetScale)
 }

@@ -20,8 +20,16 @@ jobs:
       # macos-15 ships Xcode, so `swift build --arch arm64 --arch x86_64` works
       # here even though it cannot on the dev machine (plan §8, ADR-001).
       # Selecting it explicitly is what makes the universal check below real.
+      # The image's default Xcode symlink can lag: its xcbuild reported
+      # "Swift language versions … supported: []" for a package that sets
+      # per-target language modes (5 for the app, 6 for Core), failing the
+      # two-arch build. The newest installed Xcode knows both modes.
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XC" ] || XC=/Applications/Xcode.app
+          echo "selecting $XC"
+          sudo xcode-select -s "$XC"
 
       - name: Show toolchain
         run: |
