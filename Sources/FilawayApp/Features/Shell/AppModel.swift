@@ -264,6 +264,12 @@ final class AppModel: ObservableObject {
             organize.onOpenAISettings = {
                 NotificationCenter.default.post(name: .filawayOpenAISettings, object: nil)
             }
+            // FR-7.1 + FR-6.5: the sidebar's gentle prompt is about "does this
+            // Mac have an AI Filaway can use", and the pill is the only thing
+            // that knows — a local daemon answers with no key in the Keychain.
+            organize.onStatusChanged = { status in
+                ConnectAIPromptModel.shared.noteAIStatus(status)
+            }
             self.organize = organize
 
             Task { [weak self] in

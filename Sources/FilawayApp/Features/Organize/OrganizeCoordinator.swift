@@ -64,7 +64,9 @@ final class OrganizeCoordinator: ObservableObject {
 
     // MARK: - Status (FR-6.4, M2-09)
 
-    @Published private(set) var status: AIStatus = .connected
+    @Published private(set) var status: AIStatus = .connected {
+        didSet { if status != oldValue { onStatusChanged?(status) } }
+    }
     /// Sessions waiting for the provider to come back.
     @Published private(set) var queuedSessionCount = 0
     /// `true` once the pipeline is running. Nothing below is non-nil before it.
@@ -104,6 +106,10 @@ final class OrganizeCoordinator: ObservableObject {
     var onBanner: ((String, String) -> Void)?
     /// Clicking the AI status pill. Settings is M2-11's; this is the seam.
     var onOpenAISettings: (() -> Void)?
+    /// The pill moved. FR-7.1's gentle "connect your AI" row listens, so it
+    /// stops offering a connection that is already working — which under
+    /// FR-6.5 may be a local daemon with no key at all (P2-03).
+    var onStatusChanged: ((AIStatus) -> Void)?
 
     // MARK: - Init
 
@@ -364,6 +370,15 @@ final class OrganizeCoordinator: ObservableObject {
             return
         }
         Self.warmUpIfNeeded(kind: kind, ollama: ollama)
+        // Leaving Claude drops the key-based pill state on the floor; arriving
+        // at Claude re-subscribes to it.
+        if kind == .ollama {
+            connectionTask?.cancel()
+            connectionTask = nil
+            if status == .notConfigured || status == .invalidKey { status = .connected }
+        } else {
+            observeConnection()
+        }
         let organizerSettings = settings.organizerSettings
         Task {
             await organizer.setProvider(provider)
@@ -381,6 +396,11 @@ final class OrganizeCoordinator: ObservableObject {
     /// status gates the queue.
     private func observeConnection() {
         guard connectionTask == nil else { return }
+        // FR-6.5: the local provider has no credential, so folding in the key
+        // manager would park the pill on "Connect AI" for a setup that works
+        // perfectly. What the pill reports under Ollama is what the *requests*
+        // report — offline, rate limited, or nothing at all (ADR-069).
+        guard settingsSource.providerKind != .ollama else { return }
         let connection = SettingsModel.shared.connection
         connectionTask = Task { [weak self] in
             for await status in await connection.statusChanges() {

@@ -38,6 +38,21 @@ final class OnboardingWindowController {
     private let keyStatusIcon = NSImageView()
     private let claudeCheckmark = NSImageView()
 
+    /// Step 2's second card — the local daemon (FR-6.5, P2-03).
+    private let claudeRadio = NSButton(radioButtonWithTitle: "Claude API", target: nil, action: nil)
+    private let ollamaRadio = NSButton(
+        radioButtonWithTitle: "Local model (Ollama)", target: nil, action: nil
+    )
+    private let claudeBody = NSStackView()
+    private let ollamaBody = NSStackView()
+    private let ollamaURLField = NSTextField(string: OllamaSetupModel.defaultBaseURLText)
+    private let ollamaModelPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let ollamaRefreshButton = NSButton(title: "Refresh", target: nil, action: nil)
+    private let ollamaTestButton = NSButton(title: "Test connection", target: nil, action: nil)
+    private let ollamaStatusLabel = NSTextField(labelWithString: "")
+    private let ollamaStatusIcon = NSImageView()
+    private let ollamaCheckmark = NSImageView()
+
     private var stepViews: [OnboardingModel.Step: NSView] = [:]
 
     // MARK: - Construction
@@ -159,7 +174,7 @@ final class OnboardingWindowController {
         folderSummaryLabel.stringValue = model.folderSummary
 
         renderKeyStatus()
-        claudeCheckmark.isHidden = !model.isConnected
+        renderProviderChoice()
         validateButton.isEnabled = model.canValidateKey
         keyField.isEnabled = model.keyPhase != .validating
         if keyField.stringValue != model.apiKey { keyField.stringValue = model.apiKey }
@@ -167,6 +182,7 @@ final class OnboardingWindowController {
         backButton.isEnabled = model.canGoBack
         continueButton.title = model.step == .orientation ? "Start writing" : "Continue"
         continueButton.setAccessibilityLabel(continueButton.title)
+        continueButton.isEnabled = model.canContinue
         skipButton.isHidden = !(model.step == .connectAI && !model.isConnected)
     }
 
@@ -244,8 +260,10 @@ final class OnboardingWindowController {
         let icon = NSImageView(image: symbol("cloud"))
         icon.contentTintColor = .secondaryLabelColor
         icon.setAccessibilityHidden(true)
-        let name = NSTextField(labelWithString: "Claude API")
-        name.font = .preferredFont(forTextStyle: .headline)
+        claudeRadio.font = .preferredFont(forTextStyle: .headline)
+        claudeRadio.target = self
+        claudeRadio.action = #selector(providerTapped(_:))
+        claudeRadio.setAccessibilityLabel("Claude API. Best quality, needs an API key.")
         let blurb = NSTextField(labelWithString: "Best quality · needs API key")
         blurb.font = .preferredFont(forTextStyle: .subheadline)
         blurb.textColor = .secondaryLabelColor
@@ -254,7 +272,7 @@ final class OnboardingWindowController {
         claudeCheckmark.isHidden = true
         claudeCheckmark.setAccessibilityLabel("Connected")
 
-        let titles = column([name, blurb], spacing: 2)
+        let titles = column([claudeRadio, blurb], spacing: 2)
         let head = NSStackView(views: [icon, titles, NSView(), claudeCheckmark])
         head.orientation = .horizontal
         head.spacing = 12
@@ -282,7 +300,14 @@ final class OnboardingWindowController {
         status.spacing = 6
         status.alignment = .centerY
 
-        let claudeStack = column([head, entry, status], spacing: 10)
+        claudeBody.orientation = .vertical
+        claudeBody.alignment = .leading
+        claudeBody.spacing = 10
+        claudeBody.addArrangedSubview(entry)
+        claudeBody.addArrangedSubview(status)
+        entry.widthAnchor.constraint(equalTo: claudeBody.widthAnchor).isActive = true
+
+        let claudeStack = column([head, claudeBody], spacing: 10)
         claudeStack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
         let claudeCard = card(claudeStack)
         claudeCard.setAccessibilityLabel("Claude API. Best quality, needs an API key.")
@@ -290,33 +315,138 @@ final class OnboardingWindowController {
         return column([privacy, claudeCard, makeLocalModelCard()], spacing: 16)
     }
 
-    /// FR-6.5 / Figure 3's second option: present, disabled, badged "Soon".
+    /// FR-6.5 / Figure 3's second option, now a real choice (P2-03).
+    ///
+    /// A daemon on this machine needs three answers a key does not: *where is
+    /// it*, *which model*, and *is it actually running*. So the card carries a
+    /// base-URL field, a popup filled from `GET /api/tags`, and a Test button —
+    /// and the status line names the command that fixes each failure, because
+    /// "could not connect" is not something a user can act on.
     private func makeLocalModelCard() -> NSView {
         let icon = NSImageView(image: symbol("desktopcomputer"))
-        icon.contentTintColor = .tertiaryLabelColor
+        icon.contentTintColor = .secondaryLabelColor
         icon.setAccessibilityHidden(true)
-        let name = NSTextField(labelWithString: "Local model (Ollama)")
-        name.font = .preferredFont(forTextStyle: .headline)
-        name.textColor = .secondaryLabelColor
-        let blurb = NSTextField(labelWithString: "Fully private · coming in v2")
+        ollamaRadio.font = .preferredFont(forTextStyle: .headline)
+        ollamaRadio.target = self
+        ollamaRadio.action = #selector(providerTapped(_:))
+        ollamaRadio.setAccessibilityLabel("Local model, Ollama. Fully private, runs on this Mac.")
+        let blurb = NSTextField(labelWithString: "Fully private \u{00B7} runs on this Mac")
         blurb.font = .preferredFont(forTextStyle: .subheadline)
-        blurb.textColor = .tertiaryLabelColor
+        blurb.textColor = .secondaryLabelColor
+        ollamaCheckmark.image = symbol("checkmark.circle.fill")
+        ollamaCheckmark.contentTintColor = .systemGreen
+        ollamaCheckmark.isHidden = true
+        ollamaCheckmark.setAccessibilityLabel("Connected")
 
-        let badge = BadgeLabel(text: "Soon")
+        let head = NSStackView(views: [
+            icon, column([ollamaRadio, blurb], spacing: 2), NSView(), ollamaCheckmark,
+        ])
+        head.orientation = .horizontal
+        head.spacing = 12
+        head.alignment = .centerY
 
-        let row = NSStackView(views: [icon, column([name, blurb], spacing: 2), NSView(), badge])
-        row.orientation = .horizontal
-        row.spacing = 12
-        row.alignment = .centerY
-        row.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        // — where
+        let urlLabel = NSTextField(labelWithString: "Address")
+        urlLabel.font = .preferredFont(forTextStyle: .callout)
+        urlLabel.textColor = .secondaryLabelColor
+        ollamaURLField.placeholderString = OllamaSetupModel.defaultBaseURLText
+        ollamaURLField.delegate = urlFieldDelegate
+        ollamaURLField.target = self
+        ollamaURLField.action = #selector(testOllamaTapped)
+        ollamaURLField.setAccessibilityLabel("Ollama address")
+        ollamaURLField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let urlRow = NSStackView(views: [urlLabel, ollamaURLField])
+        urlRow.orientation = .horizontal
+        urlRow.spacing = 8
+        urlRow.alignment = .firstBaseline
 
-        let boxed = card(row, emphasis: 0.25)
-        boxed.setAccessibilityElement(true)
+        // — which model
+        let modelLabel = NSTextField(labelWithString: "Model")
+        modelLabel.font = .preferredFont(forTextStyle: .callout)
+        modelLabel.textColor = .secondaryLabelColor
+        ollamaModelPopUp.target = self
+        ollamaModelPopUp.action = #selector(ollamaModelChanged)
+        ollamaModelPopUp.setAccessibilityLabel("Ollama model")
+        ollamaRefreshButton.target = self
+        ollamaRefreshButton.action = #selector(refreshOllamaTapped)
+        ollamaRefreshButton.bezelStyle = .rounded
+        ollamaRefreshButton.setAccessibilityLabel("Refresh the list of local models")
+        let modelRow = NSStackView(views: [modelLabel, ollamaModelPopUp, ollamaRefreshButton, NSView()])
+        modelRow.orientation = .horizontal
+        modelRow.spacing = 8
+        modelRow.alignment = .centerY
+
+        // — is it running
+        ollamaTestButton.target = self
+        ollamaTestButton.action = #selector(testOllamaTapped)
+        ollamaTestButton.bezelStyle = .rounded
+        ollamaTestButton.setAccessibilityLabel("Test the connection to Ollama")
+        ollamaStatusIcon.setAccessibilityHidden(true)
+        ollamaStatusLabel.font = .preferredFont(forTextStyle: .callout)
+        ollamaStatusLabel.lineBreakMode = .byWordWrapping
+        ollamaStatusLabel.maximumNumberOfLines = 2
+        let testRow = NSStackView(views: [ollamaTestButton, ollamaStatusIcon, ollamaStatusLabel])
+        testRow.orientation = .horizontal
+        testRow.spacing = 8
+        testRow.alignment = .centerY
+
+        ollamaBody.orientation = .vertical
+        ollamaBody.alignment = .leading
+        ollamaBody.spacing = 8
+        for view in [urlRow, modelRow, testRow] { ollamaBody.addArrangedSubview(view) }
+
+        let stack = column([head, ollamaBody], spacing: 10)
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        let boxed = card(stack)
         boxed.setAccessibilityRole(.group)
-        boxed.setAccessibilityLabel(
-            "Local model, Ollama. Fully private, coming in version 2. Not available yet."
-        )
+        boxed.setAccessibilityLabel("Local model, Ollama. Fully private, runs on this Mac.")
         return boxed
+    }
+
+    /// Draws whichever card is selected, and the local one's live state.
+    private func renderProviderChoice() {
+        claudeRadio.state = model.provider == .claude ? .on : .off
+        ollamaRadio.state = model.provider == .ollama ? .on : .off
+        claudeBody.isHidden = model.provider != .claude
+        ollamaBody.isHidden = model.provider != .ollama
+        claudeCheckmark.isHidden = !(model.provider == .claude && model.status == .connected)
+        ollamaCheckmark.isHidden = !(model.provider == .ollama && model.ollama.isConnected)
+
+        let setup = model.ollama
+        if ollamaURLField.stringValue != setup.baseURLText {
+            ollamaURLField.stringValue = setup.baseURLText
+        }
+        ollamaTestButton.isEnabled = setup.canTest
+        ollamaRefreshButton.isEnabled = setup.canTest
+
+        // The popup always offers the selected tag, even when the daemon has
+        // not been asked yet — otherwise the default would vanish on first draw.
+        var tags = setup.availableModels
+        if !tags.contains(setup.selectedModel) { tags.insert(setup.selectedModel, at: 0) }
+        if ollamaModelPopUp.itemTitles != tags {
+            ollamaModelPopUp.removeAllItems()
+            ollamaModelPopUp.addItems(withTitles: tags)
+        }
+        ollamaModelPopUp.selectItem(withTitle: setup.selectedModel)
+
+        ollamaStatusLabel.stringValue = setup.statusMessage
+        switch setup.phase {
+        case .idle:
+            ollamaStatusIcon.image = nil
+        case .testing:
+            ollamaStatusLabel.textColor = .secondaryLabelColor
+            ollamaStatusIcon.image = symbol("ellipsis.circle")
+            ollamaStatusIcon.contentTintColor = .secondaryLabelColor
+        case .connected:
+            ollamaStatusLabel.textColor = .systemGreen
+            ollamaStatusIcon.image = symbol("checkmark.circle.fill")
+            ollamaStatusIcon.contentTintColor = .systemGreen
+        case .failed:
+            ollamaStatusLabel.textColor = .systemOrange
+            ollamaStatusIcon.image = symbol("exclamationmark.triangle.fill")
+            ollamaStatusIcon.contentTintColor = .systemOrange
+        }
+        ollamaStatusLabel.setAccessibilityLabel(ollamaStatusLabel.stringValue)
     }
 
     private func renderKeyStatus() {
@@ -389,6 +519,32 @@ final class OnboardingWindowController {
     @objc private func validateTapped() {
         model.apiKey = keyField.stringValue
         Task { await model.validateKey() }
+    }
+
+    @objc private func providerTapped(_ sender: NSButton) {
+        model.selectProvider(sender === ollamaRadio ? .ollama : .claude)
+    }
+
+    @objc private func ollamaModelChanged() {
+        guard let title = ollamaModelPopUp.titleOfSelectedItem else { return }
+        model.selectOllamaModel(title)
+    }
+
+    @objc private func refreshOllamaTapped() {
+        model.ollamaURLEdited(ollamaURLField.stringValue)
+        Task { await model.refreshOllamaModels() }
+    }
+
+    @objc private func testOllamaTapped() {
+        model.ollamaURLEdited(ollamaURLField.stringValue)
+        Task { await model.testOllama() }
+    }
+
+    /// Keeps the model's copy of the address in step with the field, so Test
+    /// enables itself as soon as the URL is one Filaway will talk to.
+    private lazy var urlFieldDelegate = KeyFieldDelegate { [weak self] text in
+        guard let self else { return }
+        model.ollamaURLEdited(text)
     }
 
     /// Keeps the model's copy of the key in step with the field, so `Validate`
@@ -465,35 +621,5 @@ final class OnboardingWindowController {
         row.setAccessibilityRole(.group)
         row.setAccessibilityLabel("\(title). \(detail)")
         return row
-    }
-}
-
-/// A small capsule label — Figure 3's "Soon".
-private final class BadgeLabel: NSView {
-    private let label = NSTextField(labelWithString: "")
-
-    init(text: String) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        label.stringValue = text
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func layout() {
-        super.layout()
-        layer?.cornerRadius = bounds.height / 2
-        layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.4).cgColor
     }
 }
