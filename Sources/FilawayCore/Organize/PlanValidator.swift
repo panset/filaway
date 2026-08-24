@@ -68,6 +68,10 @@ public enum PlanIssueKind: String, Sendable, Hashable, Codable, CaseIterable {
     /// into an addition at the destination, leaving the source note whole
     /// (P2-04, ADR-070). Always a warning.
     case repairedMerge
+    /// ``PlanRepair`` inserted the `createFolder` the model forgot: the plan
+    /// filed into a folder that does not exist and never created it — the
+    /// live `unknownFolder` failure (P2-08). Creating a folder is additive.
+    case repairedMissingFolder
 }
 
 /// One finding.

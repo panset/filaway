@@ -31,9 +31,9 @@ public enum OrganizeRequestBuilder {
     /// is a few hundred tokens; the first real-world Ollama session produced a
     /// runaway constrained generation (1,480+ tokens at ~17 tok/s) that blew
     /// the 180 s budget and lost the session. Capped, the generation either
-    /// finishes inside the budget (~60 s worst case) or truncates into a clean,
+    /// finishes inside the budget (~90 s worst case) or truncates into a clean,
     /// visible `.maxTokens` failure instead of a timeout.
-    public static let localMaxTokens = 1_024
+    public static let localMaxTokens = 1_536
 
     /// The rendered system prompt.
     public static func systemPrompt(
