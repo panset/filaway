@@ -115,17 +115,29 @@ public actor Indexer {
         public var embedBatchSize: Int
         /// Notes read per batch during a rebuild.
         public var notesPerBatch: Int
+        /// Priority the bulk work runs at (M4-07).
+        ///
+        /// A first-launch build is 50 s at 5,000 notes and 220 s at 20,000
+        /// (`docs/verification/M3-perf.md`), and it must never compete with
+        /// typing or with a ⌘K query. The debounce loop and every embedding
+        /// batch run at this priority regardless of who called in, so the
+        /// guarantee does not depend on each call site remembering to lower
+        /// itself. `.utility` maps to `QOS_CLASS_UTILITY`, which the scheduler
+        /// will preempt for anything user-initiated.
+        public var workPriority: TaskPriority
 
         public init(
             debounce: Duration = .seconds(2),
             pollInterval: Duration = .milliseconds(250),
             embedBatchSize: Int = 32,
-            notesPerBatch: Int = 64
+            notesPerBatch: Int = 64,
+            workPriority: TaskPriority = .utility
         ) {
             self.debounce = debounce
             self.pollInterval = pollInterval
             self.embedBatchSize = max(1, embedBatchSize)
             self.notesPerBatch = max(1, notesPerBatch)
+            self.workPriority = workPriority
         }
     }
 
@@ -263,7 +275,7 @@ public actor Indexer {
     /// Starts the debounce loop. Idempotent.
     public func start() {
         guard loop == nil else { return }
-        loop = Task { [weak self] in
+        loop = Task(priority: configuration.workPriority) { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 let slept = await self.tick()
@@ -375,20 +387,37 @@ public actor Indexer {
         return try await index(notes: ids, reindexing: false)
     }
 
-    /// Notes whose chunks are missing, stale, or unembedded for this model.
+    /// Notes whose chunks are missing, stale, or unembedded for this model,
+    /// **most recently modified first** (M4-07).
+    ///
+    /// Ordering is the whole point of this query on a first launch. A
+    /// 20,000-note library takes about four minutes to index, and during that
+    /// time semantic search only covers what is already embedded — so what is
+    /// embedded first decides whether the wait is felt. People search for what
+    /// they wrote last week, not for what they wrote in 2019, so `mtime DESC`
+    /// puts the useful half of the library in the index within the first
+    /// minute. Before this, the `UNION` returned rows in whatever order SQLite
+    /// found convenient (in practice `notes.id` order, i.e. random UUIDs).
+    ///
+    /// `LIMIT` now applies to the ordered set rather than to the union arms,
+    /// which is also what a caller passing `limit:` means.
     public func staleNoteIDs(limit: Int = 5_000) async throws -> [NoteID] {
         let identifier = modelID
         return try await metadata.reader.read { db in
             try String.fetchAll(db, sql: """
-                SELECT n.id FROM notes n
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM chunks c WHERE c.note_id = n.id AND c.source_hash = n.content_hash
-                )
-                UNION
-                SELECT DISTINCT c.note_id FROM chunks c
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id AND e.model_id = ?
-                )
+                SELECT stale.id FROM (
+                    SELECT n.id AS id FROM notes n
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM chunks c WHERE c.note_id = n.id AND c.source_hash = n.content_hash
+                    )
+                    UNION
+                    SELECT DISTINCT c.note_id AS id FROM chunks c
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id AND e.model_id = ?
+                    )
+                ) stale
+                JOIN notes n ON n.id = stale.id
+                ORDER BY n.mtime DESC
                 LIMIT ?
                 """, arguments: [identifier, limit])
                 .compactMap(NoteID.init)
@@ -431,6 +460,13 @@ public actor Indexer {
                 publish(reindexing
                     ? .reindexing(completed: completed, total: total)
                     : .indexing(completed: completed, total: total))
+                // M4-07: hand the actor back between notes. A 20,000-note
+                // build owns this actor for close to four minutes, and every
+                // `markDirty` an autosave sends — and every `status` the
+                // progress row reads — would otherwise queue behind the whole
+                // pass. One suspension per note costs microseconds and keeps
+                // the mailbox draining while the build runs.
+                await Task.yield()
             }
             // Notes the batch query did not return (deleted between queue and
             // read) still count as done.
@@ -601,7 +637,7 @@ public actor Indexer {
 
     private func embed(_ texts: [String]) async throws -> [[Float]] {
         guard texts.count > configuration.embedBatchSize else {
-            return try await embedder.embed(texts)
+            return try await embedBatch(texts)
         }
         var out: [[Float]] = []
         out.reserveCapacity(texts.count)
@@ -609,10 +645,25 @@ public actor Indexer {
         while offset < texts.count {
             try Task.checkCancellation()
             let slice = Array(texts[offset ..< min(offset + configuration.embedBatchSize, texts.count)])
-            out.append(contentsOf: try await embedder.embed(slice))
+            out.append(contentsOf: try await embedBatch(slice))
             offset += slice.count
         }
         return out
+    }
+
+    /// One embedder call, forced down to ``Configuration/workPriority``.
+    ///
+    /// Actor methods run at the *caller's* priority, so an indexer kicked off
+    /// from a main-actor `Task` would embed at `.userInitiated` and fight the
+    /// keystroke path for the Neural Engine. Detaching pins the QoS to the
+    /// configuration instead of to whoever happened to call in, and it cannot
+    /// deadlock because the closure touches only the (`Sendable`) embedder,
+    /// never this actor.
+    private func embedBatch(_ texts: [String]) async throws -> [[Float]] {
+        let embedder = self.embedder
+        return try await Task.detached(priority: configuration.workPriority) {
+            try await embedder.embed(texts)
+        }.value
     }
 
     /// Last-resort body read, for a note the text index has not caught up with.

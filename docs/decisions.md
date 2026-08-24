@@ -2297,4 +2297,135 @@ builds the window, and the modal crashes the scene instead of wedging it.
   The `onboarding` and `onboardingskip` phases are what catch it: `library-loaded`
   and `blank-note-ready` both fail when the scene never materialises.
 
+## ADR-062 — Typo repair reads FTS5's own term index, through a migration
+
+**Date:** 2026-08-23 · **Task:** M4-07 · **Status:** accepted
+
+**Context.** M3-07 left typo'd queries at 57% top-1 against 91% overall. A
+misspelling is invisible to FTS5 (which matches terms exactly) *and* poison to
+the embedder (WordPiece turns `crul` into subword soup that embeds nowhere near
+`curl`), so both arms fail at once. M3-07 proposed expanding rare terms "when
+the OR expression matches fewer than *k* notes".
+
+**Decision.** `Search/TypoExpansion.swift`, on by default
+(`HybridSearch.Options.typoExpansion`). Three departures from the proposal, each
+because the proposal did not survive contact with the query set:
+
+1. **The trigger is per term, not per result count.** *"the crul command for
+   stagign docs"* contains `command` and `docs`, which match hundreds of notes,
+   so a result-count trigger never fires. The gate is instead **document
+   frequency zero**: a term the library has never indexed cannot contribute to
+   BM25 by construction, so replacing it can only add recall. No threshold to
+   tune, and no "did you mean" judgement to get wrong.
+2. **The vector arm gets the repair too, and it is the larger half.** FTS5
+   ignores an unknown term; an embedder ignores nothing. `Repair.rewrite(_:)`
+   substitutes the corrected word into the sentence that is embedded, while the
+   corrections join the keyword arm's `OR` *alongside* the original.
+3. **One edit, never two.** Every misspelling in the M3-07 set is a single edit
+   or transposition, so a two-edit budget buys no recall — and costs precision,
+   because a zero-frequency gate cannot tell a typo from a correctly-spelt word
+   this library happens not to contain. At two edits `"upgrading"` and
+   `"squash"` became other people's words and paraphrase fell 95% → 93%.
+
+The vocabulary is FTS5's own term index, exposed by the `v6-vocab` migration as
+`notes_vocab`, an `fts5vocab` view. **It stores nothing** — no rows, no
+triggers, no rebuild path — and it follows `notes_fts` through
+`MetadataStore.rebuild`'s drop-and-recreate because it resolves its target by
+name. It is a migration rather than a `temp.` table created on demand because
+**GRDB's reader connections run with `PRAGMA query_only = 1` and refuse DDL
+even in the temp schema**, and the query side is precisely where it is needed.
+
+Two tiers keep it off the hot path: one indexed point lookup per term on every
+query, and the flattened whole-vocabulary scan only when a query really does
+contain an unknown word — cached against `notes_generation` like
+`HybridSearch.noteMeta`. The scan itself is prefiltered by a length band and by
+`Fuzzy.signature`, so only plausible candidates reach the edit-distance matrix.
+
+**Consequences.**
+- Typo category 57% → **100%** top-1 and answer; overall positives 91% → **95%**
+  top-1, top-3 97% → **100%**, MRR 0.939 → **0.970**, answer 90% → **94%**;
+  false rejections among answerable queries 32% → 23%. Nothing regressed.
+- Query p50 13 → 14 ms on the dev corpus; **unchanged** at 20,000 notes.
+- `filaway-bench retrieval --no-typo-expansion` reproduces every M3-07 number,
+  so the A/B stays runnable.
+- Vocabulary memory is ~24 bytes/term with a 250,000-term cap (~6 MB ceiling).
+- ⌘K as-you-type is untouched: it goes through `SearchService`, not
+  `HybridSearch`.
+- `DatabaseSchema.version` is 5; a database from before this migrates on open.
+
+## ADR-063 — The indexer owns its own QoS and its own ordering
+
+**Date:** 2026-08-23 · **Task:** M4-07 · **Status:** accepted
+
+**Context.** `docs/verification/M3-perf.md` §5 recommended running the
+first-launch index at background priority and embedding recently-modified notes
+first, and placed both "at the app's call site". A 5,000-note build is 52 s and
+a 20,000-note one is 235 s, so neither is optional.
+
+**Decision.** Both live inside `Indexer`, not at the call site.
+
+- **QoS.** `Configuration.workPriority` (default `.utility`). The debounce loop
+  starts at it, and every embedder call runs on a `Task.detached` pinned to it.
+  Detaching is the point: an actor method runs at its *caller's* priority, and
+  the caller is `SemanticSearchCoordinator`, a `@MainActor` object, so a
+  call-site fix would have to be remembered by every future caller. It cannot
+  deadlock — the closure touches only the `Sendable` embedder, never the actor.
+- **Ordering.** `staleNoteIDs(limit:)` was a `UNION` with no `ORDER BY`;
+  SQLite returned rows in `notes.id` order, which is random UUIDs. It now joins
+  back to `notes` and orders by `mtime DESC`, with `LIMIT` applied to the
+  ordered set.
+- **Yields.** One `await Task.yield()` per note, so a four-minute build cannot
+  make an autosave's `markDirty` or the progress row's `status` read wait behind
+  the whole pass.
+
+**Consequences.**
+- The build is 4–7% slower (49.8 → 52.0 s at 5k, 220 → 235 s at 20k). That is
+  what the yields and the lowered priority cost.
+- What it buys, measured by `filaway-bench index --with-queries`: a concurrent
+  ⌘K search at `.userInitiated` sees p95 **24.5 ms** at 5,000 notes and
+  **78.7 ms** at 20,000 while the build runs, and never returns nothing — the
+  indexer commits per note, so results improve steadily as it goes.
+- `SemanticSearchCoordinator` still starts `catchUp()` from a main-actor `Task`.
+  That is now cosmetic rather than harmful, but the call site should say
+  `Task(priority: .utility)` so the intent is visible.
+
+## ADR-064 — The retrieval log lives outside the library, and holds queries
+
+**Date:** 2026-08-23 · **Task:** M4-11 · **Status:** accepted
+
+**Context.** Spec §8 asks for "a specific stored command found by natural
+language in under 10 seconds, ≥ 90% of the time". M3-07 answers that for a fixed
+302-note corpus; only a week of the user's own searching answers it for the
+library it is about. That needs an instrument the user can reach in one gesture
+after a search, and a read-back that turns a week of lines into two numbers.
+
+**Decision.** `Help → "Log Retrieval Outcome…"` (⌃⌥⌘L) appends one JSON object
+per line to `~/Library/Application Support/Filaway/retrieval-log.jsonl` —
+timestamp, query, found, seconds, optional remark.
+
+- **Outside the per-library folder**, deliberately. The point of the week is one
+  continuous sample; pointing the app at a different notes folder mid-week must
+  not split it in two, so the path carries no `libraryKey`.
+- **It holds queries, which are user text.** That is the measurement, and it is
+  why the file is local-only: nothing uploads it, and `Help → Export
+  diagnostics` must exclude it (NFR-4 is zero-content *telemetry*, and this is
+  not telemetry — but a diagnostics zip that carried it would make it so). Note
+  *content* never enters it.
+- **Plain AppKit `NSAlert`, not SwiftUI.** ADR-037 records what hosting an
+  `NSHostingController` in a window the scene did not create costs — an
+  AttributeGraph precondition failure that aborts the process — and this has to
+  work in sessions where the scene may never have been built.
+- **`filaway-bench retrieval-log summarize`** reports the hit rate *and* the
+  §8 success rate (found **and** inside the budget — a search that succeeds on
+  the fourth rephrasing is not a success), the median and p90 seconds, and names
+  every miss and every over-budget entry. `retrieval-log add` performs the same
+  append without a GUI session.
+
+**Consequences.**
+- The protocol, including the honesty problem (it is more tempting to log a
+  frustrating search than a smooth one), is `docs/verification/success-criteria.md`.
+- A miss that does not become a fixture in `Tests/Fixtures/queries/dev.json`
+  will happen again; the protocol says so explicitly.
+- M4-08's diagnostics export must skip `retrieval-log.jsonl`.
+
 ---

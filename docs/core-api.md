@@ -539,7 +539,7 @@ func synchronizeModel() async throws -> Bool      // model swap → re-embed
 func purge(noteID: NoteID) async throws -> Int
 var status: IndexStatus                           // .idle | .indexing(n, of:) | .reindexing
 func statusStream() -> AsyncStream<IndexStatus>
-func staleNoteIDs(limit: Int) async throws -> [NoteID]
+func staleNoteIDs(limit: Int) async throws -> [NoteID]   // most recently modified first
 func chunkCount() / func embeddingCount() async throws -> Int
 ```
 
@@ -558,6 +558,26 @@ Two things the app layer must know:
 * **Excluded folders are never indexed** (FR-4.5), and excluding a folder later
   purges what was already there. Nothing in an excluded folder can therefore
   reach a prompt through retrieval.
+
+**Scheduling (M4-07, ADR-059).** A first-launch build is 52 s at 5,000 notes and
+235 s at 20,000, so it has to be background work that nobody notices. Three
+things make it so, and all three live *inside* the actor rather than at the call
+site — an actor method runs at its **caller's** priority, and the caller is a
+`@MainActor` coordinator:
+
+* `Configuration.workPriority` (default `.utility`) is the priority the debounce
+  loop starts at, and every embedder call runs on a `Task.detached` pinned to
+  it. Detaching cannot deadlock: the closure touches only the `Sendable`
+  embedder, never the actor.
+* `staleNoteIDs(limit:)` orders by `notes.mtime DESC`, so the first minute of a
+  four-minute build covers the notes a person actually searches for.
+* One `await Task.yield()` per note, so a build that owns the actor for minutes
+  cannot make `markDirty` or a `status` read wait behind the whole pass.
+
+Measured cost: the build is 4–7% slower. Measured benefit: a concurrent ⌘K
+search sees p95 **24 ms** at 5,000 notes and **79 ms** at 20,000 while the build
+runs, and never returns nothing — the indexer commits per note, so results
+improve steadily (`filaway-bench index --with-queries`).
 
 ### `VectorStore` (M3-03)
 
@@ -614,6 +634,37 @@ month, and `"1.2.3"` is a version.
 30-day half-life, +20% ceiling), switched off entirely when a hard range
 applies, and sharpened to a 7-day curve for "recently".
 
+### `TypoExpansion` (M4-07, FR-5.1)
+
+```swift
+TypoExpansion.Vocabulary.unknownTerms(db, terms: ["crul", "curl", "docs"])
+// -> ["crul"]                                    the gate: one point lookup per term
+let vocabulary = try TypoExpansion.Vocabulary.load(db)
+vocabulary.nearest(to: "crul")                    // ["curl"]
+let repair = vocabulary.repair(["crul", "stagign"])
+repair.extraTerms                                 // -> the keyword arm's OR
+repair.rewrite("the crul command for stagign docs")
+// -> "the curl command for staging docs"         -> what the vector arm embeds
+```
+
+A misspelling is invisible to FTS5 *and* poison to the embedder — WordPiece
+turns `crul` into subword soup that embeds nowhere near `curl` — so both arms
+fail at once. The repair is deliberately narrow: **only a term whose document
+frequency is zero is touched**, because such a term cannot match anything in
+FTS5 by construction, so replacing it can only add recall. There is no threshold
+to tune. The budget is **one edit, never two**: every misspelling in the M3-07
+query set is a single edit or transposition, and a two-edit budget cannot tell a
+typo from a correctly-spelt word this library happens not to contain.
+
+The vocabulary is FTS5's own term index, read through the `notes_vocab`
+`fts5vocab` view added by the `v6-vocab` migration — no rows, no triggers, no
+storage. It is a migration rather than a `temp.` table created on demand because
+GRDB's readers run with `PRAGMA query_only = 1` and refuse DDL even in the temp
+schema. `HybridSearch` caches the flattened form against `notes_generation`, the
+way it caches `noteMeta`, and only a query that really does contain an unknown
+word pays for the scan. Full numbers and the ablation in
+`docs/verification/M4-perf.md` §6; ADR-058.
+
 ### `HybridSearch` (M3-03, FR-5.1/5.3/5.5)
 
 ```swift
@@ -631,7 +682,8 @@ struct Options { var candidateLimit = 50, chunkLimit = 20, noteLimit = 10
                  var recencyPrior = RecencyPrior.default
                  var exclusions = ExclusionFilter.none
                  var folderPath: String?
-                 var dateRange: DateRange? }          // overrides the parsed one
+                 var dateRange: DateRange?            // overrides the parsed one
+                 var typoExpansion = true }           // M4-07, see below
 
 struct SemanticResults { let query, strippedQuery: String
                          let dateRange: DateRange?
@@ -676,6 +728,10 @@ Notes for the UI layer:
   cancelled search returns an empty result, not a stale one.
 * **The keyword arm ORs its terms**, unlike `SearchService.keyword`, which ANDs
   them. A question shares only a few words with the note that answers it.
+* **Query words the library has never indexed are repaired** before either arm
+  runs (`Options.typoExpansion`, M4-07). See `TypoExpansion` below; it took the
+  benchmark's typo category from 57% to 100% top-1 and the corpus overall from
+  91% to 95%, with nothing regressing.
 * **A parsed date range filters *inside* the vector top-k**, so a search
   restricted to "yesterday" cannot come back empty because fifty newer chunks
   filled the list first.
@@ -895,6 +951,11 @@ LaunchTimer.mark(.windowVisible)  // in `windowDidBecomeVisible`
 LaunchTimer.mark(.editorReady)    // when the first note is editable
 LaunchTimer.elapsed(to: .editorReady)  // TimeInterval?
 LaunchTimer.report()                   // "processStart +0 ms, windowVisible +412 ms, …"
+
+// M4-07: free-form stages the shell has already timed itself.
+LaunchTimer.mark("dbOpen", millisecondsSinceProcessStart: 241)
+LaunchTimer.stages()                   // [(label, milliseconds)], in order
+LaunchTimer.launchStages               // the six the bench reports, in order
 ```
 
 `XCTApplicationLaunchMetric` needs Xcode (plan §8), so this is the stand-in for
@@ -902,6 +963,25 @@ the "launch-to-editable < 2 s" budget. It prints one line per mark when
 `FILAWAY_TIMING=1` and is silent otherwise. `processStart` comes from
 `kinfo_proc` unless marked explicitly, so the number includes dyld and framework
 load.
+
+**The shell's marks arrive through the labelled form.** `FilawayApp`'s
+`LaunchClock` already stamps every stage against the same kernel exec time and
+forwards each one here, so one `FILAWAY_TIMING=1` prints a parseable line per
+stage:
+
+```
+[timing] didFinishLaunching  +176 ms     dyld, AppKit, Sparkle, the onboarding gate
+[timing] windowVisible       +236 ms     the window exists
+[timing] shellAppeared       +236 ms     SwiftUI built the scene
+[timing] dbOpen              +241 ms     GRDB open + migrations, off the main thread
+[timing] libraryOpen         +374 ms     first sidebar paint — Recents and the tree
+[timing] editorReady         +374 ms     the editor takes keystrokes
+```
+
+`filaway-bench launch --library <notes> --runs 5` scrapes those out of the app's
+stdout and reports a p50 per stage; `--warm` primes the database first, which is
+the number that scales with library size. Measurements in
+`docs/verification/M4-perf.md`.
 
 ---
 
@@ -1372,6 +1452,32 @@ synthetic), lazy-loaded in 132 ms, and query p95 is 42 ms.
 
 ---
 
+## `RetrievalOutcomeLog` (M4-11, spec §8)
+
+```swift
+let log = RetrievalOutcomeLog()      // ~/Library/Application Support/Filaway/retrieval-log.jsonl
+try log.append(RetrievalOutcome(query: "the curl for staging docs",
+                                found: true, seconds: 6.5))
+let summary = RetrievalOutcomeLog.summarize(try log.readAll())
+summary.hitRate          // found at all
+summary.successRate      // found *and* under 10 s — the spec §8 criterion
+summary.medianHitSeconds
+summary.meetsSpecSection8
+```
+
+The instrument behind `Help → "Log Retrieval Outcome…"` (⌃⌥⌘L) and
+`filaway-bench retrieval-log summarize`. One JSON object per line, appended, so
+a crash mid-week costs at most the line being written.
+
+**Deliberately outside the per-library folder** — the point of the dogfood week
+is one continuous sample, and pointing the app at a different notes folder
+mid-week must not split it in two, so the path carries no `libraryKey`. It holds
+*queries*, which are user text: local only, never uploaded, and
+`Help → Export diagnostics` must exclude it. Note **content** never enters it.
+Protocol in `docs/verification/success-criteria.md`; ADR-060.
+
+---
+
 ## Benchmarking and the development corpus (M3-07, `FilawayCore/Bench`)
 
 ```swift
@@ -1395,7 +1501,8 @@ print(report.table())
 | `RetrievalReport` / `RetrievalMetrics` / `QueryOutcome` | The numbers, per category, as a table or as JSON |
 | `AnswerSelecting` | The M3-05 seam: `(query, promptChunks) async -> chunkID?` |
 | `LocalHeuristicSelector` | The FR-5.5 offline answer card: the winning note's code block |
-| `ReplaySelector` | Recorded answers from `Tests/Fixtures/ai-recordings/answer/`, falling back to the heuristic |
+| `ReplaySelector` | Recorded answers from `Tests/Fixtures/ai-recordings/search/`, falling back to the heuristic |
+| `RetrievalOutcome` / `RetrievalOutcomeLog` | M4-11's dogfood log — see below |
 
 Three things to know before using it:
 

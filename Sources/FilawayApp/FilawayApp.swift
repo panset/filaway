@@ -16,6 +16,8 @@ struct FilawayApp: App {
             AppCommands(model: model)
             // File → Import… (M4-10, FR-7.2) — present and disabled.
             ImportCommands()
+            // Help → Log Retrieval Outcome… (M4-11, spec §8 dogfood week).
+            RetrievalOutcomeCommands()
         }
 
         // Settings → General / AI / Activity, ⌘, (M2-11, FR-8.1).
@@ -253,7 +255,11 @@ enum LaunchClock {
     }()
 
     static func mark(_ label: String) {
-        marks.append((label, max(0, Date().timeIntervalSince(processStart) * 1000)))
+        let milliseconds = max(0, Date().timeIntervalSince(processStart) * 1000)
+        marks.append((label, milliseconds))
+        // M4-07: one `FILAWAY_TIMING=1` prints every stage in a form
+        // `filaway-bench launch` can parse. See `LaunchTimer`.
+        LaunchTimer.mark(label, millisecondsSinceProcessStart: milliseconds)
     }
 
     static var summary: String {

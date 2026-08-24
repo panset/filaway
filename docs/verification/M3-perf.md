@@ -4,6 +4,14 @@
 **Machine:** Apple M2, 16 GB, macOS 26.1, Swift 6.0.3, release build, warm
 compiled-model cache.
 
+> **Superseded in part by M4-07** (`docs/verification/M4-perf.md`). §5's three
+> recommendations — background QoS, most-recent-first ordering, batch yields —
+> are now code, inside `Indexer` rather than at the app's call site (ADR-059).
+> The build is 4–7% slower as a result (5k 49.8 → 52.0 s, 20k 220 → 235 s) and a
+> concurrent ⌘K search now sees p95 24 ms at 5k and 79 ms at 20k while it runs.
+> Launch timing, app RSS at scale and the thresholds where behaviour changes are
+> all measured there too.
+
 **Verdict: NFR-1 and NFR-2 are met, and the alarming M3-03 numbers were an
 artefact of the corpus they were measured on.** A 5,000-note library of
 realistic notes indexes in **50 seconds**, not 409; a 20,000-note library holds
