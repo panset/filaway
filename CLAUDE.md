@@ -21,6 +21,8 @@ natural language. Spec: `docs/spec/functional-spec.html` (v0.3). Plan of record:
 | `make bench ARGS="index --root <notes> --with-queries"` | M4-07: searches at `.userInitiated` while the index builds — the "is ⌘K usable on a first launch?" number |
 | `make bench ARGS="launch --library <notes> --runs 5"` | M4-07 NFR-1: launches `build/Filaway.app` five times and reports the p50 of each launch stage (`--warm` primes the database first). Needs `make app` |
 | `make bench ARGS="retrieval-log summarize"` | M4-11: hit rate and median seconds over the Help → Log Retrieval Outcome… dogfood log (spec §8) |
+| `make bench ARGS="ollama probe"` | P2-04: is the local daemon usable? `/api/tags`, cold vs warm latency on Filaway's **own** committed prompts (organize + answer), and the organize prompt's size against the model's context length |
+| `make bench ARGS="retrieval --embedder bge --answer ollama"` | P2-04: the answer card from a live local model over the 89-query dev set — answer top-1, p50/p95, and how many calls came back inside NFR-1's 5 s race (`--answer-model`, `--answer-timeout`, `--ollama-url`) |
 | `make app` | Release build → `build/Filaway.app`, Sparkle embedded, signed |
 | `make run` | `make app` then `open build/Filaway.app` |
 | `make dmg` | `build/Filaway-<version>.dmg` (create-dmg, hdiutil fallback) |
@@ -153,6 +155,14 @@ backend axis are independent (ADR-069). A single phase directly:
 ```
 FILAWAY_SMOKE=1 FILAWAY_NOTES_ROOT=/tmp/notes build/Filaway.app/Contents/MacOS/Filaway
 ```
+
+**`FILAWAY_SMOKE_ONLY="organize organize-auto organize-ollama"` runs just those
+phases** (P2-03) — a full run is minutes, and most changes touch one rope.
+Related environment: `FILAWAY_SMOKE_OLLAMA=1` enables the gated live phase,
+`FILAWAY_SMOKE_OLLAMA_MODEL=<tag>` says which tag the Activity row must name,
+`FILAWAY_AI_PROVIDER=ollama` forces the backend for a launch, and
+`FILAWAY_TEST_OLLAMA=1` / `FILAWAY_OLLAMA_VERBOSE=1` are the `swift test` side
+(`docs/ollama.md` § 6 is the full table).
 
 The phases drive the real objects — `AppModel`, `NoteStore`, the live
 `NSTextView` — so they cover the callback chain, autosave timing, the watcher
@@ -543,6 +553,30 @@ and the walk-throughs; read them before re-measuring anything:
   with a forced tool, Haiku latency).
 - `docs/cost.md` — **~$16/month** for 15 sessions + 30 searches a day, and the
   one unpulled lever (prompt caching would save ~30% of it).
+
+**Phase 2 is in: Filaway runs on a local model (FR-6.5, NFR-5).** Settings → AI
+and the first-run screen offer **Local model (Ollama)**; it needs no key, and
+both AI features — filing a session and ⌘K's answer card — run on the user's own
+Mac. `FilawayCore/AI/Ollama*.swift` is the provider (a forced tool becomes the
+`format` JSON-schema grammar, because Ollama has no `tool_choice` — ADR-066);
+recordings carry their provider, so one fixture directory holds both wire
+formats (ADR-067); the backend resolves `FILAWAY_AI_PROVIDER` → preference and
+is pushed at the *running* `Organizer` and `AnswerExtractor` (ADR-069). Read
+`docs/ollama.md` (setup, models, RAM, env vars) and
+`docs/verification/P2-ollama.md` (every number) before touching any of it.
+
+The one thing that needed real work is **plan quality on an 8B model**, and
+`docs/decisions.md` ADR-070 is the whole story: a small model reliably says
+"create `Commands/curl.md`" when the library already has it, and paraphrases the
+block it meant to move. Two fixes — a wire-time restatement of the rules in
+`OllamaWire.instructions(for:)` (the prompt files stay frozen and no fixture key
+moves) and `Organize/PlanRepair.swift`, two strictly *additive* rewrites run
+only for providers that opt in — took usable plans from **4/9 to 8/9** and made
+the standard organize corpus produce a card. Every repair is a
+`repairedCollision` / `repairedMerge` warning on the card and in Activity;
+nothing about Claude's path changed. `make test` still needs no daemon: the live
+suites are gated on `FILAWAY_TEST_OLLAMA=1`, and the 14 committed local
+recordings replay offline through `GoldenPipelineTests`.
 
 **M4-07's retrieval lever.** `Search/TypoExpansion.swift` repairs query words
 whose document frequency is zero, using FTS5's own term index through the new

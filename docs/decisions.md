@@ -2722,3 +2722,128 @@ work confirmed:
   unreachable daemon is a setup problem the user can fix *here*, in seconds, and
   a status line that names `ollama serve` or `ollama pull <tag>` is what makes
   that true. "Skip for now" is untouched: FR-7.1's flow never blocks.
+
+---
+
+## ADR-070 — A small model's plan is repaired, not thrown away
+
+**Context.** P2-01…03 made the local daemon a first-class provider, and the
+gated `organize-ollama` smoke phase then reached `llama3.1:8b` end to end and
+failed — not on the wire, the schema or the budget, all of which worked, but on
+**plan quality**. Measured over the nine organize goldens plus the smoke corpus
+(`FILAWAY_TEST_OLLAMA=1 swift test --filter OllamaLiveGoldenTests`), 4 of 9
+scenarios produced a plan the user could accept. The whole deficit was two
+validator errors, and neither is a filing mistake:
+
+| Error | What the model actually did |
+|---|---|
+| `titleCollision` | answered `createNote` at `Commands/curl.md` when the library it had just been shown *contains* `Commands/curl.md` — it picked the right note and the wrong verb |
+| `segmentNotFound` | answered `moveSegment` with a `segment` that is not in the source byte for byte: a dropped ```` ``` ```` fence, or two non-adjacent lines stitched together |
+
+`PlanValidator` is right to reject both — `titleCollision` is the one way a plan
+could overwrite user text (FR-4.4), and an unverifiable segment is the one way
+`moveSegment` could remove the wrong bytes. But rejecting costs the user the
+entire card, and `Organizer.repair`'s existing drop-the-bad-action pass cannot
+help when the bad action is the only one.
+
+**Decision.** Two changes, both scoped to providers that opt in, and no change
+to any prompt file (they are frozen — `docs/prompts.md`).
+
+1. **A wire-time system-prompt addendum.** `OllamaWire.instructions(for:)` gains
+   a per-tool restatement of the rules a small model breaks, phrased negatively
+   and naming the exact failure ("never `createNote` whose title and folderPath
+   name a note already in the library above"). It is appended *at wire time*, so
+   `organize.v1` is untouched, Claude never pays for it, and — because
+   `AIRequest.fixtureKey` hashes `AIRequest.system`, not the rendered body —
+   **every committed fixture keeps its key**. Worth 4/9 → 5/9 on its own.
+2. **`PlanRepair`** — two deterministic rewrites, run only when
+   `AIProviderKind.repairsPlanCollisions` (Ollama yes, Claude no):
+
+   | Before | After |
+   |---|---|
+   | `createNote` whose folder + title name an existing note | `appendToNote` to that note, same content, `+ tagNote` when it carried tags |
+   | `moveSegment` into a *new* note whose folder + title name an existing note | the same `moveSegment` into that existing note |
+   | `moveSegment` whose `segment` is not in the source verbatim | `appendToNote` (or `createNote`) at the destination — **the source keeps every byte** |
+
+   Together: 5/9 → **8/9**, and the smoke corpus proposes and applies.
+
+Three properties make this safe enough to do at all, and all three are asserted
+(`PlanRepairTests`, 600 generated plans):
+
+- **Every rewrite is additive.** The third rule in particular trades a move for
+  a copy: a merge nobody can verify would have *removed* text from the source,
+  and a repair is never allowed to guess about removal. The content written is
+  model-authored either way — that is already true of `appendToNote` and
+  `createNote` — so the downgrade adds nothing to the threat model, and
+  `OrganizationPlan.neverDeletesUserText` stays exhaustive over `PlanAction`
+  because no case was added.
+- **It only ever improves.** A plan the validator already accepts is returned
+  byte-identical; a repaired plan never gains an error kind the original did not
+  have; repairing twice is repairing once.
+- **It refuses the cases it cannot justify.** A collision against a note in an
+  excluded folder is left alone (FR-4.5 — that note is not the model's to write
+  to). A source note whose text was not loaded is *not* downgraded on suspicion,
+  because `segmentUnverified` is precisely the case the applier re-checks
+  against disk.
+
+Every rewrite is reported as a `repairedCollision` / `repairedMerge` **warning**,
+so the Figure 2a card and the Activity row say the plan was adjusted rather than
+it changing silently under the user (FR-4.3).
+
+**Consequences.**
+- Claude's behaviour is unchanged, deliberately. Sonnet does not make these
+  mistakes, and quietly repairing a frontier model's plan would hide a prompt
+  regression behind a rewrite rather than surfacing it as a failing golden.
+- The repair is *not* a substitute for the prompt work: the addendum removes the
+  mistakes it can, and the repair catches what is left. Both numbers are in
+  `docs/verification/P2-ollama.md`, before and after, per scenario.
+- One failure mode survives and is not repaired: `unknownFolder`, where the
+  model names `Commands/curl` (a *note*'s path with the extension stripped) as a
+  folder. It is one scenario in nine, and inferring "you meant the note" from a
+  folder path is a third rule with a worse ratio of guesswork to benefit. It is
+  recorded here rather than fixed.
+- `PlanIssueKind` gains two cases. Nothing switches exhaustively over it, and it
+  is `Codable` by raw value, so old Activity rows still decode.
+
+---
+
+## ADR-071 — Both providers' fixtures live in one directory; local plan quality is reported, not gated
+
+**Context.** ADR-067 left a warning: the fixture key hashes *what was asked*,
+not who was asked, so recording the same request against a second provider
+would overwrite the first's file. P2-04 had to commit a full set of real Ollama
+recordings next to the hand-authored Claude goldens.
+
+**Decision.** They coexist, and nothing about the key changed. The key hashes
+**model, system, messages, tools, toolChoice** — and the model id is in there,
+so `claude-sonnet-5` and `llama3.1:8b` hash differently for the same scenario.
+What was missing was that the golden harnesses hard-coded Sonnet; they now take
+an `AIProviderKind` and move the model with it
+(`AIProviderKind.defaultOrganizeModel`, the same switch
+`AppSettings.effectiveOrganizeModel` makes). ADR-067's overwrite hazard is real
+only when the *model id* is also the same — which is the honest reading of "one
+fixture per question".
+
+The 14 committed local recordings are asserted to be additions, not
+replacements, by `git status` at record time and by
+`AIHarnessTests.integrity`, which now checks each fixture's body against its
+**own** codec rather than `ClaudeWire`.
+
+**What the offline suite asserts about them is the pipeline, not the taste.**
+`GoldenPipelineTests` runs every scenario for every `AIProviderKind` and
+requires: the recorded wire body decodes through its own codec, the plan
+decodes, the organizer reaches one of its named outcomes, and — for a proposal —
+FR-4.4 holds and the summary is non-empty. It does **not** require
+`llama3.1:8b` to choose what Sonnet chose. Pinning an 8B model's taste would
+turn every model bump, daemon upgrade or sampler change into a red build, and
+would say nothing about whether Filaway is correct.
+
+**Consequences.**
+- Plan quality has one gate and one report. The gate is the **smoke corpus**,
+  which must produce a card, because `organize-ollama` fails 180 s at a time
+  when it does not. The report is `docs/verification/P2-ollama.md`, re-measured
+  on demand with `FILAWAY_TEST_OLLAMA=1`.
+- The FR-4.5 exclusion grep runs over the local request bodies too — a leak in a
+  second wire format would otherwise be untested.
+- `make test` still needs no daemon, no key and no network: everything above is
+  replay. The live suites are gated on `FILAWAY_TEST_OLLAMA=1`.
